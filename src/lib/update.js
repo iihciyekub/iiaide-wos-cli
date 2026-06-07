@@ -2,6 +2,20 @@ const { spawnSync } = require("node:child_process");
 
 const DEFAULT_REPOSITORY = "iihciyekub/wos-aide-cli";
 
+function resolveGitHubToken(options = {}) {
+  const env = options.env || process.env;
+  const environmentToken = String(env.GH_TOKEN || env.GITHUB_TOKEN || "").trim();
+  if (environmentToken) return environmentToken;
+
+  const run = options.run || spawnSync;
+  const result = run("gh", ["auth", "token"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (result.error || result.status !== 0) return "";
+  return String(result.stdout || "").trim();
+}
+
 function parseVersion(value) {
   const match = String(value || "").trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
   if (!match) throw new Error(`Invalid semantic version: ${value}`);
@@ -17,15 +31,23 @@ function compareVersions(left, right) {
   return 0;
 }
 
-async function fetchLatestRelease(repository = DEFAULT_REPOSITORY, request = fetch) {
+async function fetchLatestRelease(repository = DEFAULT_REPOSITORY, request = fetch, token = "") {
+  const headers = {
+    accept: "application/vnd.github+json",
+    "user-agent": "wos-aide-cli",
+    "x-github-api-version": "2022-11-28",
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
+
   const response = await request(`https://api.github.com/repos/${repository}/releases/latest`, {
-    headers: {
-      accept: "application/vnd.github+json",
-      "user-agent": "wos-aide-cli",
-      "x-github-api-version": "2022-11-28",
-    },
+    headers,
   });
   if (!response.ok) {
+    if (response.status === 401 || response.status === 403 || response.status === 404) {
+      throw new Error(
+        "Private GitHub release access failed. Run `gh auth login` or set GH_TOKEN with repository read access."
+      );
+    }
     throw new Error(`GitHub release check failed: HTTP ${response.status} ${response.statusText}`);
   }
   const release = await response.json();
@@ -50,7 +72,10 @@ function installRelease(repository, tag, run = spawnSync) {
 async function updateCli(options = {}) {
   const currentVersion = options.currentVersion;
   const repository = options.repository || DEFAULT_REPOSITORY;
-  const release = await fetchLatestRelease(repository, options.request || fetch);
+  const token = Object.hasOwn(options, "token")
+    ? options.token
+    : resolveGitHubToken({ env: options.env, run: options.authRun });
+  const release = await fetchLatestRelease(repository, options.request || fetch, token);
   const comparison = compareVersions(currentVersion, release.version);
   if (comparison >= 0) {
     return { status: "up-to-date", currentVersion, latestVersion: release.version, releaseUrl: release.url };
@@ -69,5 +94,6 @@ module.exports = {
   fetchLatestRelease,
   installRelease,
   parseVersion,
+  resolveGitHubToken,
   updateCli,
 };

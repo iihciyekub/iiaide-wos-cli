@@ -9,10 +9,13 @@
 
 ## 1. 安装
 
-直接从 GitHub Release 安装：
+这是一个私有 GitHub 项目。首先使用有仓库访问权限的 GitHub 账号登录，
+然后从私有 Release 安装：
 
 ```bash
-npm install --global github:iihciyekub/wos-aide-cli#v0.3.0
+gh auth login
+gh auth setup-git
+npm install --global github:iihciyekub/wos-aide-cli#v0.3.1
 npx playwright install chromium
 wos-aide
 ```
@@ -44,6 +47,9 @@ wos-aide --help
 wos-aide update --check
 wos-aide update
 ```
+
+私有 Release 检查会自动使用 `GH_TOKEN`、`GITHUB_TOKEN`，或
+`gh auth login` 保存的凭证。账号失去仓库权限后将无法安装或更新。
 
 ## 2. 创建独立工作目录
 

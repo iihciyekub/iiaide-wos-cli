@@ -3,6 +3,13 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.3.1 - 2026-06-07
+
+- Make the GitHub repository and all Releases private.
+- Authenticate private Release checks with `GH_TOKEN`, `GITHUB_TOKEN`, or
+  credentials from `gh auth login`.
+- Prevent accidental publication to the public npm Registry.
+
 ## 0.3.0 - 2026-06-07
 
 - Rename the project to `wos-aide-cli` and make `wos-aide` the primary command.

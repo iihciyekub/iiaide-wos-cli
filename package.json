@@ -1,6 +1,7 @@
 {
   "name": "wos-aide-cli",
-  "version": "0.3.0",
+  "version": "0.3.1",
+  "private": true,
   "description": "Task-oriented CLI for interacting with Web of Science, extracting WOS IDs and author data, and delivering reusable data packages.",
   "repository": {
     "type": "git",
@@ -26,7 +27,8 @@
     "test": "node --test",
     "verify": "npm run check && npm test",
     "help": "node bin/wos-aide.js --help",
-    "menu": "node bin/wos-aide.js menu"
+    "menu": "node bin/wos-aide.js menu",
+    "prepublishOnly": "node -e \"console.error('Publishing to the npm Registry is disabled; publish a private GitHub Release instead.'); process.exit(1)\""
   },
   "engines": {
     "node": ">=20"

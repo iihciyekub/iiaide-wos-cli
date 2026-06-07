@@ -53,10 +53,13 @@ Requirements:
 - A Playwright-supported Chromium browser
 - A valid WOS session SID for operations that interact with WOS
 
-Install directly from GitHub:
+This is a private GitHub project. Authenticate an account that has repository
+access before installing:
 
 ```bash
-npm install --global github:iihciyekub/wos-aide-cli#v0.3.0
+gh auth login
+gh auth setup-git
+npm install --global github:iihciyekub/wos-aide-cli#v0.3.1
 npx playwright install chromium
 wos-aide
 ```
@@ -103,8 +106,10 @@ wos-aide update
 ```
 
 The updater installs only published GitHub Release tags, not arbitrary changes
-from the main branch. If a release changes the Playwright version, run
-`npx playwright install chromium` after updating.
+from the main branch. Private release checks automatically use `GH_TOKEN`,
+`GITHUB_TOKEN`, or credentials from `gh auth login`. The authenticated account
+must retain access to the repository. If a release changes the Playwright
+version, run `npx playwright install chromium` after updating.
 
 ## Workspace Isolation
 
