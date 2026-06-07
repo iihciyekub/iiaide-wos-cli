@@ -3,6 +3,26 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.3.0 - 2026-06-07
+
+- Rename the project to `wos-aide-cli` and make `wos-aide` the primary command.
+- Remove the old command aliases and old CLI source entrypoints.
+- Add a dependency-free, responsive startup dashboard inspired by modern interactive CLIs.
+- Add TTY-aware spinners and progress bars for SID validation, exports, and author fetching.
+- Add CSV-to-task import for existing WOS ID lists.
+- Reframe documentation around WOS interaction and complete task-package delivery.
+- Add a complete Chinese user demo for URL/UUID and CSV workflows.
+- Remove the unused legacy `runs/` output directory convention.
+- Add `init` and `workspace` commands for explicit cwd-scoped Task workspaces.
+- Prevent invalid imports from leaving an empty Task workspace behind.
+- Redact SID values from manifests and restrict `--force` cleanup to managed Task directories.
+- Store new author checkpoint artifact paths relative to the Task for portability.
+- Allow completed author Tasks to finish locally without launching Chromium or requiring a SID.
+- Prompt securely for missing SIDs and allow expired SIDs to be replaced and revalidated immediately.
+- Add `wos-aide update` and `wos-aide update --check` using stable GitHub Releases.
+- Verify the test suite on Windows, macOS, and Linux.
+- Allow npm packaging and document GitHub checkout installation.
+
 ## 0.2.0 - 2026-06-07
 
 - Reject unsafe task IDs and malformed CLI option values.

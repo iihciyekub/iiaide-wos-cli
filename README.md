@@ -1,198 +1,272 @@
-# WOS Export Tools
+# WOS Aide CLI
 
-Standalone CLI for exporting Web of Science summary-result records through the WOS export API and extracting WOS IDs from the exported `UT` field.
+WOS Aide CLI is a task-oriented command-line tool for interacting with the
+Web of Science website and turning WOS records into reusable data packages.
 
-This project is independent of the WOS Aide Codex plugin. It only needs Node.js and Playwright.
+The npm package name is `wos-aide-cli` and its command is `wos-aide`.
 
-Current CLI version: `0.2.0`. `package.json` is the authoritative version source and
-`CHANGELOG.md` records released changes.
+It currently supports two input workflows:
+
+1. Provide a WOS summary URL or result-set UUID. The CLI downloads full-record
+   data through the WOS web export API and extracts a normalized WOS ID list.
+2. Provide an existing CSV containing WOS IDs. The CLI imports and normalizes
+   the IDs into a managed task.
+
+After either workflow creates a task, the CLI can open each WOS full-record
+page and extract author, address, affiliation, email, ResearcherID, ORCID, and
+ROR information. The complete task directory can then be archived, shared, or
+used by downstream tools.
+
+## What The Project Produces
+
+Every workflow is managed as a task under `tasks/<task-id>/`.
+
+```text
+tasks/<task-id>/
+  raw/full-record/          # raw WOS export data, when created from URL/UUID
+  data/
+    wosids.csv              # normalized one-column WOS ID list
+    wosids_detailed.csv
+    wosids.json
+    full_records.txt
+  authors/
+    raw-json/               # raw page extraction, one file per WOS ID
+    normalized-json/        # normalized author hierarchy
+    authors.csv             # expanded author/address/affiliation rows
+    authors.jsonl
+    checkpoint.json         # resume state
+    failures.json
+  logs/progress.jsonl
+  manifest.json
+  summary.json
+```
+
+The task directory is the deliverable data package. It keeps raw inputs,
+normalized outputs, progress, failures, and metadata together.
 
 ## Install
 
+Requirements:
+
+- Node.js 20+
+- npm
+- A Playwright-supported Chromium browser
+- A valid WOS session SID for operations that interact with WOS
+
+Install directly from GitHub:
+
+```bash
+npm install --global github:iihciyekub/wos-aide-cli#v0.3.0
+npx playwright install chromium
+wos-aide
+```
+
+For local development:
+
 ```bash
 npm install
+npm link
+npx playwright install chromium
 npm run verify
 ```
 
-If Playwright browsers are not already installed:
+On Linux, Chromium system dependencies may also be required:
 
 ```bash
-npx playwright install chromium
+npx playwright install --with-deps chromium
 ```
 
-## Get A SID
+Start the interactive navigator:
 
-Open a logged-in Web of Science page, then run this in DevTools Console:
+```bash
+wos-aide
+```
+
+Show scriptable commands:
+
+```bash
+wos-aide --help
+```
+
+## Update
+
+Check the latest stable GitHub Release without changing the installation:
+
+```bash
+wos-aide update --check
+```
+
+Install the latest stable release:
+
+```bash
+wos-aide update
+```
+
+The updater installs only published GitHub Release tags, not arbitrary changes
+from the main branch. If a release changes the Playwright version, run
+`npx playwright install chromium` after updating.
+
+## Workspace Isolation
+
+The default task workspace is resolved from the directory where the command is
+run, not from the CLI installation directory:
+
+```text
+<current-working-directory>/tasks/
+```
+
+Create a dedicated workspace outside the CLI source directory:
+
+```bash
+mkdir my-wos-project
+cd my-wos-project
+wos-aide init
+wos-aide workspace
+```
+
+All later commands run from `my-wos-project` use its local Task index,
+authentication config, latest-task pointer, and checkpoints. This keeps
+downloaded data separate from the CLI source code.
+
+The CLI does not search parent directories for a workspace. Run commands from
+the same workspace directory, or explicitly select one:
+
+```bash
+wos-aide list --tasks-root "/path/to/my-wos-project/tasks"
+```
+
+## Quick Start
+
+### 1. Save WOS Authentication
+
+Open a logged-in Web of Science page and run this in the browser DevTools
+Console:
 
 ```js
 window.sessionData.BasicProperties.SID
 ```
 
-Use the returned value as `--sid`. A valid SID is verified and saved to `tasks/config.json`, so later
-commands can omit `--sid` until the WOS session expires.
-
-For environments where the SID should not be stored on disk, set `WOS_SID`. The CLI checks an explicit
-`--sid` first, then `WOS_SID`, then `tasks/config.json`. Saved config files use owner-only permissions.
-
-Validate and save a SID explicitly:
+Validate and save the SID:
 
 ```bash
-node bin/wos-export-wosids.js sid --sid "YOUR_SID"
+wos-aide sid
 ```
 
-Show the installed version:
+In an interactive terminal, WOS Aide securely prompts for the SID without
+echoing it, validates it against WOS, and saves it to `tasks/config.json`.
+Commands that require WOS authentication also prompt automatically when no SID
+is available. If a saved SID has expired, the CLI asks for a replacement and
+immediately validates and saves the new value.
+
+For scripts and CI, prompts are disabled. Supply authentication explicitly:
 
 ```bash
-node bin/wos-export-wosids.js --version
+wos-aide run --sid "YOUR_SID" --uuid "<uuid>"
+WOS_SID="YOUR_SID" wos-aide authors --task "demo-search"
 ```
 
-## Export By Summary URL
+SID sources are checked in this order: explicit `--sid`, `WOS_SID`
+environment variable, then `tasks/config.json`.
+
+### 2A. Create A Task From A WOS URL
 
 ```bash
-node bin/wos-export-wosids.js \
-  run \
-  --url "https://www.webofscience.com/wos/woscc/summary/c9e46227-d7e5-40ec-9ee4-df8c4d5e832f-01b7d4b7be/relevance/1" \
-  --task-label "IJIR publication title"
+wos-aide run \
+  --url "https://www.webofscience.com/wos/woscc/summary/<uuid>/relevance/1" \
+  --task "demo-search" \
+  --task-label "Demo WOS search"
 ```
 
-## Export By UUID
+The CLI downloads field-tagged full records and generates
+`tasks/demo-search/data/wosids.csv`.
+
+### 2B. Create A Task From A WOS UUID
 
 ```bash
-node bin/wos-export-wosids.js \
-  run \
-  --uuid "c9e46227-d7e5-40ec-9ee4-df8c4d5e832f-01b7d4b7be"
+wos-aide run \
+  --uuid "<wos-result-set-uuid>" \
+  --task "demo-uuid"
 ```
 
-## Task Management
+### 2C. Create A Task From An Existing WOS ID CSV
 
-Every export is a task. By default tasks are stored in `./tasks`, and each task has its own raw downloads, derived data, logs, manifest, and summary. If `--task` is omitted, the task id is the creation timestamp, for example `20260606_193742_123`.
+The CSV may contain a `wosid` or `UT` column. If neither exists, the first
+column is used.
+
+```csv
+wosid
+WOS:000123456700001
+WOS:000123456700002
+```
+
+Import and normalize it:
 
 ```bash
-node bin/wos-export-wosids.js list
-node bin/wos-export-wosids.js latest
-node bin/wos-export-wosids.js show --latest
-node bin/wos-export-wosids.js path --task "20260606_112851_c9e46227-d"
-node bin/wos-export-wosids.js validate --latest
+wos-aide import \
+  --csv "./input/wosids.csv" \
+  --task "demo-csv" \
+  --task-label "Imported WOS IDs"
 ```
 
-Use a stable task id when you want to rerun or switch predictably:
+### 3. Extract Author Information
 
 ```bash
-node bin/wos-export-wosids.js run \
-  --uuid "c9e46227-d7e5-40ec-9ee4-df8c4d5e832f-01b7d4b7be" \
-  --task "ijir-title-search" \
-  --force
+wos-aide authors --task "demo-search" --concurrency 3
 ```
 
-For `run`, `--force` starts a clean export and removes the CLI-managed contents of the prior task unless
-`--reuse-raw` is also supplied. Unrelated files in a custom `--out-dir` are preserved. `--reuse-raw`
-only accepts batches matching the requested UUID and rejects overlapping batch ranges.
-For safety, the CLI refuses to clean a custom non-empty output directory unless it contains a manifest
-created by this CLI.
-
-## Task Directory
-
-When `--out-dir` is not provided, the CLI creates:
-
-```text
-tasks/<task-id>/
-  raw/full-record/
-    <uuid>_1_200.txt
-    <uuid>_201_400.txt
-  data/
-    wosids.csv
-    wosids_detailed.csv
-    wosids.json
-    full_records.txt
-  authors/
-    raw-json/
-    normalized-json/
-    authors.csv
-    authors.jsonl
-    checkpoint.json
-    failures.json
-  logs/
-    progress.jsonl
-  manifest.json
-  summary.json
-```
-
-`raw/full-record/` is the downloaded literature data from the WOS `saveToFieldTagged` export API. `data/wosids.csv` is the one-column CSV for downstream tools.
-
-## Rebuild From Raw Files
-
-If raw batches already exist and you only want to regenerate CSV/JSON:
-
-```bash
-node bin/wos-export-wosids.js \
-  run \
-  --uuid "c9e46227-d7e5-40ec-9ee4-df8c4d5e832f-01b7d4b7be" \
-  --task "ijir-title-search" \
-  --reuse-raw \
-  --force
-```
-
-## Fetch Author Information
-
-After a task has `data/wosids.csv`, fetch author details for every WOS ID:
-
-```bash
-node bin/wos-export-wosids.js authors \
-  --task "ijir-title-search" \
-  --concurrency 3
-```
-
-The author stage is checkpointed. Completed WOS IDs are skipped by default, so rerunning the same command continues from the last incomplete record.
+The author stage is checkpointed. Running the same command again skips
+completed WOS IDs and continues incomplete work.
 
 Useful options:
 
-```bash
---limit 20          # debug first 20 selected WOS IDs
---from-index 101    # start from 1-based WOSID index
---retry-failed      # retry failed records
---failed-only       # only process failed records
---force             # refetch even completed records
---cooldown-ms 500   # delay between records
-```
-
-Author outputs:
-
 ```text
-tasks/<task-id>/authors/
-  raw-json/                 # one raw page extraction JSON per WOSID
-  normalized-json/          # one normalized JSON per WOSID
-  authors.csv               # aggregate, one author-affiliation record per row
-  authors.jsonl             # aggregate, one author-affiliation record per line
-  checkpoint.json
-  failures.json
+--limit 20          Process only the first 20 selected WOS IDs
+--from-index 101    Start from the 101st WOS ID
+--retry-failed      Retry previously failed records
+--failed-only       Process only failed records
+--force             Refetch completed records
+--cooldown-ms 500   Delay between records
 ```
 
-`normalized-json/<WOSID>.json` keeps the hierarchy as `author -> addressDetails[] -> affiliations[]`.
-`authors.csv` expands that hierarchy into one author-address-affiliation record per row. The singular
-columns `authorAddressIndex`, `addressNumber`, `address`, `authorInstitutionIndex`, `affiliation`, and
-`rorId` describe the expanded row. The old combined `addresses`, `affiliations`, and `rorIds` fields are
-kept only in normalized JSON for compatibility and are not exported to the aggregate CSV.
-
-Rebuild normalized JSON and aggregate files from existing raw JSON without opening WOS:
+### 4. Validate And Deliver The Task
 
 ```bash
-node bin/wos-export-wosids.js authors \
-  --task "ijir-title-search" \
-  --rebuild-only
+wos-aide validate --task "demo-search"
+wos-aide path --task "demo-search"
 ```
 
-Validate a task:
+When validation succeeds, the returned task directory can be delivered as a
+complete data package.
+
+## Task Management
 
 ```bash
-node bin/wos-export-wosids.js validate --task "ijir-title-search"
+wos-aide list
+wos-aide workspace
+wos-aide latest
+wos-aide show --latest
+wos-aide path --task "demo-search"
+wos-aide validate --task "demo-search"
 ```
 
-## Notes
+Use a stable `--task` name for work that may be resumed or shared. Use
+`--force` only when intentionally replacing CLI-managed task outputs.
 
-- The CLI does not scrape result pages one by one.
-- It opens WOS only to validate the SID and read the summary UUID/count.
-- It downloads records through the same WOS export endpoint used by the web app:
-  `/api/wosnx/indic/export/saveToFile`
-- WOS IDs are parsed from field-tagged full records, specifically the `UT` field.
-- `validate` is read-only and does not create missing task directories.
-- `runs/` is a legacy output location. New work should use `tasks/`.
+## Documentation
+
+- [User Demo](docs/demo.md): complete Chinese walkthrough for URL/UUID and CSV workflows
+- [Workflow And Data Model](docs/workflow.md): technical workflow, task lifecycle, and output definitions
+- [Changelog](CHANGELOG.md): released and unreleased changes
+
+## Current Scope
+
+- The CLI interacts with WOS using a valid user session. It does not perform
+  account login or bypass WOS authentication.
+- URL/UUID exports use the WOS web export endpoint instead of scrolling the
+  virtualized result list.
+- Author extraction opens WOS full-record pages because the required author
+  hierarchy is presented there.
+- Imported CSV tasks do not contain raw WOS full-record export files until
+  another command explicitly adds them.
+- WOS page structure and export behavior may change, so task logs, raw JSON,
+  checkpoints, and validation results are retained for troubleshooting.

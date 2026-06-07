@@ -1,38 +1,68 @@
-# Workflow
+# Workflow And Data Model
 
-## Inputs
+## Product Model
 
-The CLI accepts either:
+WOS Aide CLI is built around tasks rather than isolated command outputs.
 
-- a WOS summary URL
-- a WOS result-set UUID
+A task represents one complete WOS data-processing job:
 
-It also requires a current SID from an authenticated WOS browser session.
-The SID may be supplied through `--sid`, `WOS_SID`, or the owner-readable `tasks/config.json`.
+```text
+input -> normalized WOS IDs -> author extraction -> validated task package
+```
 
-## Process
+Inputs currently supported:
 
-1. Launch Chromium with Playwright.
-2. Open WOS with `?Init=Yes&SrcApp=CR&SID=<SID>`.
-3. Verify `window.sessionData.BasicProperties.SID` matches the input SID.
-4. Open the summary URL.
-5. Read `div[data-ta="search-info"]`:
-   - `data-ta-search-info-qid` as UUID
-   - `data-ta-search-info-count` as expected record count
-6. Call WOS export API in batches:
-   - action: `saveToFieldTagged`
-   - filters: `fullRecord`
-   - view: `summary`
-   - markFrom / markTo for record ranges
-7. Save each raw export batch under `raw/full-record/`.
-8. Parse `UT` lines from the raw field-tagged records.
-9. Write `wosids.csv`, `wosids_detailed.csv`, `wosids.json`, `full_records.txt`, and run metadata.
+- WOS summary URL
+- WOS result-set UUID
+- Existing CSV containing WOS IDs
 
-## Author Stage
+All input methods converge on the same normalized file:
 
-The `authors` command reads `data/wosids.csv` from a task and opens each WOS full-record page.
+```text
+tasks/<task-id>/data/wosids.csv
+```
 
-For every WOS ID it writes:
+This allows later commands to work independently of how the WOS IDs were
+obtained.
+
+## URL And UUID Workflow
+
+The `run` command:
+
+1. Launches Chromium through Playwright.
+2. Validates the supplied or saved WOS SID.
+3. Opens the WOS summary page.
+4. Reads the result-set UUID and expected record count.
+5. Calls the WOS `saveToFieldTagged` web export endpoint in batches.
+6. Stores every raw batch under `raw/full-record/`.
+7. Parses the `UT` field into normalized WOS IDs.
+8. Writes normalized data files, metadata, logs, and a summary.
+
+This is more reliable than scrolling the result list because WOS result pages
+are virtualized and may not render every card at once.
+
+## CSV Import Workflow
+
+The `import --csv` command creates the same managed task structure without
+calling WOS.
+
+CSV rules:
+
+- A column named `wosid`, `wos_id`, `wos-id`, or `UT` is preferred.
+- If no recognized header exists, the first column is used.
+- WOS IDs are normalized to uppercase.
+- Invalid values are ignored.
+- Duplicate WOS IDs are removed while preserving input order.
+- Import fails when no valid `WOS:<id>` values are found.
+
+The imported task can immediately be passed to `authors`.
+
+## Author Workflow
+
+The `authors` command reads `data/wosids.csv` and opens each WOS full-record
+page.
+
+For every successfully processed WOS ID it writes:
 
 ```text
 authors/raw-json/<WOSID>.json
@@ -48,81 +78,120 @@ authors/authors.csv
 authors/authors.jsonl
 ```
 
-`normalized-json/<WOSID>.json` keeps the nested structure as `author -> addressDetails[] -> affiliations[]`.
-`authors.csv` and `authors.jsonl` are expanded aggregate files: when one author has multiple addresses or
-multiple institutions under an address, the author is written as multiple author-address-affiliation rows.
-Addresses without affiliation details are still kept as rows with empty `affiliation` and `rorId`.
+The normalized structure preserves:
 
-Default resume behavior:
-
-- completed records are skipped
-- failed records are skipped unless `--retry-failed` or `--failed-only` is used
-- `--force` refetches records even if they are completed
-- checkpoint and per-record JSON are written immediately after each record
-
-To rebuild normalized JSON and aggregate CSV/JSONL from existing raw JSON:
-
-```bash
-node bin/wos-export-wosids.js authors \
-  --task <task-id> \
-  --rebuild-only
-```
-- aggregate CSV/JSONL are regenerated at the end of each run
-
-Example:
-
-```bash
-node bin/wos-export-wosids.js authors \
-  --task "ijir-title-search" \
-  --concurrency 3
+```text
+record -> authors[] -> addressDetails[] -> affiliations[]
 ```
 
-## Why This Is More Stable Than Page Scraping
+The aggregate CSV and JSONL expand this hierarchy into one row per
+author/address/affiliation relationship.
 
-The result list UI is virtualized and can miss cards while scrolling. The export endpoint returns the field-tagged records by record range, so it is not sensitive to page rendering, scroll position, or card visibility.
+Resume behavior:
 
-## Directory Policy
+- Completed records are skipped.
+- Failed records are skipped unless `--retry-failed` or `--failed-only` is used.
+- `--force` refetches completed records.
+- Checkpoint and per-record JSON files are written during processing.
+- Aggregate CSV and JSONL files are regenerated at the end.
 
-Use the default `./tasks` for normal runs. The CLI creates one task directory per export and never overwrites prior results unless `--force` is used. The default task id is the creation timestamp, such as `20260606_193742_123`.
+## Task Lifecycle
 
-Use `--task <task-id>` when you want a stable, reusable task name. This is useful for switching between searches or regenerating outputs from existing raw downloads.
+Typical task states:
 
-Use `--out-dir` only when you need a fixed absolute path. If the directory already has files, pass `--force`.
+```text
+created/importing/running
+completed/incomplete/failed
+authors-running
+authors-completed/authors-incomplete
+```
 
-Use `--reuse-raw` when raw batches already exist and you want to regenerate derived CSV/JSON without calling WOS again.
-Raw batches are filtered by result-set UUID. Overlapping ranges are rejected instead of being silently merged.
-
-For export runs, `--force` removes the existing CLI-managed task contents before downloading fresh data,
-while preserving unrelated files in a custom output directory. Combining `--force --reuse-raw` preserves
-the raw directory and rebuilds derived files from it.
-
-## Task Index
-
-The CLI maintains:
+The task index is stored in:
 
 ```text
 tasks/index.json
 tasks/latest
 ```
 
-Commands:
+Task commands:
 
 ```bash
-node bin/wos-export-wosids.js list
-node bin/wos-export-wosids.js latest
-node bin/wos-export-wosids.js show --latest
-node bin/wos-export-wosids.js path --task <task-id>
-node bin/wos-export-wosids.js validate --task <task-id>
+wos-aide list
+wos-aide latest
+wos-aide show --latest
+wos-aide path --task <task-id>
+wos-aide validate --task <task-id>
 ```
 
-`validate` is a read-only operation. Task index entries created by version `0.2.0` and later use paths
-relative to the tasks root when possible, so a project directory can be moved without invalidating them.
+## Task Validation
 
-## Development
+`validate` is read-only.
 
-```bash
-npm run verify
-node bin/wos-export-wosids.js --version
+For URL/UUID tasks it checks:
+
+- manifest and summary files
+- normalized WOS ID outputs
+- expected and actual WOS ID counts
+- raw WOS export batches
+- completed author checkpoint entries and their JSON files
+- aggregate author row count
+
+For imported CSV tasks, raw WOS export batches are not required.
+
+## Directory And Replacement Policy
+
+Normal work should use the default `./tasks` directory.
+
+- `./tasks` is relative to the current working directory, not the installed CLI.
+- `wos-aide init` explicitly initializes a workspace.
+- `wos-aide workspace` shows the active workspace and latest Task.
+- The CLI does not search parent directories for a workspace.
+- `--tasks-root <dir>` explicitly selects a Task workspace from any directory.
+- `--task <id>` creates a stable, reusable task name.
+- Without `--task`, a timestamp-based task ID is generated.
+- `--out-dir` overrides the task directory.
+- `--force` permits replacement of CLI-managed task outputs.
+- The CLI refuses to clean any directory without a `wos-aide` manifest.
+- `run --reuse-raw --force` preserves raw WOS batches and rebuilds derived files.
+
+## Authentication
+
+Commands that interact with WOS require a current SID:
+
+```text
+explicit --sid -> WOS_SID -> tasks/config.json
 ```
 
-The release version is maintained in `package.json` and documented in `CHANGELOG.md`.
+The CLI validates the SID against WOS before use. In an interactive terminal,
+missing SIDs are requested with hidden input. If validation reports an expired
+or invalid SID, the user can enter a replacement which is immediately
+revalidated and saved. Non-interactive environments never prompt and must use
+`--sid`, `WOS_SID`, or an existing config.
+
+The CLI does not log in to WOS or manage user account credentials.
+
+## Extension Direction
+
+New WOS commands should consume or enrich the same task package instead of
+creating unrelated output folders. Suitable future stages include:
+
+- cited-reference extraction
+- funding and organization normalization
+- journal and category enrichment
+- citation metrics snapshots
+- task archive/export commands
+- machine-readable task reports
+
+Each new stage should retain raw inputs, normalized outputs, checkpoint state,
+failures, and validation rules.
+
+## Updates
+
+`wos-aide update --check` queries the latest stable GitHub Release.
+`wos-aide update` installs that exact release tag globally through npm:
+
+```text
+github:iihciyekub/wos-aide-cli#<release-tag>
+```
+
+The updater does not install unreleased commits from the default branch.

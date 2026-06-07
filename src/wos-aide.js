@@ -2,6 +2,9 @@ const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
 const { readJson, writeFileAtomic, writeJson } = require("./lib/io");
+const { interactiveArgs, promptSid } = require("./lib/interactive");
+const { createProgress, createSpinner, isInteractive } = require("./lib/terminal");
+const { updateCli } = require("./lib/update");
 const { version: VERSION } = require("../package.json");
 
 const DEFAULT_BATCH_SIZE = 200;
@@ -11,23 +14,29 @@ const DEFAULT_BASE_URL = "https://www.webofscience.com";
 function usage() {
   return `
 Usage:
-  wos-export-wosids run [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
-  wos-export-wosids [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
-  wos-export-wosids list [--tasks-root <dir>]
-  wos-export-wosids show (--task <task-id> | --latest) [--tasks-root <dir>]
-  wos-export-wosids path (--task <task-id> | --latest) [--tasks-root <dir>]
-  wos-export-wosids validate (--task <task-id> | --latest) [--tasks-root <dir>]
-  wos-export-wosids sid [--sid <SID>] [--tasks-root <dir>] [--base-url <url>] [--headed]
-  wos-export-wosids authors [--sid <SID>] (--task <task-id> | --latest) [options]
-  wos-export-wosids authors --rebuild-only (--task <task-id> | --latest) [--tasks-root <dir>]
+  wos-aide menu
+  wos-aide init [--tasks-root <dir>]
+  wos-aide workspace [--tasks-root <dir>]
+  wos-aide update [--check]
+  wos-aide run [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
+  wos-aide [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
+  wos-aide import --csv <wosids.csv> [--task <task-id>] [options]
+  wos-aide list [--tasks-root <dir>]
+  wos-aide show (--task <task-id> | --latest) [--tasks-root <dir>]
+  wos-aide path (--task <task-id> | --latest) [--tasks-root <dir>]
+  wos-aide validate (--task <task-id> | --latest) [--tasks-root <dir>]
+  wos-aide sid [--sid <SID>] [--tasks-root <dir>] [--base-url <url>] [--headed]
+  wos-aide authors [--sid <SID>] (--task <task-id> | --latest) [options]
+  wos-aide authors --rebuild-only (--task <task-id> | --latest) [--tasks-root <dir>]
 
 Inputs:
-  --sid <SID>             Web of Science SID. Valid SIDs are saved to ./tasks/config.json
+  --sid <SID>             Web of Science SID. Interactive commands prompt when missing or expired
   --url <summary-url>     WOS summary URL
   --uuid <uuid>           WOS result-set UUID; used when --url is not provided
+  --csv <file>            Existing CSV containing a wosid/UT column or WOS IDs in its first column
 
 Output management:
-  --task <task-id>        Stable task id. If omitted, creates <timestamp>_<uuid-short>
+  --task <task-id>        Stable task id. If omitted, creates a timestamp-based task id
   --task-label <label>    Human label stored in task metadata
   --tasks-root <dir>      Parent directory for tasks. Default: ./tasks
   --out-dir <dir>         Exact task directory override
@@ -42,6 +51,7 @@ Export options:
   --headed                Show browser instead of headless mode
   --version               Show CLI version
   --help                  Show this help
+  --check                 Check for an update without installing it
 
 Author options:
   --concurrency <n>       Parallel full-record pages. Default: 2
@@ -79,6 +89,7 @@ function parseArgs(argv) {
     sidSource: "",
     url: "",
     uuid: "",
+    csvPath: "",
     taskId: "",
     taskLabel: "",
     outDir: "",
@@ -97,6 +108,7 @@ function parseArgs(argv) {
     failedOnly: false,
     rebuildOnly: false,
     cooldownMs: 250,
+    checkOnly: false,
     help: false,
     version: false,
   };
@@ -117,6 +129,7 @@ function parseArgs(argv) {
     }
     else if (arg === "--url") args.url = readValue(arg, i++);
     else if (arg === "--uuid") args.uuid = readValue(arg, i++);
+    else if (arg === "--csv") args.csvPath = readValue(arg, i++);
     else if (arg === "--task") args.taskId = normalizeTaskId(readValue(arg, i++));
     else if (arg === "--latest") args.latest = true;
     else if (arg === "--task-label" || arg === "--label") args.taskLabel = readValue(arg, i++);
@@ -136,6 +149,7 @@ function parseArgs(argv) {
     else if (arg === "--failed-only") args.failedOnly = true;
     else if (arg === "--rebuild-only") args.rebuildOnly = true;
     else if (arg === "--cooldown-ms") args.cooldownMs = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--check") args.checkOnly = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -149,7 +163,9 @@ function parseArgs(argv) {
   assertIntegerRange("--from-index", args.fromIndex, 1);
   assertIntegerRange("--cooldown-ms", args.cooldownMs, 0);
   args.tasksRoot = path.resolve(args.tasksRoot);
+  if (args.csvPath) args.csvPath = path.resolve(args.csvPath);
   if (!args.taskId && args.uuid) args.taskId = makeTaskId();
+  if (!args.taskId && command === "import" && args.csvPath) args.taskId = makeTaskId();
   if (args.outDir) {
     args.outDir = path.resolve(args.outDir);
   } else if (args.taskId) {
@@ -208,7 +224,11 @@ function makeTaskId(date = new Date()) {
 function normalizeTaskId(value) {
   const raw = String(value || "").trim();
   if (!raw) throw new Error("Task id must not be empty");
-  const taskId = safeFilePart(raw).replace(/:+/g, "-").slice(0, 120);
+  const sanitized = raw
+    .replace(/[^A-Za-z0-9_.:-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (!sanitized) throw new Error(`Invalid task id: ${raw}`);
+  const taskId = sanitized.replace(/:+/g, "-").slice(0, 120);
   if (taskId === "." || taskId === "..") throw new Error(`Invalid task id: ${raw}`);
   return taskId;
 }
@@ -290,9 +310,53 @@ function loadSavedSid(args) {
   return args.sid;
 }
 
+function canPromptForSid() {
+  return process.stdin.isTTY && isInteractive(process.stdout);
+}
+
+async function ensureSid(args, message = "Enter a current WOS SID", prompt = promptSid, canPrompt = canPromptForSid) {
+  loadSavedSid(args);
+  if (args.sid) return args.sid;
+  if (!canPrompt()) {
+    throw new Error(`Missing SID. Pass --sid, set WOS_SID, or run: wos-aide sid`);
+  }
+  const sid = await prompt(message);
+  if (!sid) throw new Error("SID must not be empty");
+  args.sid = sid;
+  args.sidSource = "prompt";
+  return sid;
+}
+
 function writeTaskIndex(tasksRoot, index) {
   fs.mkdirSync(tasksRoot, { recursive: true });
   writeJson(taskIndexPath(tasksRoot), index, { backup: true });
+}
+
+function initializeWorkspace(args) {
+  const indexPath = taskIndexPath(args.tasksRoot);
+  const initialized = !fs.existsSync(indexPath);
+  fs.mkdirSync(args.tasksRoot, { recursive: true });
+  if (!fs.existsSync(indexPath)) writeJson(indexPath, { version: 1, tasks: [] });
+  return {
+    ok: true,
+    initialized,
+    cwd: process.cwd(),
+    tasksRoot: args.tasksRoot,
+    index: indexPath,
+  };
+}
+
+function workspaceStatus(args) {
+  const index = readTaskIndex(args.tasksRoot);
+  const tasks = Array.isArray(index.tasks) ? index.tasks : [];
+  return {
+    initialized: fs.existsSync(args.tasksRoot) && fs.existsSync(taskIndexPath(args.tasksRoot)),
+    cwd: process.cwd(),
+    tasksRoot: args.tasksRoot,
+    taskCount: tasks.length,
+    latestTask: readLatestTaskId(args.tasksRoot) || "",
+    hasSavedSid: Boolean(readConfig(args.tasksRoot).sid),
+  };
 }
 
 function upsertTaskIndex(args, patch = {}) {
@@ -303,8 +367,8 @@ function upsertTaskIndex(args, patch = {}) {
   const entry = {
     taskId: args.taskId,
     label: args.taskLabel || existing?.label || "",
-    uuid: patch.uuid || args.uuid || existing?.uuid || "",
-    url: patch.url || args.url || existing?.url || "",
+    uuid: patch.uuid !== undefined ? patch.uuid : (args.uuid || existing?.uuid || ""),
+    url: patch.url !== undefined ? patch.url : (args.url || existing?.url || ""),
     sortBy: args.sortBy,
     taskDir: storedTaskDirectory(args.tasksRoot, args.outDir),
     status: patch.status || existing?.status || "created",
@@ -384,12 +448,9 @@ function createRunLayout(args) {
   return paths;
 }
 
-function cleanRunLayout(paths, tasksRoot) {
-  const relative = path.relative(path.resolve(tasksRoot), path.resolve(paths.taskDir));
-  const isTaskDirectory = relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+function cleanRunLayout(paths) {
   const manifest = readJson(paths.manifest, null);
-  const isManagedDirectory = manifest?.command === "wos-export-wosids";
-  if (!isTaskDirectory && !isManagedDirectory) {
+  if (manifest?.command !== "wos-aide") {
     throw new Error(`Refusing to clean unmanaged output directory: ${paths.taskDir}`);
   }
   for (const directory of [path.dirname(paths.rawDir), paths.dataDir, paths.authorsDir, paths.logsDir]) {
@@ -398,6 +459,13 @@ function cleanRunLayout(paths, tasksRoot) {
   for (const filePath of [paths.manifest, paths.summary]) {
     fs.rmSync(filePath, { force: true });
   }
+}
+
+function manifestArgs(args) {
+  return {
+    ...args,
+    sid: args.sid ? "[redacted]" : "",
+  };
 }
 
 function appendProgress(paths, event) {
@@ -440,14 +508,57 @@ function safeWosIdFileName(wosid) {
 }
 
 function readWosIdsCsv(filePath) {
-  const text = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  if (!lines.length) return [];
-  const start = /^wosid$/i.test(lines[0].replace(/^"|"$/g, "")) ? 1 : 0;
-  return lines.slice(start).map((line) => {
-    const cell = line.split(",")[0].replace(/^"|"$/g, "").trim();
-    return cell;
-  }).filter(Boolean);
+  const rows = parseCsv(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+  if (!rows.length) return [];
+  const headerIndex = rows[0].findIndex((cell) => /^(wos[\s_-]*id|ut)$/i.test(cell.trim()));
+  const start = headerIndex >= 0 ? 1 : 0;
+  const columnIndex = headerIndex >= 0 ? headerIndex : 0;
+  const seen = new Set();
+  return rows.slice(start).map((row) => {
+    const match = String(row[columnIndex] || "").match(/WOS:[A-Z0-9]+/i);
+    return match ? match[0].toUpperCase() : "";
+  }).filter((wosid) => {
+    if (!wosid || seen.has(wosid)) return false;
+    seen.add(wosid);
+    return true;
+  });
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  const input = String(text || "");
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+    if (quoted) {
+      if (char === '"' && input[index + 1] === '"') {
+        cell += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+    } else if (char === '"') {
+      quoted = true;
+    } else if (char === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n" || char === "\r") {
+      if (char === "\r" && input[index + 1] === "\n") index += 1;
+      row.push(cell);
+      if (row.some((value) => value.trim())) rows.push(row);
+      row = [];
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+  row.push(cell);
+  if (row.some((value) => value.trim())) rows.push(row);
+  return rows;
 }
 
 function emptyAuthorCheckpoint() {
@@ -482,6 +593,15 @@ function rawAuthorJsonPath(paths, wosid) {
 
 function normalizedAuthorJsonPath(paths, wosid) {
   return path.join(paths.authorNormalizedJsonDir, safeWosIdFileName(wosid));
+}
+
+function storedArtifactPath(paths, filePath) {
+  const relative = path.relative(paths.taskDir, filePath);
+  return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : filePath;
+}
+
+function resolvedArtifactPath(paths, filePath) {
+  return path.isAbsolute(filePath) ? filePath : path.resolve(paths.taskDir, filePath);
 }
 
 function splitAuthorField(value, delimiterPattern) {
@@ -731,7 +851,7 @@ function writeOutputs(paths, rows, meta) {
 
   const summary = {
     ok: !meta.expectedCount || uniqueRows.length === meta.expectedCount,
-    method: "wos-export-api-saveToFieldTagged",
+    method: "wos-web-export-api-saveToFieldTagged",
     ...meta,
     parsedCount: rows.length,
     uniqueCount: uniqueRows.length,
@@ -760,13 +880,33 @@ async function validateSid(page, args) {
   if (!status.sid || status.sid !== args.sid) {
     if (args.sidSource === "config") {
       throw new Error(
-        `Saved SID is invalid or expired. Pass a fresh SID with --sid, or run: node bin/wos-export-wosids.js sid --sid "<SID>". observedSid=${status.sid || "(missing)"} href=${status.href}`
+        `Saved SID is invalid or expired. Pass a fresh SID with --sid, or run: wos-aide sid --sid "<SID>". observedSid=${status.sid || "(missing)"} href=${status.href}`
       );
     }
     throw new Error(`SID validation failed. observedSid=${status.sid || "(missing)"} href=${status.href}`);
   }
   saveSidConfig(args, status.sid);
   return status;
+}
+
+async function validateSidWithRetry(
+  page,
+  args,
+  prompt = promptSid,
+  canPrompt = canPromptForSid,
+  report = console.error
+) {
+  try {
+    return await validateSid(page, args);
+  } catch (error) {
+    if (!canPrompt()) throw error;
+    report(`WOS SID is invalid or expired: ${error.message || error}`);
+    const sid = await prompt("Enter a new WOS SID to validate and save");
+    if (!sid) throw new Error("SID update cancelled");
+    args.sid = sid;
+    args.sidSource = "prompt";
+    return validateSid(page, args);
+  }
 }
 
 async function readSummaryInfo(page, args) {
@@ -1056,22 +1196,31 @@ function normalizeAuthorRecord(wosid, raw) {
 }
 
 async function exportFromWos(args, paths) {
-  const browser = await chromium.launch({ headless: !args.headed });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-  page.setDefaultTimeout(args.timeoutMs);
-
+  const authSpinner = createSpinner("Validating WOS authentication");
+  let browser = null;
   const rows = [];
   let info = null;
+  let batchProgress = null;
+  let summarySpinner = null;
   try {
-    await validateSid(page, args);
+    browser = await chromium.launch({ headless: !args.headed });
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    page.setDefaultTimeout(args.timeoutMs);
+    await validateSidWithRetry(page, args);
+    authSpinner.succeed("WOS authentication validated");
     appendProgress(paths, { phase: "sid-validated" });
+    summarySpinner = createSpinner("Reading WOS summary information");
     info = await readSummaryInfo(page, args);
     if (!info.uuid || !info.expectedCount) {
+      summarySpinner.fail("Could not read WOS summary information");
       throw new Error(`Could not read summary uuid/count: ${JSON.stringify(info)}`);
     }
+    summarySpinner.succeed(`Found ${info.expectedCount} records`);
     appendProgress(paths, { phase: "summary-info", ...info });
-    console.error(`summary uuid=${info.uuid} count=${info.expectedCount}`);
+    const batchCount = Math.ceil(info.expectedCount / args.batchSize);
+    batchProgress = createProgress("Exporting records", batchCount);
 
+    let completedBatches = 0;
     for (let markFrom = 1; markFrom <= info.expectedCount; markFrom += args.batchSize) {
       const markTo = Math.min(markFrom + args.batchSize - 1, info.expectedCount);
       const rawPath = path.join(paths.rawDir, batchFileName(info.uuid, markFrom, markTo));
@@ -1091,10 +1240,16 @@ async function exportFromWos(args, paths) {
       const ids = parseExportText(text, markFrom, markTo);
       rows.push(...ids);
       appendProgress(paths, { phase: "batch", markFrom, markTo, parsed: ids.length, rawPath });
-      console.error(`export ${markFrom}-${markTo}: parsed ${ids.length} WOS IDs`);
+      completedBatches += 1;
+      batchProgress.update(completedBatches, `${markFrom}-${markTo}: ${ids.length} IDs`);
+      if (!isInteractive()) console.error(`export ${markFrom}-${markTo}: parsed ${ids.length} WOS IDs`);
     }
+    batchProgress.stop("Export complete");
   } finally {
-    await browser.close().catch(() => {});
+    authSpinner.stop();
+    summarySpinner?.stop();
+    batchProgress?.stop("Export stopped");
+    await browser?.close().catch(() => {});
   }
   return {
     rows,
@@ -1118,6 +1273,14 @@ function selectAuthorWork(wosids, checkpoint, args) {
   }
   if (args.limit) indexed = indexed.slice(0, args.limit);
   return indexed;
+}
+
+function currentAuthorStats(wosids, checkpoint) {
+  const states = wosids.map((wosid) => checkpoint.records[wosid]?.status || "");
+  return {
+    completed: states.filter((status) => status === "completed").length,
+    failed: states.filter((status) => status === "failed").length,
+  };
 }
 
 async function extractOneAuthorRecord(context, args, wosid) {
@@ -1183,15 +1346,54 @@ async function runAuthors(args) {
   if (!checkpoint.startedAt) checkpoint.startedAt = new Date().toISOString();
   checkpoint.total = wosids.length;
   const work = selectAuthorWork(wosids, checkpoint, args);
+  if (!work.length) {
+    const aggregate = writeAuthorAggregates(paths);
+    const stats = currentAuthorStats(wosids, checkpoint);
+    const failures = wosids
+      .map((wosid) => checkpoint.records[wosid])
+      .filter((item) => item?.status === "failed");
+    writeJson(paths.authorFailures, failures);
+    writeAuthorCheckpoint(paths, checkpoint);
+    upsertTaskIndex(args, {
+      status: stats.completed === wosids.length ? "authors-completed" : "authors-incomplete",
+      lastError: "",
+      uuid: task.uuid,
+      url: task.url,
+      expectedCount: task.expectedCount,
+      uniqueCount: task.uniqueCount,
+    });
+    return {
+      taskId: task.taskId,
+      taskDir: task.taskDir,
+      totalWosIds: wosids.length,
+      selected: 0,
+      completed: stats.completed,
+      failed: stats.failed,
+      authorRows: aggregate.authorRows,
+      authorsCsv: paths.authorsCsv,
+      checkpoint: paths.authorCheckpoint,
+    };
+  }
+  if (!args.sid) {
+    await ensureSid(args);
+  }
   appendProgress(paths, { phase: "authors-start", total: wosids.length, selected: work.length });
   upsertTaskIndex(args, { status: "authors-running", lastError: "", uuid: task.uuid, url: task.url, expectedCount: task.expectedCount, uniqueCount: task.uniqueCount });
 
-  const browser = await chromium.launch({ headless: !args.headed });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1100 } });
+  const authSpinner = createSpinner("Validating WOS authentication");
+  let authorProgress = null;
+  let browser = null;
+  let context = null;
+  let processed = 0;
+  let failed = 0;
   try {
+    browser = await chromium.launch({ headless: !args.headed });
+    context = await browser.newContext({ viewport: { width: 1440, height: 1100 } });
     const control = await context.newPage();
-    await validateSid(control, args);
+    await validateSidWithRetry(control, args);
     await control.close().catch(() => {});
+    authSpinner.succeed("WOS authentication validated");
+    authorProgress = createProgress("Fetching authors", work.length);
     await runPool(work, args.concurrency, async (item) => {
       const { wosid, index } = item;
       const startedAt = new Date().toISOString();
@@ -1217,15 +1419,18 @@ async function runAuthors(args) {
           ...checkpoint.records[wosid],
           status: "completed",
           authorCount: normalized.authors.length,
-          rawJsonPath: rawPath,
-          normalizedJsonPath: normalizedPath,
+          rawJsonPath: storedArtifactPath(paths, rawPath),
+          normalizedJsonPath: storedArtifactPath(paths, normalizedPath),
           error: "",
           updatedAt: new Date().toISOString(),
         };
         writeAuthorCheckpoint(paths, checkpoint);
         appendProgress(paths, { phase: "authors-record", status: "completed", wosid, index, authorCount: normalized.authors.length });
-        console.error(`authors OK ${index}/${wosids.length} ${wosid} authors=${normalized.authors.length}`);
+        if (!isInteractive()) {
+          console.error(`authors OK ${index}/${wosids.length} ${wosid} authors=${normalized.authors.length}`);
+        }
       } catch (error) {
+        failed += 1;
         checkpoint.records[wosid] = {
           ...checkpoint.records[wosid],
           status: "failed",
@@ -1234,12 +1439,19 @@ async function runAuthors(args) {
         };
         writeAuthorCheckpoint(paths, checkpoint);
         appendProgress(paths, { phase: "authors-record", status: "failed", wosid, index, error: error.message || String(error) });
-        console.error(`authors FAIL ${index}/${wosids.length} ${wosid}: ${error.message || error}`);
+        if (!isInteractive()) {
+          console.error(`authors FAIL ${index}/${wosids.length} ${wosid}: ${error.message || error}`);
+        }
       }
+      processed += 1;
+      authorProgress.update(processed, wosid, failed);
       if (args.cooldownMs) await sleep(args.cooldownMs);
     });
+    authorProgress.stop("Author fetch complete");
   } finally {
-    await browser.close().catch(() => {});
+    authSpinner.stop();
+    authorProgress?.stop("Author fetch stopped");
+    await browser?.close().catch(() => {});
   }
 
   const aggregate = writeAuthorAggregates(paths);
@@ -1247,15 +1459,16 @@ async function runAuthors(args) {
   writeJson(paths.authorFailures, failures);
   const finalCheckpoint = readAuthorCheckpoint(paths);
   writeAuthorCheckpoint(paths, finalCheckpoint);
-  const status = finalCheckpoint.completed === wosids.length ? "authors-completed" : "authors-incomplete";
+  const stats = currentAuthorStats(wosids, finalCheckpoint);
+  const status = stats.completed === wosids.length ? "authors-completed" : "authors-incomplete";
   upsertTaskIndex(args, { status, lastError: "", uuid: task.uuid, url: task.url, expectedCount: task.expectedCount, uniqueCount: task.uniqueCount });
   return {
     taskId: task.taskId,
     taskDir: task.taskDir,
     totalWosIds: wosids.length,
     selected: work.length,
-    completed: finalCheckpoint.completed,
-    failed: finalCheckpoint.failed,
+    completed: stats.completed,
+    failed: stats.failed,
     authorRows: aggregate.authorRows,
     authorsCsv: paths.authorsCsv,
     checkpoint: paths.authorCheckpoint,
@@ -1285,11 +1498,15 @@ function validateTask(args) {
   if (summary.uniqueCount && wosids.length !== summary.uniqueCount) {
     issues.push(`wosids.csv rows mismatch: csv=${wosids.length} summary.uniqueCount=${summary.uniqueCount}`);
   }
-  if (!rawFiles.length) issues.push("missing raw/full-record batches");
+  if (summary.method !== "imported-wosid-csv" && !rawFiles.length) issues.push("missing raw/full-record batches");
   const completed = Object.values(checkpoint.records || {}).filter((item) => item.status === "completed");
   for (const item of completed) {
-    if (!item.rawJsonPath || !fs.existsSync(item.rawJsonPath)) issues.push(`missing raw author json: ${item.wosid}`);
-    if (!item.normalizedJsonPath || !fs.existsSync(item.normalizedJsonPath)) issues.push(`missing normalized author json: ${item.wosid}`);
+    if (!item.rawJsonPath || !fs.existsSync(resolvedArtifactPath(paths, item.rawJsonPath))) {
+      issues.push(`missing raw author json: ${item.wosid}`);
+    }
+    if (!item.normalizedJsonPath || !fs.existsSync(resolvedArtifactPath(paths, item.normalizedJsonPath))) {
+      issues.push(`missing normalized author json: ${item.wosid}`);
+    }
   }
   return {
     ok: issues.length === 0,
@@ -1308,19 +1525,72 @@ function validateTask(args) {
   };
 }
 
+function importWosIds(args) {
+  if (!args.csvPath) throw new Error("Missing --csv <file>");
+  if (!fs.existsSync(args.csvPath)) throw new Error(`CSV file not found: ${args.csvPath}`);
+  const wosids = readWosIdsCsv(args.csvPath);
+  if (!wosids.length) {
+    throw new Error(`No valid WOS IDs found in CSV: ${args.csvPath}`);
+  }
+
+  const initialPaths = getRunPaths(args.outDir);
+  const outputHasFiles = fs.existsSync(args.outDir) &&
+    fs.readdirSync(args.outDir).some((name) => name !== ".DS_Store");
+  if (args.force && outputHasFiles) cleanRunLayout(initialPaths);
+  const paths = createRunLayout(args);
+  upsertTaskIndex(args, { status: "importing", lastError: "", uuid: "", url: "" });
+  writeJson(paths.manifest, {
+    command: "wos-aide",
+    operation: "import",
+    args: manifestArgs(args),
+    task: {
+      taskId: args.taskId,
+      label: args.taskLabel,
+      taskDir: paths.taskDir,
+      tasksRoot: args.tasksRoot,
+    },
+    createdAt: new Date().toISOString(),
+  });
+  const rows = wosids.map((wosid, index) => ({
+    batchStart: "",
+    batchEnd: "",
+    batchPosition: index + 1,
+    wosid,
+  }));
+  appendProgress(paths, { phase: "csv-import", source: args.csvPath, imported: rows.length });
+  const summary = writeOutputs(paths, rows, {
+    method: "imported-wosid-csv",
+    taskId: args.taskId,
+    taskLabel: args.taskLabel,
+    inputCsv: args.csvPath,
+    expectedCount: rows.length,
+    rowText: `${rows.length} WOS IDs imported from CSV`,
+    runDir: paths.runDir,
+  });
+  upsertTaskIndex(args, {
+    status: "completed",
+    lastError: "",
+    uuid: "",
+    url: "",
+    expectedCount: summary.expectedCount,
+    uniqueCount: summary.uniqueCount,
+  });
+  return summary;
+}
+
 async function run(args) {
   const initialPaths = getRunPaths(args.outDir);
   const priorSummary = readJson(initialPaths.summary, {});
   const outputHasFiles = fs.existsSync(args.outDir) &&
     fs.readdirSync(args.outDir).some((name) => name !== ".DS_Store");
   if (args.force && !args.reuseRaw && outputHasFiles) {
-    cleanRunLayout(initialPaths, args.tasksRoot);
+    cleanRunLayout(initialPaths);
   }
   const paths = createRunLayout(args);
   upsertTaskIndex(args, { status: "running", lastError: "" });
   writeJson(paths.manifest, {
-    command: "wos-export-wosids",
-    args: { ...args, sid: args.sid ? "[redacted]" : "" },
+    command: "wos-aide",
+    args: manifestArgs(args),
     task: {
       taskId: args.taskId,
       label: args.taskLabel,
@@ -1395,15 +1665,15 @@ function printTaskPath(args) {
 }
 
 async function validateAndSaveSid(args) {
-  loadSavedSid(args);
-  if (!args.sid) {
-    throw new Error(`Missing SID. Pass --sid, for example: node bin/wos-export-wosids.js sid --sid "<SID>"`);
-  }
-  const browser = await chromium.launch({ headless: !args.headed });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-  page.setDefaultTimeout(args.timeoutMs);
+  await ensureSid(args);
+  const spinner = createSpinner("Validating and saving WOS SID");
+  let browser;
   try {
-    const status = await validateSid(page, args);
+    browser = await chromium.launch({ headless: !args.headed });
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    page.setDefaultTimeout(args.timeoutMs);
+    const status = await validateSidWithRetry(page, args);
+    spinner.succeed("WOS SID validated and saved");
     return {
       ok: true,
       sidSource: args.sidSource || "cli",
@@ -1411,15 +1681,30 @@ async function validateAndSaveSid(args) {
       href: status.href,
       sid: "[saved]",
     };
+  } catch (error) {
+    spinner.fail("WOS SID validation failed");
+    throw error;
   } finally {
-    await browser.close().catch(() => {});
+    spinner.stop();
+    await browser?.close().catch(() => {});
   }
 }
 
 async function main() {
   let args;
   try {
-    args = parseArgs(process.argv);
+    let argv = process.argv;
+    if (argv.length === 2 && (!process.stdin.isTTY || !isInteractive(process.stdout))) {
+      console.log(usage());
+      return;
+    }
+    if (argv.length === 2 || argv[2] === "menu") {
+      const menuArgs = parseArgs([argv[0], argv[1], "workspace"]);
+      const selectedArgs = await interactiveArgs(VERSION, workspaceStatus(menuArgs));
+      if (!selectedArgs) return;
+      argv = [argv[0], argv[1], ...selectedArgs];
+    }
+    args = parseArgs(argv);
     if (args.help) {
       console.log(usage());
       return;
@@ -1430,6 +1715,40 @@ async function main() {
     }
     if (args.command === "list") {
       listTasks(args);
+      return;
+    }
+    if (args.command === "init") {
+      console.log(JSON.stringify(initializeWorkspace(args), null, 2));
+      return;
+    }
+    if (args.command === "workspace") {
+      console.log(JSON.stringify(workspaceStatus(args), null, 2));
+      return;
+    }
+    if (args.command === "update") {
+      const spinner = createSpinner(args.checkOnly ? "Checking for WOS Aide updates" : "Checking and updating WOS Aide");
+      try {
+        let installing = false;
+        const result = await updateCli({
+          currentVersion: VERSION,
+          checkOnly: args.checkOnly,
+          onInstall({ version }) {
+            installing = true;
+            spinner.stop();
+            console.error(`Installing WOS Aide ${version} from GitHub Release...`);
+          },
+        });
+        if (result.status === "updated") {
+          if (installing) console.error(`OK Updated WOS Aide ${result.currentVersion} -> ${result.latestVersion}`);
+          else spinner.succeed(`Updated WOS Aide ${result.currentVersion} -> ${result.latestVersion}`);
+        }
+        else if (result.status === "update-available") spinner.succeed(`Update available: ${result.currentVersion} -> ${result.latestVersion}`);
+        else spinner.succeed(`WOS Aide ${result.currentVersion} is up to date`);
+        console.log(JSON.stringify(result, null, 2));
+      } catch (error) {
+        spinner.fail("WOS Aide update failed");
+        throw error;
+      }
       return;
     }
     if (args.command === "show") {
@@ -1451,13 +1770,24 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
       return;
     }
-    if (args.command === "authors") {
-      if (!args.rebuildOnly) loadSavedSid(args);
-      if (!args.sid && !args.rebuildOnly) {
-        console.error(`Missing SID for authors command. Pass --sid once, or save it with: node bin/wos-export-wosids.js sid --sid "<SID>"`);
+    if (args.command === "import") {
+      if (!args.csvPath || !args.taskId || !args.outDir) {
+        console.error(usage());
         process.exitCode = 2;
         return;
       }
+      const summary = importWosIds(args);
+      console.log(JSON.stringify({
+        ok: summary.ok,
+        taskId: summary.taskId,
+        imported: summary.uniqueCount,
+        taskDir: summary.runDir,
+        wosidsCsv: summary.files.wosidsCsv,
+      }, null, 2));
+      return;
+    }
+    if (args.command === "authors") {
+      if (!args.rebuildOnly) loadSavedSid(args);
       const result = await runAuthors(args);
       console.log(JSON.stringify(result, null, 2));
       if (result.failed) process.exitCode = 1;
@@ -1476,17 +1806,12 @@ async function main() {
     if (args.command !== "run") {
       throw new Error(`Unknown command: ${args.command}`);
     }
-    loadSavedSid(args);
-    if (!args.sid || !args.url || !args.uuid || !args.outDir) {
-      if (!args.sid) {
-        console.error(`Missing SID. Pass --sid once, or save it with: node bin/wos-export-wosids.js sid --sid "<SID>"`);
-        process.exitCode = 2;
-        return;
-      }
+    if (!args.url || !args.uuid || !args.outDir) {
       console.error(usage());
       process.exitCode = 2;
       return;
     }
+    await ensureSid(args);
     const summary = await run(args);
     console.log(JSON.stringify({
       ok: summary.ok,
@@ -1500,7 +1825,12 @@ async function main() {
     }, null, 2));
     if (!summary.ok) process.exitCode = 1;
   } catch (error) {
-    if (args?.taskId && args?.outDir && ["run", "authors"].includes(args.command)) {
+    if (
+      args?.taskId &&
+      args?.outDir &&
+      fs.existsSync(args.outDir) &&
+      ["run", "import", "authors"].includes(args.command)
+    ) {
       try {
         upsertTaskIndex(args, {
           status: "failed",
@@ -1516,10 +1846,16 @@ async function main() {
 module.exports = {
   main,
   run,
+  importWosIds,
+  initializeWorkspace,
+  workspaceStatus,
+  ensureSid,
+  validateSidWithRetry,
   runAuthors,
   validateTask,
   parseArgs,
   parseExportText,
+  readWosIdsCsv,
   flattenAuthorRows,
   extractUuid,
   readTaskIndex,

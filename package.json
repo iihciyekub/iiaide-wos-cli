@@ -1,8 +1,15 @@
 {
-  "name": "wos-export-tools",
-  "version": "0.2.0",
-  "private": true,
-  "description": "Standalone CLI tools for exporting Web of Science full-record data and WOS IDs.",
+  "name": "wos-aide-cli",
+  "version": "0.3.0",
+  "description": "Task-oriented CLI for interacting with Web of Science, extracting WOS IDs and author data, and delivering reusable data packages.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iihciyekub/wos-aide-cli.git"
+  },
+  "homepage": "https://github.com/iihciyekub/wos-aide-cli#readme",
+  "bugs": {
+    "url": "https://github.com/iihciyekub/wos-aide-cli/issues"
+  },
   "files": [
     "bin/",
     "src/",
@@ -11,14 +18,15 @@
     "CHANGELOG.md"
   ],
   "bin": {
-    "wos-export-wosids": "./bin/wos-export-wosids.js"
+    "wos-aide": "bin/wos-aide.js"
   },
   "scripts": {
-    "lint": "node --check bin/wos-export-wosids.js && node --check src/wos-export-wosids.js && node --check src/lib/io.js",
+    "lint": "node --check bin/wos-aide.js && node --check src/wos-aide.js && node --check src/lib/io.js && node --check src/lib/interactive.js && node --check src/lib/terminal.js && node --check src/lib/update.js",
     "check": "npm run lint",
     "test": "node --test",
     "verify": "npm run check && npm test",
-    "help": "node bin/wos-export-wosids.js --help"
+    "help": "node bin/wos-aide.js --help",
+    "menu": "node bin/wos-aide.js menu"
   },
   "engines": {
     "node": ">=20"
