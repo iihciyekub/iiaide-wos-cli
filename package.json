@@ -1,0 +1,29 @@
+{
+  "name": "wos-export-tools",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Standalone CLI tools for exporting Web of Science full-record data and WOS IDs.",
+  "files": [
+    "bin/",
+    "src/",
+    "docs/",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "bin": {
+    "wos-export-wosids": "./bin/wos-export-wosids.js"
+  },
+  "scripts": {
+    "lint": "node --check bin/wos-export-wosids.js && node --check src/wos-export-wosids.js && node --check src/lib/io.js",
+    "check": "npm run lint",
+    "test": "node --test",
+    "verify": "npm run check && npm test",
+    "help": "node bin/wos-export-wosids.js --help"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "1.59.1"
+  }
+}
