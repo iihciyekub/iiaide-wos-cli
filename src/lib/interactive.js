@@ -193,14 +193,14 @@ async function askRequiredWithFallback(rl, message, fallback, help) {
 }
 
 async function askParameterOrCancel(rl, message, help, fallback = "") {
-  const hint = fallback ? "(Enter uses saved, c back, q quit)" : "(c back, q quit)";
+  const hint = fallback ? "(Enter uses saved, B back, q quit)" : "(B back, q quit)";
   for (;;) {
     const answer = (await rl.question(`${message} ${color("2", hint, stdout)}: `)).trim();
     if (isBackInput(answer)) return CONTROL_BACK;
     if (isQuitInput(answer)) return CONTROL_QUIT;
     if (!answer && fallback) return fallback;
     if (!answer) {
-      stdout.write(`${color("33", "Required:", stdout)} ${help}; c goes back, q quits\n`);
+      stdout.write(`${color("33", "Required:", stdout)} ${help}; B goes back, q quits\n`);
       continue;
     }
     if (answer) return answer;
@@ -214,7 +214,7 @@ async function askOptionalInteger(rl, message, fallback, minimum = 0, maximum = 
     if (isBackInput(answer)) return CONTROL_BACK;
     if (isQuitInput(answer)) return CONTROL_QUIT;
     if (!/^\d+$/.test(answer)) {
-      stdout.write(`${color("33", "Required:", stdout)} enter an integer, c to go back, or q to quit\n`);
+      stdout.write(`${color("33", "Required:", stdout)} enter an integer, B to go back, or q to quit\n`);
       continue;
     }
     const value = Number(answer);
@@ -235,7 +235,7 @@ async function askOptionalBoolean(rl, message, fallback = false) {
     if (isQuitInput(answer)) return CONTROL_QUIT;
     if (answer === "y" || answer === "yes") return true;
     if (answer === "n" || answer === "no") return false;
-    stdout.write(`${color("33", "Required:", stdout)} enter y, n, c to go back, or q to quit\n`);
+    stdout.write(`${color("33", "Required:", stdout)} enter y, n, B to go back, or q to quit\n`);
   }
 }
 
@@ -289,7 +289,7 @@ async function askParseOptions(rl, defaults = DEFAULT_PARSE_OPTIONS) {
 }
 
 function isBackInput(value) {
-  return /^(c|cancel)$/i.test(String(value || "").trim());
+  return /^(b|back)$/i.test(String(value || "").trim());
 }
 
 function isQuitInput(value) {
@@ -390,17 +390,17 @@ function resolveTaskSelection(workspace, value, fallback = "", newTaskId = "") {
 
 function taskPromptHelp(mode, fallback, generatedTaskId, taskCount) {
   if (mode === "new") {
-    return `Enter creates ${generatedTaskId}; type a custom task id; c goes back; q quits`;
+    return `Enter creates ${generatedTaskId}; type a custom task id; B goes back; q quits`;
   }
   if (mode === "existing") {
     return taskCount
-      ? `Enter keeps ${fallback}; type 1-${taskCount} to select an existing task; type an exact task id; c goes back; q quits`
+      ? `Enter keeps ${fallback}; type 1-${taskCount} to select an existing task; type an exact task id; B goes back; q quits`
       : "no existing tasks are available";
   }
   if (taskCount) {
-    return `Enter keeps ${fallback}; type 1-${taskCount} to switch; type new to create ${generatedTaskId}; type a custom task id; c goes back; q quits`;
+    return `Enter keeps ${fallback}; type 1-${taskCount} to switch; type new to create ${generatedTaskId}; type a custom task id; B goes back; q quits`;
   }
-  return `Enter creates ${generatedTaskId}; type new or a custom task id to create another task; c goes back; q quits`;
+  return `Enter creates ${generatedTaskId}; type new or a custom task id to create another task; B goes back; q quits`;
 }
 
 function taskHintLine(command, description) {
@@ -412,7 +412,7 @@ function taskSelectionHint(mode, fallback, generatedTaskId, taskCount) {
     return [
       taskHintLine("Enter", `create ${generatedTaskId}`),
       taskHintLine("custom", "type a custom task id"),
-      taskHintLine("c", "back"),
+      taskHintLine("B", "back"),
       taskHintLine("q", "quit"),
     ].join("\n");
   }
@@ -422,7 +422,7 @@ function taskSelectionHint(mode, fallback, generatedTaskId, taskCount) {
       taskHintLine("Enter", `keep ${fallback}`),
       taskHintLine(`1-${taskCount}`, "select an existing task"),
       taskHintLine("custom", "type an exact task id"),
-      taskHintLine("c", "back"),
+      taskHintLine("B", "back"),
       taskHintLine("q", "quit"),
     ].join("\n");
   }
@@ -432,7 +432,7 @@ function taskSelectionHint(mode, fallback, generatedTaskId, taskCount) {
       taskHintLine(`1-${taskCount}`, "switch to a listed task"),
       taskHintLine("new", `create ${generatedTaskId}`),
       taskHintLine("custom", "type a custom task id"),
-      taskHintLine("c", "back"),
+      taskHintLine("B", "back"),
       taskHintLine("q", "quit"),
     ].join("\n");
   }
@@ -440,7 +440,7 @@ function taskSelectionHint(mode, fallback, generatedTaskId, taskCount) {
     taskHintLine("Enter", `create ${generatedTaskId}`),
     taskHintLine("new", `create ${generatedTaskId}`),
     taskHintLine("custom", "type a custom task id"),
-    taskHintLine("c", "back"),
+    taskHintLine("B", "back"),
     taskHintLine("q", "quit"),
   ].join("\n");
 }
@@ -496,18 +496,19 @@ function workflowItem(value, label, description) {
 }
 
 async function askWorkflow(rl) {
-  workflowGroup("0", "Authentication");
-  workflowItem("0.1", "Check SID", "Probe the saved SID and refresh it through browser login when needed");
   workflowGroup("1", "Download literature");
   workflowItem("1.1", "UUID - TXT format", "URL/UUID -> raw/<uuid>/full-record/*.txt and WOS IDs");
   workflowItem("1.2", "UUID - BIB format", "URL/UUID -> raw/<uuid>/bib/*.bib");
   workflowGroup("2", "Parse");
   workflowItem("2.1", "WOS data", "URL/UUID -> TXT -> WOS IDs -> raw/wosdata JSON");
+  workflowItem("2.2", "WOSID CSV", "Local CSV -> WOS IDs -> raw/wosdata JSON");
   workflowGroup("3", "Task manager");
   workflowItem("3.1", "New", "Create a fresh current task");
   workflowItem("3.2", "Switch", "Select an existing current task");
   workflowItem("3.3", "Clear", "Remove a managed task");
-  option("c", "Back", "Return to the workspace menu");
+  option("c", "Check SID", "Probe the saved SID and refresh it through browser login when needed");
+  option("u", "Update", "Install the latest release and restart the interactive CLI");
+  option("B", "Back", "Return to the workspace menu");
   option("q", "Exit", "Close without running a command");
   stdout.write("\n");
 
@@ -515,8 +516,10 @@ async function askWorkflow(rl) {
     const choice = (await ask(rl, "Select workflow")).toLowerCase();
     if (isBackInput(choice)) return CONTROL_BACK;
     if (isQuitInput(choice)) return CONTROL_QUIT;
-    if (["0.1", "1.1", "1.2", "2.1", "3.1", "3.2", "3.3"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 0.1, 1.1, 1.2, 2.1, 3.1, 3.2, 3.3, c to go back, or q to quit\n`);
+    if (choice === "c") return "c";
+    if (choice === "u") return "u";
+    if (["1.1", "1.2", "2.1", "2.2", "3.1", "3.2", "3.3"].includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2.1, 2.2, 3.1, 3.2, 3.3, c to check SID, u to update, B to go back, or q to quit\n`);
   }
 }
 
@@ -530,7 +533,7 @@ async function promptSid(message = "Enter a current WOS SID") {
     },
   });
   const rl = readline.createInterface({ input: stdin, output: mutedOutput, terminal: true });
-  stdout.write(`${message} (c back, q quit): `);
+  stdout.write(`${message} (B back, q quit): `);
   try {
     const sid = (await rl.question("")).trim();
     stdout.write("\n");
@@ -553,7 +556,7 @@ async function confirmAction(message, defaultYes = true) {
       if (answer === "y" || answer === "yes") return true;
       if (answer === "n" || answer === "no" || isBackInput(answer)) return false;
       if (isQuitInput(answer)) return CONTROL_QUIT;
-      stdout.write(`${color("33", "Required:", stdout)} enter y, n, c to go back, or q to quit\n`);
+      stdout.write(`${color("33", "Required:", stdout)} enter y, n, B to go back, or q to quit\n`);
     }
   } finally {
     rl.close();
@@ -580,7 +583,7 @@ async function askSidFromBrowserOrManual(getRl, readBrowserSid, promptManualSid)
     stdout.write(`${color("1", "SID setup", stdout)}\n`);
     option("1", "Manual input", "Paste a current WOS SID");
     option("2", "Open browser login", "Log in to WOS, then auto-detect SID");
-    option("c", "Back", "Return to workflow selection");
+    option("B", "Back", "Return to workflow selection");
     option("q", "Exit", "Close without running a command");
     stdout.write("\n");
     const action = (await ask(getRl(), "Select SID method")).toLowerCase();
@@ -612,7 +615,7 @@ async function askSidFromBrowserOrManual(getRl, readBrowserSid, promptManualSid)
       stdout.write("Choose browser login again, or use manual input.\n\n");
       continue;
     }
-    stdout.write(`${color("33", "Required:", stdout)} choose 1, 2, c to go back, or q to quit\n`);
+    stdout.write(`${color("33", "Required:", stdout)} choose 1, 2, B to go back, or q to quit\n`);
   }
 }
 
@@ -680,8 +683,12 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     if (isBackResult(choice)) return { refresh: true };
     if (isQuitResult(choice)) return null;
 
-    if (choice === "0.1") {
+    if (choice === "c") {
       return ["check", "--tasks-root", activeWorkspace.tasksRoot];
+    }
+
+    if (choice === "u") {
+      return ["update"];
     }
 
     if (choice === "3.1") {
@@ -738,6 +745,27 @@ async function interactiveArgs(version, workspace, helpers = {}) {
         stdout.write(`${color("32", "SID:", stdout)} saved. Refreshing workspace panel.\n\n`);
         return { refresh: true };
       }
+    }
+
+    if (choice === "2.2") {
+      const csvPath = await askParameterOrCancel(
+        rl,
+        "WOSID CSV path",
+        "enter a local CSV file containing a wosid or UT column"
+      );
+      if (isBackResult(csvPath)) return { refresh: true };
+      if (isQuitResult(csvPath)) return null;
+      if (!csvPath) {
+        stdout.write(`${color("33", "Required:", stdout)} WOSID CSV path is required.\n\n`);
+        return { refresh: true };
+      }
+      const result = ["parse", "--csv", csvPath, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot];
+      const parseArgs = await askParseOptions(rl);
+      if (isBackResult(parseArgs)) return { refresh: true };
+      if (isQuitResult(parseArgs)) return null;
+      result.push(...parseArgs);
+      if (sid) result.push("--sid", sid);
+      return result;
     }
 
     const sourceFallback = [task?.url, task?.uuid].find(isWosSourceLike) || "";

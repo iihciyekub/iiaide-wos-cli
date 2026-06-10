@@ -193,7 +193,7 @@ test("interactive task selection accepts task numbers and new task ids", () => {
   assert.equal(keyword.task, null);
   assert.equal(keyword.isNew, true);
 
-  const back = resolveTaskSelection(workspace, "c", "second", "TID20260610120000");
+  const back = resolveTaskSelection(workspace, "B", "second", "TID20260610120000");
   assert.equal(back.back, true);
   assert.equal(back.taskId, "");
 
@@ -205,15 +205,15 @@ test("interactive task selection accepts task numbers and new task ids", () => {
 test("interactive task prompt copy separates resume/create from clear", () => {
   assert.equal(
     taskPromptHelp("new", "TID20260610120000", "TID20260610120000", 2),
-    "Enter creates TID20260610120000; type a custom task id; c goes back; q quits"
+    "Enter creates TID20260610120000; type a custom task id; B goes back; q quits"
   );
   assert.equal(
     taskPromptHelp("any", "latest-task", "TID20260610120000", 2),
-    "Enter keeps latest-task; type 1-2 to switch; type new to create TID20260610120000; type a custom task id; c goes back; q quits"
+    "Enter keeps latest-task; type 1-2 to switch; type new to create TID20260610120000; type a custom task id; B goes back; q quits"
   );
   assert.equal(
     taskPromptHelp("existing", "latest-task", "TID20260610120000", 2),
-    "Enter keeps latest-task; type 1-2 to select an existing task; type an exact task id; c goes back; q quits"
+    "Enter keeps latest-task; type 1-2 to select an existing task; type an exact task id; B goes back; q quits"
   );
   assert.equal(
     taskSelectionHint("any", "latest-task", "TID20260610120000", 2),
@@ -222,7 +222,7 @@ test("interactive task prompt copy separates resume/create from clear", () => {
       "  1-2    switch to a listed task",
       "  new    create TID20260610120000",
       "  custom type a custom task id",
-      "  c      back",
+      "  B      back",
       "  q      quit",
     ].join("\n")
   );
@@ -231,7 +231,7 @@ test("interactive task prompt copy separates resume/create from clear", () => {
     [
       "  Enter  create TID20260610120000",
       "  custom type a custom task id",
-      "  c      back",
+      "  B      back",
       "  q      quit",
     ].join("\n")
   );
@@ -241,7 +241,7 @@ test("interactive task prompt copy separates resume/create from clear", () => {
       "  Enter  keep latest-task",
       "  1-2    select an existing task",
       "  custom type an exact task id",
-      "  c      back",
+      "  B      back",
       "  q      quit",
     ].join("\n")
   );
@@ -250,26 +250,35 @@ test("interactive task prompt copy separates resume/create from clear", () => {
 test("interactive workflow menu uses folded command groups", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
   const workflowMatch = source.match(/async function askWorkflow[\s\S]*?\n}\n\nasync function promptSid/);
-  const argsMatch = source.match(/const choice = await askWorkflow[\s\S]*?return result;/);
+  const argsMatch = source.match(/const choice = await askWorkflow[\s\S]*?\n  } finally/);
   assert.ok(workflowMatch, "askWorkflow source should be present");
   assert.ok(argsMatch, "interactiveArgs workflow branch should be present");
-  assert.match(workflowMatch[0], /Authentication/);
-  assert.match(workflowMatch[0], /0\.1", "Check SID/);
+  assert.doesNotMatch(workflowMatch[0], /Authentication/);
+  assert.doesNotMatch(workflowMatch[0], /0\.1", "Check SID/);
   assert.match(workflowMatch[0], /Download literature/);
   assert.match(workflowMatch[0], /1\.1", "UUID - TXT format/);
   assert.match(workflowMatch[0], /1\.2", "UUID - BIB format/);
   assert.match(workflowMatch[0], /2\.1", "WOS data/);
+  assert.match(workflowMatch[0], /2\.2", "WOSID CSV/);
   assert.match(workflowMatch[0], /3\.1", "New/);
   assert.match(workflowMatch[0], /3\.2", "Switch/);
   assert.match(workflowMatch[0], /3\.3", "Clear/);
-  assert.match(workflowMatch[0], /choose 0\.1, 1\.1, 1\.2, 2\.1, 3\.1, 3\.2, 3\.3/);
+  assert.match(workflowMatch[0], /"c", "Check SID/);
+  assert.match(workflowMatch[0], /"u", "Update/);
+  assert.match(workflowMatch[0], /"B", "Back/);
+  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 2\.1, 2\.2, 3\.1, 3\.2, 3\.3, c to check SID, u to update, B to go back/);
   assert.doesNotMatch(workflowMatch[0], /Download WOS IDs/);
-  assert.match(argsMatch[0], /choice === "0\.1"/);
+  assert.match(argsMatch[0], /choice === "c"/);
   assert.match(argsMatch[0], /return \["check", "--tasks-root", activeWorkspace\.tasksRoot\]/);
+  assert.match(argsMatch[0], /choice === "u"/);
+  assert.match(argsMatch[0], /return \["update"\]/);
   assert.match(argsMatch[0], /choice === "3\.1"/);
   assert.match(argsMatch[0], /mode: "new"/);
   assert.match(argsMatch[0], /choice === "3\.2"/);
   assert.match(argsMatch[0], /choice === "3\.3"/);
+  assert.match(argsMatch[0], /choice === "2\.2"/);
+  assert.match(argsMatch[0], /WOSID CSV path/);
+  assert.match(argsMatch[0], /\["parse", "--csv", csvPath, "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot\]/);
   assert.match(argsMatch[0], /choice === "2\.1" \? "parse-pipeline"/);
   assert.match(argsMatch[0], /choice === "1\.2" \? "bib"/);
 });
@@ -885,6 +894,21 @@ test("checkSid returns immediately when the lightweight SID probe is valid", asy
   assert.equal(result.status, "valid");
   assert.equal(result.checkedWith, "http-probe");
   assert.equal(result.sidSource, "config");
+});
+
+test("check command output does not expose SID details", () => {
+  const valid = cli.formatCheckSidResult({
+    ok: true,
+    status: "valid",
+    href: "https://www.webofscience.com/wos/?Init=Yes&SrcApp=CR&SID=USW2EC0DEBlsMfZ3oPCDdkYzLMs2x",
+    sid: "[saved]",
+    config: "/tmp/tasks/config.json",
+  });
+  assert.equal(valid, "WOS SID check passed");
+  assert.doesNotMatch(valid, /SID=|USW2|config|href|\{/);
+
+  assert.equal(cli.formatCheckSidResult({ ok: true, status: "refreshed" }), "WOS SID refreshed and saved");
+  assert.equal(cli.formatCheckSidResult({ ok: false, status: "invalid" }), "WOS SID check failed: invalid");
 });
 
 test("checkSid refreshes an invalid SID through the browser validation flow", async () => {
@@ -1689,9 +1713,9 @@ test("interactive URL or UUID prompt supports saved source fallback", () => {
   assert.ok(workflowMatch, "interactive source prompt should be present");
   assert.doesNotMatch(promptMatch[0], /Enter or c cancels/);
   assert.match(promptMatch[0], /Enter uses saved/);
-  assert.match(promptMatch[0], /c back, q quit/);
+  assert.match(promptMatch[0], /B back, q quit/);
   assert.match(promptMatch[0], /if \(!answer && fallback\) return fallback/);
-  assert.match(promptMatch[0], /c goes back, q quits/);
+  assert.match(promptMatch[0], /B goes back, q quits/);
   assert.match(promptMatch[0], /CONTROL_BACK/);
   assert.match(promptMatch[0], /CONTROL_QUIT/);
   assert.match(workflowMatch[0], /sourceFallback/);
@@ -1726,6 +1750,16 @@ test("interactive startup no longer auto-opens a browser when SID is invalid", (
   assert.ok(match, "runInteractiveMenu source should be present");
   assert.match(match[0], /const sidCheck = await quickValidateSid\(menuArgs\)/);
   assert.doesNotMatch(match[0], /prepareWosSession\(menuArgs, \{ keepAlive: true, visible: true \}\)/);
+});
+
+test("interactive update restarts the CLI after a successful update", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const match = source.match(/async function runInteractiveMenu[\s\S]*?\n}\n\nasync function main/);
+  assert.ok(match, "runInteractiveMenu source should be present");
+  assert.match(source, /function restartCurrentCli/);
+  assert.match(match[0], /selectedArgs\[0\] === "update"/);
+  assert.match(match[0], /await closeSharedWosSession\(\)/);
+  assert.match(match[0], /return await restartCurrentCli\(argv\)/);
 });
 
 test("terminal status helpers use plain text outside a TTY", async () => {

@@ -3,6 +3,25 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.2 - 2026-06-10
+
+- Change `iiaide-wos check` to print only a short safe status message instead
+  of JSON containing SID-related URLs or config paths.
+
+## 0.4.1 - 2026-06-10
+
+- Add interactive `2.2 WOSID CSV` so the Parse panel can run `parse --csv`
+  from a local WOSID CSV without asking for a WOS URL or UUID.
+
+## 0.4.0 - 2026-06-10
+
+- Move interactive `Check SID` to the bottom command row as `c`, and change the
+  back shortcut from `c` to `B` across interactive prompts.
+- Add interactive `u Update`, which runs the updater and restarts the menu after
+  a successful update.
+- Document the version rollover rule: after `.100`, bump the minor version and
+  reset patch to `.0`.
+
 ## 0.3.100 - 2026-06-10
 
 - Add `parse --csv <wosids.csv>` so a local WOSID CSV can be normalized into a

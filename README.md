@@ -51,7 +51,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.3.100
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.2
 npx playwright install chromium
 iiaide-wos
 ```
@@ -204,7 +204,7 @@ workspace dashboard so the refreshed authentication state is visible before the
 next workflow prompt.
 `iiaide-wos check` first runs the lightweight SID probe; when the SID is
 missing, invalid, or cannot be confirmed, it opens a visible WOS browser login,
-updates the saved SID, and prints the refreshed status as JSON.
+updates the saved SID, and prints only a short safe status message.
 
 For scripts and CI, prompts are disabled. Supply authentication explicitly:
 
@@ -348,29 +348,35 @@ already completed, iiaide-wos skips SID validation and WOS download, then prints
 the existing final artifact path. A different UUID can be appended to the same
 task; its raw batches are kept under separate `raw/<uuid>/` directories, while parsed page JSON is shared under `raw/wosdata/`.
 At the `WOS summary URL or UUID` prompt, pressing Enter uses the shown saved
-source when one exists. Without a saved source, enter a source, press `c` to
+source when one exists. Without a saved source, enter a source, press `B` to
 return to the menu, or press `q` to exit the CLI.
 Authentication status stays in the dashboard instead of being repeated inside
 each workflow prompt.
 The interactive workflow menu is grouped by command family:
 
 ```text
-0 Authentication
-  0.1 Check SID
 1 Download literature
   1.1 UUID - TXT format
   1.2 UUID - BIB format
 2 Parse
   2.1 WOS data
+  2.2 WOSID CSV
 3 Task manager
   3.1 New
   3.2 Switch
   3.3 Clear
+c Check SID
+u Update
+B Back
+q Exit
 ```
 
 Download workflows run directly in the current task marked with `*`. Use
-`0.1 Check SID` when you want to validate the saved SID from the startup panel
+`c Check SID` when you want to validate the saved SID from the startup panel
 and jump straight into browser login if WOS rejects it.
+Use `2.2 WOSID CSV` to parse WOS data from a local WOSID CSV without entering a
+WOS URL or UUID.
+Use `u Update` to install the latest release and restart the interactive CLI.
 Use
 `3.1 New` before downloading when you want a fresh task, `3.2 Switch` to select
 an existing task, and `3.3 Clear` to remove an existing managed task.

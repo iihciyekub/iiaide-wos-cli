@@ -211,22 +211,28 @@ the folded workflow first, then shows the right task prompt for task-management
 actions:
 
 ```text
-0 Authentication
-  0.1 Check SID
 1 Download literature
   1.1 UUID - TXT format
   1.2 UUID - BIB format
 2 Parse
   2.1 WOS data
+  2.2 WOSID CSV
 3 Task manager
   3.1 New
   3.2 Switch
   3.3 Clear
+c Check SID
+u Update
+B Back
+q Exit
 ```
 
 Download workflows run directly in the current task marked with `*`. Use
-`0.1 Check SID` to validate the saved SID from the startup panel and go
+`c Check SID` to validate the saved SID from the startup panel and go
 directly into browser login when WOS rejects it.
+Use `2.2 WOSID CSV` to parse WOS data from a local WOSID CSV without entering a
+WOS URL or UUID.
+Use `u Update` to install the latest release and restart the interactive CLI.
 Use
 `3.1 New` before downloading when you want a fresh task, `3.2 Switch` to select
 an existing task, and `3.3 Clear` to remove an existing managed task.
@@ -239,7 +245,7 @@ under separate `raw/<uuid>/` directories, while parsed page JSON is shared under
 only when you intentionally want to replace a managed task's existing outputs.
 For download workflows, pressing Enter at the `WOS summary URL or UUID` prompt
 uses the shown saved source when one exists. If no saved source is available,
-enter a source, press `c` to return to the menu, or press `q` to exit the CLI.
+enter a source, press `B` to return to the menu, or press `q` to exit the CLI.
 Saved task sources are
 shown only when they look like a WOS summary URL or UUID, and
 SID/authentication state is shown in the dashboard rather than inside each
@@ -288,7 +294,7 @@ explicit --sid -> WOS_SID -> tasks/config.json
 Use `iiaide-wos check` when you want an explicit SID health check. It runs the
 lightweight HTTP probe first, and if the SID is missing, invalid, or still not
 confirmed, it opens a visible WOS browser login, saves the refreshed SID, and
-returns the updated result as JSON.
+prints only a short safe status message.
 
 WOS domain/origin selection is separate from SID selection. Use
 `--wos-domain <domain>` or `WOS_DOMAIN` when only the host changes. Use
@@ -367,6 +373,8 @@ from the default branch.
 
 The first update check requires at least one published GitHub Release; create a
 release tag before relying on `iiaide-wos update`.
+In the interactive menu, choose `u Update` to run the updater and restart the
+menu process after a successful update.
 
 ## Uninstall
 

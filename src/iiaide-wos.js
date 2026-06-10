@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { spawn } = require("node:child_process");
 const { chromium } = require("playwright");
 const { readJson, writeFileAtomic, writeJson } = require("./lib/io");
 const { confirmAction, interactiveArgs, isBackResult, isQuitResult, isUserAbortError, promptConfirmationText, promptSid } = require("./lib/interactive");
@@ -2363,6 +2364,17 @@ async function checkSid(args, dependencies = {}) {
   };
 }
 
+function formatCheckSidResult(result = {}) {
+  if (result.ok && result.status === "refreshed") {
+    return "WOS SID refreshed and saved";
+  }
+  if (result.ok) {
+    return "WOS SID check passed";
+  }
+  const status = result.status ? `: ${result.status}` : "";
+  return `WOS SID check failed${status}`;
+}
+
 async function executeCommand(args) {
   if (args.help) {
     console.log(usage());
@@ -2382,7 +2394,7 @@ async function executeCommand(args) {
   }
   if (args.command === "check") {
     const result = await checkSid(args);
-    console.log(JSON.stringify(result, null, 2));
+    console.log(formatCheckSidResult(result));
     return 0;
   }
   if (args.command === "workspace") {
@@ -2541,6 +2553,20 @@ async function runParsedCommand(args) {
   }
 }
 
+function restartCurrentCli(argv = process.argv) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, argv.slice(1), {
+      stdio: "inherit",
+      env: process.env,
+    });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      if (signal) resolve(130);
+      else resolve(code || 0);
+    });
+  });
+}
+
 async function runInteractiveMenu(argv = process.argv) {
   const menuArgs = parseArgs([argv[0], argv[1], "workspace", ...argv.slice(3)]);
   menuArgs.keepWosSession = true;
@@ -2573,6 +2599,11 @@ async function runInteractiveMenu(argv = process.argv) {
         const args = parseArgs([argv[0], argv[1], ...selectedArgs]);
         args.keepWosSession = true;
         const exitCode = await runParsedCommand(args);
+        if (selectedArgs[0] === "update" && exitCode === 0) {
+          console.error("Restarting iiaide-wos...");
+          await closeSharedWosSession();
+          return await restartCurrentCli(argv);
+        }
         if (exitCode === 130) return 0;
         if (exitCode) {
           console.error(`Command exited with code ${exitCode}. Returning to menu.`);
@@ -2637,6 +2668,7 @@ module.exports = {
   ensureCurrentTask,
   setCurrentTaskId,
   checkSid,
+  formatCheckSidResult,
   ensureSid,
   quickValidateSid,
   validateSidWithRetry,

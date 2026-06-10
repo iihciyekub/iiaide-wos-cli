@@ -7,6 +7,9 @@ and easy to reuse from other commands.
 
 - Bump `package.json`, `package-lock.json`, and `CHANGELOG.md` for every code or
   behavior change.
+- Version patch numbers may run through `.100`; when the next bump would exceed
+  100, increment the minor version and reset patch to 0, for example
+  `0.3.100` -> `0.4.0`.
 - Prefer one clear output convention over compatibility layers. Do not add
   fallback file names or directory scans unless the user explicitly asks for
   migration support.
