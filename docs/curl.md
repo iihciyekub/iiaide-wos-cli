@@ -260,8 +260,8 @@ Batch behavior:
 
 - With `--limit`, the CLI downloads the explicit range.
 - Without `--limit`, the CLI uses the WOS summary count as the final record
-  index when available. If the count is unavailable, it keeps requesting batches
-  until WOS returns an empty response or a short final batch.
+  index. If the count is unavailable, the command stops instead of guessing the
+  final range.
 - CLI counts BibTeX entries in each response.
 - Raw batches are named by the actual returned range:
   `raw/bib/<uuid>_<start>_<actual-end>.bib`.

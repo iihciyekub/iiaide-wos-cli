@@ -3,6 +3,14 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.3.68 - 2026-06-10
+
+- Add the existing `latest` task command to CLI help so command docs and
+  scriptable usage stay aligned.
+- Align BibTeX curl documentation with the current bounded-count export
+  behavior.
+- Include the default browser-side `import/wos.js` helper in packaged installs.
+
 ## 0.3.67 - 2026-06-10
 
 - Explain accessible GitHub repositories with no Releases separately from

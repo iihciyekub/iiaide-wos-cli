@@ -1,6 +1,6 @@
 {
   "name": "iiaide-wos-cli",
-  "version": "0.3.67",
+  "version": "0.3.68",
   "private": true,
   "description": "Task-oriented CLI for interacting with Web of Science, extracting WOS IDs and author data, and delivering reusable data packages.",
   "repository": {
@@ -15,6 +15,7 @@
     "bin/",
     "src/",
     "docs/",
+    "import/wos.js",
     "README.md",
     "CHANGELOG.md"
   ],

@@ -554,6 +554,7 @@ test("no-argument non-interactive invocation prints help without creating a work
 
   assert.equal(result.status, 0);
   assert.match(result.stdout, /Usage:\s+iiaide-wos menu/);
+  assert.match(result.stdout, /iiaide-wos latest \[--tasks-root <dir>\]/);
   assert.equal(fs.existsSync(path.join(root, "tasks")), false);
 });
 

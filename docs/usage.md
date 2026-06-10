@@ -324,6 +324,7 @@ The repository and its Releases are private. Before installing or updating, run
 `gh auth login` and `gh auth setup-git`, or provide a `GH_TOKEN`/`GITHUB_TOKEN`
 with repository read access. The updater does not install unreleased commits
 from the default branch.
+
 The first update check requires at least one published GitHub Release; create a
 release tag before relying on `iiaide-wos update`.
 

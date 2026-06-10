@@ -47,6 +47,7 @@ Usage:
   iiaide-wos [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
   iiaide-wos import --csv <wosids.csv> [--task <task-id>] [options]
   iiaide-wos list [--tasks-root <dir>]
+  iiaide-wos latest [--tasks-root <dir>]
   iiaide-wos show (--task <task-id> | --latest) [--tasks-root <dir>]
   iiaide-wos path (--task <task-id> | --latest) [--tasks-root <dir>]
   iiaide-wos validate (--task <task-id> | --latest) [--tasks-root <dir>]

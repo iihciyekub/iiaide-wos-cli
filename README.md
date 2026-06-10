@@ -13,7 +13,7 @@ It currently supports three input workflows:
    the IDs into a managed task.
 3. Provide a WOS summary URL or result-set UUID and download BibTeX batches.
 
-After either workflow creates a task, the CLI can open each WOS full-record
+After a workflow creates a task, the CLI can open each WOS full-record
 page and extract author, address, affiliation, email, ResearcherID, ORCID, and
 ROR information. The complete task directory can then be archived, shared, or
 used by downstream tools.
@@ -62,7 +62,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.3.67
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.3.68
 npx playwright install chromium
 iiaide-wos
 ```
@@ -345,7 +345,7 @@ create a fresh task. Clear uses only existing task choices.
 - [Docs Guide](docs/README.md): what each document is for and when to update it
 - [Usage And Data Model](docs/usage.md): user workflows, task lifecycle, and output definitions
 - [WOS Curl Reference](docs/curl.md): request-level debugging and export method reference
-- [Changelog](CHANGELOG.md): released and unreleased changes
+- [Changelog](CHANGELOG.md): versioned behavior changes
 
 ## Current Scope
 
