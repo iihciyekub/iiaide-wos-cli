@@ -2,11 +2,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const Database = require("better-sqlite3");
-
-function normalizeWosId(value) {
-  const match = String(value || "").match(/WOS:[A-Z0-9]+/i);
-  return match ? match[0].toUpperCase() : "";
-}
+const { normalizeWosId, wosIdsEquivalent } = require("./wos-ids");
 
 function defaultWosDataDbPath() {
   return path.join(os.homedir(), ".iiaide-wos", "wosdata.sqlite");
@@ -73,7 +69,7 @@ function recordRow(record, jsonPath) {
 function validateWosDataRecord(record, source = "record", expectedWosId = "") {
   const row = recordRow(record, source);
   const expected = normalizeWosId(expectedWosId);
-  if (expected && row.wosid !== expected) {
+  if (expected && !wosIdsEquivalent(row.wosid, expected)) {
     throw new Error(`WOS data record mismatch: expected=${expected} actual=${row.wosid} source=${source}`);
   }
   return row;

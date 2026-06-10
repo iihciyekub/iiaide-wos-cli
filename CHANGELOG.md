@@ -3,6 +3,25 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.16 - 2026-06-11
+
+- Restart the Playwright WOS browser context between parse batches by default:
+  `parse` now closes and reopens the browser every 100 attempted WOSID page
+  parses while reusing the current SID.
+- Add `--browser-restart-every <n>` for parse workflows; use `0` to disable the
+  browser restart boundary, and `--restart-every` as a shorter alias.
+
+## 0.4.15 - 2026-06-11
+
+- Preserve the accession prefix found in WOSID TXT/CSV values during parse
+  workflows instead of forcing IDs into a `WOS:<id>` shape.
+- Compare expected and parsed full-record accession IDs after removing
+  non-alphanumeric characters, so punctuation-only differences do not fail
+  SQLite validation.
+- When WOS full-record page parsing fails more than 20 times in a row, clear
+  the saved SID and open a visible WOS login window to refresh authentication
+  before continuing.
+
 ## 0.4.14 - 2026-06-10
 
 - Start interactive TXT and BibTeX downloads immediately after printing the

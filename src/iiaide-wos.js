@@ -7,6 +7,7 @@ const { interactiveArgs, isBackResult, isQuitResult, isUserAbortError, promptCon
 const { createProgress, createSpinner, isInteractive } = require("./lib/terminal");
 const { updateCli } = require("./lib/update");
 const { exportBibBatchesViaWosJs, exportTxtBatchesViaWosJs } = require("./lib/wos-browser-export");
+const { normalizeWosId, reconcileWosId } = require("./lib/wos-ids");
 const {
   defaultWosDataDbPath,
   existingWosDataIds,
@@ -22,6 +23,8 @@ const { version: VERSION } = require("../package.json");
 const DEFAULT_BATCH_SIZE = 200;
 const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_RECORD_TIMEOUT_MS = 20000;
+const DEFAULT_BROWSER_RESTART_EVERY = 100;
+const PARSE_SID_REFRESH_CONSECUTIVE_FAILURES = 20;
 const DEFAULT_WOS_PROTOCOL = "https";
 const DEFAULT_WOS_DOMAIN = "www.webofscience.com";
 const DEFAULT_BASE_URL = `${DEFAULT_WOS_PROTOCOL}://${DEFAULT_WOS_DOMAIN}`;
@@ -120,6 +123,8 @@ Parse options:
   --concurrency <n>       Parallel full-record pages. Default: 1
   --record-timeout-ms <n> Per-record full-page timeout. Default: 20000
   --cooldown-ms <n>       Delay after each record. Default: 250
+  --browser-restart-every <n>
+                          Restart Playwright after n parsed WOSIDs. Default: 100, 0 disables
 
 Task directory layout:
   raw/<uuid>/full-record/ WOS fullRecord text batches as <uuid>_<start>_<end>.txt
@@ -167,6 +172,7 @@ function parseArgs(argv) {
     reuseRaw: false,
     concurrency: 1,
     recordTimeoutMs: DEFAULT_RECORD_TIMEOUT_MS,
+    browserRestartEvery: DEFAULT_BROWSER_RESTART_EVERY,
     limit: 0,
     fromIndex: 1,
     cooldownMs: 250,
@@ -227,6 +233,7 @@ function parseArgs(argv) {
     else if (arg === "--from-index") args.fromIndex = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--record-timeout-ms" || arg === "--record-timeout" || arg === "--page-timeout-ms") args.recordTimeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--cooldown-ms") args.cooldownMs = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--browser-restart-every" || arg === "--parse-restart-every" || arg === "--restart-every") args.browserRestartEvery = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--check") args.checkOnly = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -246,6 +253,7 @@ function parseArgs(argv) {
   assertIntegerRange("--limit", args.limit, 0);
   assertIntegerRange("--from-index", args.fromIndex, 1);
   assertIntegerRange("--cooldown-ms", args.cooldownMs, 0);
+  assertIntegerRange("--browser-restart-every", args.browserRestartEvery, 0);
   args.tasksRoot = path.resolve(args.tasksRoot);
   if (args.csvPath) args.csvPath = path.resolve(args.csvPath);
   if (args.mergeDbPath) args.mergeDbPath = path.resolve(args.mergeDbPath);
@@ -456,6 +464,16 @@ function saveSidConfig(args, observedSid) {
     wosDomain: args.wosDomain || urlDomain(args.baseUrl) || DEFAULT_WOS_DOMAIN,
     baseUrl: args.baseUrl,
   });
+}
+
+function clearSavedSidConfig(args) {
+  const config = readConfig(args.tasksRoot);
+  if (!config.sid && !args.sid) return false;
+  const { sid: _sid, ...rest } = config;
+  writeConfig(args.tasksRoot, rest);
+  args.sid = "";
+  args.sidSource = "";
+  return true;
 }
 
 function loadSavedSid(args) {
@@ -1051,12 +1069,11 @@ function parseExportText(text, batchStart, batchEnd) {
     const match =
       line.match(/^\s*UT\s+(.+?)\s*$/i) ||
       line.match(/^\s*UT\s*[:=]\s*(.+?)\s*$/i) ||
-      line.match(/(WOS:[A-Z0-9]+)/i);
+      line.match(/([A-Za-z][A-Za-z0-9]*\s*[:：]\s*[A-Za-z0-9][A-Za-z0-9._-]*)/);
     if (!match) continue;
     const raw = String(match[1] || "").trim();
-    const idMatch = raw.match(/WOS:[A-Z0-9]+/i);
-    const wosid = (idMatch ? idMatch[0] : raw).trim().toUpperCase();
-    if (!/^WOS:[A-Z0-9]+$/i.test(wosid) || seen.has(wosid)) continue;
+    const wosid = normalizeWosId(raw);
+    if (!wosid || seen.has(wosid)) continue;
     seen.add(wosid);
     ids.push({ batchStart, batchEnd, batchPosition: ids.length + 1, wosid });
   }
@@ -1094,11 +1111,6 @@ function reportDownloadPlan(label, availableCount, selectedCount, batchSize = DE
   console.error(`${label} to download: ${selectedCount}`);
   console.error(`${label} batches: ${batches} x ${batchSize} records`);
   return { batches };
-}
-
-function normalizeWosId(value) {
-  const match = String(value || "").match(/WOS:[A-Z0-9]+/i);
-  return match ? match[0].toUpperCase() : "";
 }
 
 function readWosIdsCsv(filePath) {
@@ -1194,13 +1206,14 @@ function parseWorkSummary(paths, wosids, work, args) {
     firstIndex,
     lastIndex,
     concurrency: args.concurrency,
+    browserRestartEvery: args.browserRestartEvery,
   };
 }
 
 function printParseWorkSummary(summary, write = console.error) {
   const range = summary.selected ? `${summary.firstIndex}-${summary.lastIndex}` : "none";
   write(
-    `WOS data records: total=${summary.total}, skipped=${summary.skipped}, missing=${summary.missing}, selected=${summary.selected}, range=${range}, concurrency=${summary.concurrency}`
+    `WOS data records: total=${summary.total}, skipped=${summary.skipped}, missing=${summary.missing}, selected=${summary.selected}, range=${range}, concurrency=${summary.concurrency}, browserRestartEvery=${summary.browserRestartEvery || "off"}`
   );
 }
 
@@ -1260,6 +1273,16 @@ async function runPool(items, concurrency, worker) {
     }
   });
   await Promise.all(workers);
+}
+
+function chunkItemsByCount(items, count) {
+  const size = Math.max(0, Number(count) || 0);
+  if (!size || items.length <= size) return [items];
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 }
 
 function batchFileName(uuid, markFrom, markTo, extension = "txt") {
@@ -1837,7 +1860,7 @@ async function extractOneRecordInfo(context, args, wosid) {
       await window.wos.record.viewFullRecordByWosId(targetWosId);
       const parsed = await window.wos.record.parseCurrentFullRecordPage();
       const normalizedWosId = window.wos.record.currentWosId || targetWosId;
-      const record = parsed?.[normalizedWosId] || parsed?.[targetWosId] || parsed;
+      const record = parsed?.[normalizedWosId] || parsed?.[targetWosId] || Object.values(parsed || {})[0] || parsed;
       if (!record || typeof record !== "object") {
         throw new Error(`No full-record JSON parsed for ${targetWosId}`);
       }
@@ -1847,7 +1870,7 @@ async function extractOneRecordInfo(context, args, wosid) {
         url: location.href,
       };
     }, wosid);
-    raw.wosid = normalizeWosId(raw.wosid) || wosid;
+    raw.wosid = reconcileWosId(wosid, raw.wosid || raw.identifiers?.accessionNumber || raw.url) || wosid;
     raw.fetchedAt = new Date().toISOString();
     return raw;
   } catch (error) {
@@ -1919,46 +1942,87 @@ async function runParse(args) {
   let session = null;
   let processed = 0;
   let parsed = 0;
+  let consecutiveFailures = 0;
+  let sidRecovery = null;
   const failures = [];
+  const refreshSidAfterConsecutiveFailures = async () => {
+    if (sidRecovery) return sidRecovery;
+    sidRecovery = (async () => {
+      console.error(`More than ${PARSE_SID_REFRESH_CONSECUTIVE_FAILURES} WOSID page parses failed in a row. The saved SID may be expired; opening a WOS login window to refresh it.`);
+      appendProgress(paths, { phase: "parse-sid-refresh-start", consecutiveFailures });
+      await session?.close?.();
+      session = null;
+      clearSavedSidConfig(args);
+      await loginForFreshSid(args, console.error);
+      session = await prepareWosSession(args);
+      consecutiveFailures = 0;
+      appendProgress(paths, { phase: "parse-sid-refresh-completed", sidSource: args.sidSource });
+    })().finally(() => {
+      sidRecovery = null;
+    });
+    return sidRecovery;
+  };
   try {
     session = await prepareWosSession(args);
     authSpinner.succeed("WOS authentication validated");
     parseProgress = createProgress("Parsing WOS data", work.length);
-    await runPool(work, args.concurrency, async (item) => {
-      const { wosid, index } = item;
-      appendProgress(paths, { phase: "parse-record-start", wosid, index, total: wosids.length });
-      try {
-        const raw = await extractOneRecordInfo(session.context, args, wosid);
-        const sqliteResult = importWosDataRecord({
-          dbPath: args.dbPath,
-          record: raw,
-          taskId: task.taskId,
-          source: raw.url || `wos:${wosid}`,
-          expectedWosId: wosid,
-          force: args.force,
-        });
-        parsed += 1;
-        appendProgress(paths, { phase: "parse-record", status: "completed", wosid, index, dbPath: args.dbPath, imported: sqliteResult.imported, skipped: sqliteResult.skipped });
-        if (!isInteractive()) {
-          console.error(`parse OK ${index}/${wosids.length} ${wosid} -> ${args.dbPath}`);
-        }
-      } catch (error) {
-        const failure = {
-          wosid,
-          index,
-          error: error && error.stack ? error.stack : String(error),
-          failedAt: new Date().toISOString(),
-        };
-        failures.push(failure);
-        appendProgress(paths, { phase: "parse-record", status: "failed", wosid, index, error: error.message || String(error) });
-        if (!isInteractive()) {
-          console.error(`parse FAIL ${index}/${wosids.length} ${wosid}: ${error.message || error}`);
-        }
+    const chunks = chunkItemsByCount(work, args.browserRestartEvery);
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+      const chunk = chunks[chunkIndex];
+      if (!session) {
+        session = await prepareWosSession(args);
+        appendProgress(paths, { phase: "parse-browser-session-start", chunk: chunkIndex + 1, chunks: chunks.length });
       }
-      processed += 1;
-      parseProgress.update(processed, `${index}/${wosids.length} ${wosid}`, failures.length);
-      if (args.cooldownMs) await sleep(args.cooldownMs);
-    });
+      await runPool(chunk, args.concurrency, async (item) => {
+        if (sidRecovery) await sidRecovery;
+        const { wosid, index } = item;
+        appendProgress(paths, { phase: "parse-record-start", wosid, index, total: wosids.length });
+        try {
+          const raw = await extractOneRecordInfo(session.context, args, wosid);
+          const sqliteResult = importWosDataRecord({
+            dbPath: args.dbPath,
+            record: raw,
+            taskId: task.taskId,
+            source: raw.url || `wos:${wosid}`,
+            expectedWosId: wosid,
+            force: args.force,
+          });
+          parsed += 1;
+          consecutiveFailures = 0;
+          appendProgress(paths, { phase: "parse-record", status: "completed", wosid, index, dbPath: args.dbPath, imported: sqliteResult.imported, skipped: sqliteResult.skipped });
+          if (!isInteractive()) {
+            console.error(`parse OK ${index}/${wosids.length} ${wosid} -> ${args.dbPath}`);
+          }
+        } catch (error) {
+          const failure = {
+            wosid,
+            index,
+            error: error && error.stack ? error.stack : String(error),
+            failedAt: new Date().toISOString(),
+          };
+          failures.push(failure);
+          consecutiveFailures += 1;
+          appendProgress(paths, { phase: "parse-record", status: "failed", wosid, index, error: error.message || String(error) });
+          if (!isInteractive()) {
+            console.error(`parse FAIL ${index}/${wosids.length} ${wosid}: ${error.message || error}`);
+          }
+          if (consecutiveFailures > PARSE_SID_REFRESH_CONSECUTIVE_FAILURES) {
+            await refreshSidAfterConsecutiveFailures();
+          }
+        }
+        processed += 1;
+        parseProgress.update(processed, `${index}/${wosids.length} ${wosid}`, failures.length);
+        if (args.cooldownMs) await sleep(args.cooldownMs);
+      });
+      if (args.browserRestartEvery && chunkIndex < chunks.length - 1) {
+        appendProgress(paths, { phase: "parse-browser-restart", processed, selected: work.length, browserRestartEvery: args.browserRestartEvery });
+        if (!isInteractive()) {
+          console.error(`parse browser restart ${processed}/${work.length}; reusing current SID`);
+        }
+        await session?.close?.();
+        session = null;
+      }
+    }
     parseProgress.stop("WOS data parse complete");
   } finally {
     authSpinner.stop();
@@ -2738,6 +2802,7 @@ module.exports = {
   quickValidateSid,
   validateSidWithRetry,
   prepareWosSession,
+  clearSavedSidConfig,
   buildSidInitUrl,
   wosUserDataDir,
   wosProfileName,
@@ -2762,9 +2827,11 @@ module.exports = {
   isUserQuitError,
   isUserAbortError,
   runPool,
+  chunkItemsByCount,
   prepareWosRequestContext,
   pageContextUuid,
   readWosIdsCsv,
+  normalizeWosId,
   extractUuid,
   maskSid,
   announceResolvedWosUuid,

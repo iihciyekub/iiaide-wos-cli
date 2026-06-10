@@ -517,7 +517,7 @@ class WosGoto {
         }
     }
 
-    /** (内部方法) 规范化传入的 WOS ID，缺少前缀时自动补全为 `WOS:...`
+    /** (内部方法) 规范化传入的 WOS ID；保留传入前缀，不强制补 `WOS:`
      * - wosid: 原始 WOS ID
      * - 返回值: 标准化后的 WOS ID；空值时返回空字符串
      */
@@ -526,7 +526,14 @@ class WosGoto {
         if (!normalized) {
             return '';
         }
-        return normalized.includes(':') ? normalized : `WOS:${normalized}`;
+        const fullRecordMatch = normalized.match(/\/full-record\/([^/?#\s]+)/i);
+        const source = fullRecordMatch ? decodeURIComponent(fullRecordMatch[1]) : normalized;
+        const prefixed = source.match(/^([A-Za-z][A-Za-z0-9]*)\s*[:：]\s*(.+)$/);
+        if (prefixed) {
+            const suffix = String(prefixed[2] || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+            return suffix ? `${prefixed[1].toUpperCase()}:${suffix}` : '';
+        }
+        return source.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
     }
 
     /** (内部方法) 根据 WOS ID 跳转到指定页面，并等待页头文本渲染完成
@@ -731,7 +738,7 @@ class WosIdStore {
         this.db = {};
     }
 
-    /** 规范化 WOS ID，缺少 `WOS:` 前缀时自动补全
+    /** 规范化 WOS ID；保留传入前缀，不强制补 `WOS:`
      * - wosid: 原始 WOS ID
      * - 返回值: 标准化后的 WOS ID；空值时返回空字符串
      */
@@ -740,7 +747,14 @@ class WosIdStore {
         if (!normalized) {
             return '';
         }
-        return normalized.includes(':') ? normalized : `WOS:${normalized}`;
+        const fullRecordMatch = normalized.match(/\/full-record\/([^/?#\s]+)/i);
+        const source = fullRecordMatch ? decodeURIComponent(fullRecordMatch[1]) : normalized;
+        const prefixed = source.match(/^([A-Za-z][A-Za-z0-9]*)\s*[:：]\s*(.+)$/);
+        if (prefixed) {
+            const suffix = String(prefixed[2] || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+            return suffix ? `${prefixed[1].toUpperCase()}:${suffix}` : '';
+        }
+        return source.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
     }
 
     /** 将数据按 WOS ID 合并写入当前会话的内存缓存

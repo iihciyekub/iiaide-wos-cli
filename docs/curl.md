@@ -332,6 +332,11 @@ curl -L \
   -o /tmp/wos-full-record.html
 ```
 
+The path segment after `full-record/` uses the accession prefix from the TXT or
+CSV value. The CLI does not force a `WOS:` prefix when the input has another
+prefix. Parsed page IDs are validated against the expected input ID after
+removing non-alphanumeric characters from both values.
+
 Important distinction:
 
 - Page parsing is browser/page based, not a request-only JSON API path.
@@ -340,6 +345,11 @@ Important distinction:
   `wos.record.parseCurrentFullRecordPage()` in the page context.
 - CLI validates the structured page data and writes one SQLite row per WOSID to
   `~/.iiaide-wos/wosdata.sqlite`.
+- By default, parse work is grouped into 100-record browser batches. Between
+  batches, the CLI closes Playwright and opens a fresh context with the same SID.
+  Use `--browser-restart-every 0` to disable that behavior.
+- If more than 20 full-record page parses fail consecutively, the CLI clears the
+  saved SID and opens a visible WOS login window before continuing parse work.
 - The UUID-specific WOSID index remains at
   `raw/<uuid>/full-record/<uuid>_wosid.csv` and is the input list for parse.
 - For `parse --csv`, the local CSV is normalized into

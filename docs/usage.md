@@ -132,6 +132,12 @@ For every successfully processed WOS ID it validates the parsed object, augments
 it with `wosid`, `url`, and `fetchedAt`, and writes it directly to
 `~/.iiaide-wos/wosdata.sqlite`.
 
+The parse workflow preserves the accession prefix found in the TXT or CSV input
+instead of forcing every record URL into `WOS:<id>`. During validation, the
+expected TXT/CSV ID and the parsed page ID are compared after removing
+non-alphanumeric characters, which tolerates punctuation-only differences while
+still requiring the same prefix and identifier content.
+
 The UUID's WOSID CSV remains the index for that result set:
 
 ```text
@@ -166,6 +172,10 @@ Resume behavior is database-based:
 - `--force` refetches existing WOSID records and overwrites the SQLite row after validation.
 - `--from-index` and `--limit` select a slice of the WOSID index.
 - Failures are recorded at `raw/<uuid>/full-record/<uuid>_parse_failures.json`.
+- `--browser-restart-every <n>` restarts Playwright between parse batches while
+  reusing the current SID. The default is `100`; use `0` to disable it.
+- More than 20 consecutive full-record page parse failures clears the saved SID,
+  opens a visible WOS login window, saves the refreshed SID, and continues.
 
 Before the parse stage, WOSIDs already present in the global SQLite database are
 treated as completed and are skipped. After the parse stage, newly completed
@@ -203,7 +213,7 @@ URL/result-set UUID or a local `.csv` file path; the CLI chooses the matching
 parse pipeline automatically. The default parse options are:
 
 ```text
-concurrency=1 | timeout=20000ms | cooldown=250ms | from=1 | limit=all
+concurrency=1 | timeout=20000ms | cooldown=250ms | restart=100 | from=1 | limit=all
 ```
 
 ## Task Lifecycle

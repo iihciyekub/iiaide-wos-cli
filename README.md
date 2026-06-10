@@ -304,6 +304,21 @@ await wos.record.viewFullRecordByWosId("WOS:000000000000001")
 await wos.record.parseCurrentFullRecordPage()
 ```
 
+WOSID parsing preserves the accession prefix found in the TXT or CSV input. The
+CLI no longer forces parsed IDs into a `WOS:<id>` shape; it validates the
+expected TXT/CSV ID against the parsed page ID by comparing both values with
+non-alphanumeric characters removed.
+
+If full-record page parsing fails more than 20 times consecutively, the saved
+SID is treated as suspect. The CLI clears it, opens a visible WOS browser login,
+detects the refreshed SID, and then continues parsing with the refreshed
+session.
+
+For long parse runs, the CLI also restarts the Playwright browser context every
+100 attempted WOSID page parses by default while reusing the current SID. Tune
+this with `--browser-restart-every <n>` or disable it with
+`--browser-restart-every 0`.
+
 Before parsing, the CLI checks the global SQLite database and skips WOSIDs that are already present. New full-record page data is validated and written directly to `~/.iiaide-wos/wosdata.sqlite`; no local WOSID JSON files are written. To merge records collected in another WOS SQLite database, run:
 
 ```bash

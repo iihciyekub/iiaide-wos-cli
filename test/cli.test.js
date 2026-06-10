@@ -12,6 +12,7 @@ const { readJson, writeJson } = require("../src/lib/io");
 const { classifyWosIdsToSqlInput, currentTaskSelection, formatBytes, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
 const { createProgress, createSpinner } = require("../src/lib/terminal");
 const { normalizeBatchResult } = require("../src/lib/wos-browser-export");
+const { wosIdsEquivalent } = require("../src/lib/wos-ids");
 
 function temporaryDirectory() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "iiaide-wos-test-"));
@@ -97,6 +98,18 @@ test("parses SID check tasks", () => {
   assert.equal(args.tasksRoot, root);
 });
 
+test("parse browser restart interval is configurable", () => {
+  const root = temporaryDirectory();
+  const defaults = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
+  assert.equal(defaults.browserRestartEvery, 100);
+
+  const disabled = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--browser-restart-every", "0", "--tasks-root", root]);
+  assert.equal(disabled.browserRestartEvery, 0);
+
+  const tuned = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--restart-every", "50", "--tasks-root", root]);
+  assert.equal(tuned.browserRestartEvery, 50);
+});
+
 test("supports WOS domain variables for generated URLs", () => {
   const root = temporaryDirectory();
   const args = cli.parseArgs([
@@ -113,6 +126,25 @@ test("uses the canonical Web of Science SID initialization URL", () => {
     cli.buildSidInitUrl("USW2EC0F65Ywm8LOVJHYvtqhrtPKt"),
     "https://www.webofscience.com/wos/?Init=Yes&SrcApp=CR&SID=USW2EC0F65Ywm8LOVJHYvtqhrtPKt"
   );
+});
+
+test("clears saved SID before browser-login repair", () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "parse", "--task", "sid-repair", "--tasks-root", root]);
+  writeJson(path.join(root, "config.json"), {
+    version: 1,
+    sid: "stale",
+    baseUrl: "https://www.webofscience.com",
+    wosDomain: "www.webofscience.com",
+  });
+  args.sid = "stale";
+  args.sidSource = "config";
+
+  assert.equal(cli.clearSavedSidConfig(args), true);
+  assert.equal(args.sid, "");
+  assert.equal(args.sidSource, "");
+  assert.equal(readJson(path.join(root, "config.json")).sid, undefined);
+  assert.equal(readJson(path.join(root, "config.json")).baseUrl, "https://www.webofscience.com");
 });
 
 test("detects readline Ctrl+C abort errors", () => {
@@ -648,6 +680,20 @@ test("WOS data records import into global SQLite without raw TXT or BibTeX", () 
   } finally {
     db.close();
   }
+});
+
+test("WOS data validation compares accession IDs without punctuation-only differences", () => {
+  const root = temporaryDirectory();
+  const dbPath = path.join(root, "global.sqlite");
+  const result = seedWosDataRecord(dbPath, "punctuation", {
+    wosid: "ALT:12345",
+    title: "Equivalent ID",
+  }, {
+    expectedWosId: "ALT:123-45",
+  });
+
+  assert.equal(result.imported, 1);
+  assert.equal(wosIdsEquivalent("ALT:123-45", "ALT12345"), true);
 });
 
 test("wosdata skips existing records by default and force overwrites them", () => {
@@ -1228,8 +1274,19 @@ test("invalid SID can be replaced and immediately revalidated", async () => {
 });
 
 test("parses and deduplicates WOS IDs from field-tagged text", () => {
-  const rows = cli.parseExportText("UT WOS:ABC\nUT: WOS:DEF\nUT WOS:ABC\n", 1, 3);
-  assert.deepEqual(rows.map((row) => row.wosid), ["WOS:ABC", "WOS:DEF"]);
+  const rows = cli.parseExportText("UT WOS:ABC\nUT: WOS:DEF\nUT ALT:12-34\nUT WOS:ABC\n", 1, 4);
+  assert.deepEqual(rows.map((row) => row.wosid), ["WOS:ABC", "WOS:DEF", "ALT:1234"]);
+});
+
+test("normalizes accession IDs without forcing the WOS prefix", () => {
+  assert.equal(cli.normalizeWosId("ALT:12-34"), "ALT:1234");
+  assert.equal(cli.normalizeWosId("https://www.webofscience.com/wos/woscc/full-record/ALT:12-34"), "ALT:1234");
+  assert.equal(cli.normalizeWosId("000123456700001"), "");
+});
+
+test("chunks parse work for browser restart boundaries", () => {
+  assert.deepEqual(cli.chunkItemsByCount([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
+  assert.deepEqual(cli.chunkItemsByCount([1, 2, 3], 0), [[1, 2, 3]]);
 });
 
 test("reads WOS IDs from a named CSV column and deduplicates them", () => {
@@ -1238,11 +1295,11 @@ test("reads WOS IDs from a named CSV column and deduplicates them", () => {
   fs.writeFileSync(csvPath, [
     "title,UT,notes",
     '"First, title",WOS:ABC,"quoted, note"',
-    "Second,WOS:DEF,",
+    "Second,ALT:12-34,",
     "Duplicate,wos:abc,",
   ].join("\n"));
 
-  assert.deepEqual(cli.readWosIdsCsv(csvPath), ["WOS:ABC", "WOS:DEF"]);
+  assert.deepEqual(cli.readWosIdsCsv(csvPath), ["WOS:ABC", "ALT:1234"]);
 });
 
 test("imports an external WOS ID CSV as a complete task", () => {
