@@ -335,6 +335,10 @@ Important distinction:
   address, affiliation, email, ResearcherID, ORCID, and ROR data from the page.
 - CLI writes one raw author extraction JSON per WOS ID to
   `raw/<uuid>/author/<WOSID>.json`.
+- Article full-record extraction uses the injected `wos.js` page API
+  (`wos.record.viewFullRecordByWosId()` plus
+  `wos.record.parseCurrentFullRecordPage()`) and writes one structured raw JSON
+  file per WOS ID to `raw/<uuid>/record/<WOSID>.json`.
 - CLI also writes `export/<uuid>/author/<uuid>_authors_simple.csv`, a
   deduplicated six-column address/affiliation table with `wosid`,
   `authorIndex`, `address`, `affiliation`, `rorId`, and

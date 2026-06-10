@@ -526,6 +526,7 @@ async function askWorkflow(rl) {
   workflowItem("1.2", "UUID - BIB format", "URL/UUID -> raw/<uuid>/bib/*.bib");
   workflowGroup("2", "Export");
   workflowItem("2.1", "Author & address", "URL/UUID -> TXT -> WOS IDs -> authors CSV");
+  workflowItem("2.2", "Article full record", "URL/UUID -> TXT -> WOS IDs -> record fields CSV");
   workflowGroup("3", "Task manager");
   workflowItem("3.1", "New", "Create a fresh current task");
   workflowItem("3.2", "Switch", "Select an existing current task");
@@ -538,8 +539,8 @@ async function askWorkflow(rl) {
     const choice = (await ask(rl, "Select workflow")).toLowerCase();
     if (isBackInput(choice)) return CONTROL_BACK;
     if (isQuitInput(choice)) return CONTROL_QUIT;
-    if (["0.1", "1.1", "1.2", "2.1", "3.1", "3.2", "3.3"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 0.1, 1.1, 1.2, 2.1, 3.1, 3.2, 3.3, c to go back, or q to quit\n`);
+    if (["0.1", "1.1", "1.2", "2.1", "2.2", "3.1", "3.2", "3.3"].includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose 0.1, 1.1, 1.2, 2.1, 2.2, 3.1, 3.2, 3.3, c to go back, or q to quit\n`);
   }
 }
 
@@ -780,10 +781,10 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       return { refresh: true };
     }
     const sourceFlag = /^https?:\/\//i.test(source) ? "--url" : "--uuid";
-    const command = choice === "2.1" ? "pipeline" : (choice === "1.2" ? "bib" : "run");
+    const command = choice === "2.1" ? "pipeline" : (choice === "2.2" ? "records-pipeline" : (choice === "1.2" ? "bib" : "run"));
     const result = [command, sourceFlag, source, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot];
     if (command !== "bib") result.push("--reuse-raw");
-    if (choice === "2.1") {
+    if (choice === "2.1" || choice === "2.2") {
       const authorArgs = await askAuthorOptions(rl);
       if (isBackResult(authorArgs)) return { refresh: true };
       if (isQuitResult(authorArgs)) return null;

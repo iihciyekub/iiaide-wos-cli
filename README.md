@@ -14,9 +14,9 @@ It currently supports three input workflows:
 3. Provide a WOS summary URL or result-set UUID and download BibTeX batches.
 
 After a workflow creates a task, the CLI can open each WOS full-record
-page and extract author, address, affiliation, email, ResearcherID, ORCID, and
-ROR information. The complete task directory can then be archived, shared, or
-used by downstream tools.
+page and extract author/address information or generic article full-record
+fields. The complete task directory can then be archived, shared, or used by
+downstream tools.
 
 ## What The Project Produces
 
@@ -27,7 +27,8 @@ tasks/<task-id>/
   raw/<uuid>/full-record/   # <uuid>_<start>_<end>.txt raw WOS export batches
   raw/<uuid>/bib/           # <uuid>_<start>_<end>.bib BibTeX export batches
   raw/<uuid>/author/        # <WOSID>.json raw author page extraction
-  export/<uuid>/full-record/
+  raw/<uuid>/record/        # <WOSID>.json raw article full-record extraction
+  export/<uuid>/wosid/
     <uuid>_wosid.csv        # normalized one-column WOS ID list
   export/<uuid>/bib/
     <uuid>.bib              # combined BibTeX file
@@ -36,6 +37,11 @@ tasks/<task-id>/
     <uuid>_authors_simple.csv
     <uuid>_authors.jsonl
     checkpoint.json         # resume state
+    failures.json
+  export/<uuid>/record/
+    <uuid>_record_fields.csv
+    <uuid>_record_fields.jsonl
+    checkpoint.json
     failures.json
   logs/progress.jsonl
   manifest.json
@@ -48,8 +54,9 @@ If a repeat run finds raw batches but the formatted export file is missing, the
 CLI rebuilds the missing export locally before attempting another WOS download.
 
 Artifact-producing commands print only the final artifact path on success:
-`bib` prints the combined `.bib`, `run` and `import` print the WOSID CSV, and
-`authors` or `pipeline` print the UUID-scoped author CSV.
+`bib` prints the combined `.bib`, `run` and `import` print the WOSID CSV,
+`authors` or `pipeline` print the UUID-scoped author CSV, and `records` or
+`records-pipeline` print the UUID-scoped record fields CSV.
 
 ## Install
 
@@ -66,7 +73,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.3.91
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.3.95
 npx playwright install chromium
 iiaide-wos
 ```
@@ -244,7 +251,7 @@ iiaide-wos run \
 ```
 
 The CLI downloads field-tagged full records and generates
-`tasks/demo-search/export/<uuid>/full-record/<uuid>_wosid.csv`.
+`tasks/demo-search/export/<uuid>/wosid/<uuid>_wosid.csv`.
 
 ### 2B. Create A Task From A WOS UUID
 
@@ -300,8 +307,12 @@ The author stage is checkpointed. Running the same command again skips
 completed WOS IDs and continues incomplete work.
 If the checkpoint is missing but matching raw author JSON files already exist,
 the CLI repairs the checkpoint from those files before deciding what to fetch.
-Older task layouts with `data/<uuid>_wosid.csv` and
-`raw/<uuid>/authors/*.json` are reconciled during this local resume step.
+Older task layouts with `export/<uuid>/full-record/<uuid>_wosid.csv`,
+`data/<uuid>_wosid.csv`, and `raw/<uuid>/authors/*.json` are reconciled during
+this local resume step.
+Raw author JSON also includes generic full-record extraction from
+`snMainArticle` as `recordFields`, `recordTables`, and `recordSections` after
+the CLI opens expandable full-record controls.
 It writes the full expanded
 `export/<uuid>/author/<uuid>_authors.csv` plus
 `export/<uuid>/author/<uuid>_authors_simple.csv`, a deduplicated six-column
@@ -324,6 +335,26 @@ as it sees author content or a WOS root redirect.
 In the interactive `2.1 Author & address` workflow, iiaide-wos shows these
 defaults before starting; press Enter to keep them, or choose to edit the
 values for that run.
+
+### 4. Extract Article Full-Record Fields
+
+```bash
+iiaide-wos records-pipeline --uuid "<uuid>" --task "demo-search"
+```
+
+`records-pipeline` is the article full-record equivalent of `pipeline`: it
+reuses or downloads the WOS ID list, then opens each full-record page through
+the injected browser-side `wos.js` helper and writes structured full-record JSON.
+If a task already has WOS IDs, run only the extraction stage:
+
+```bash
+iiaide-wos records --task "demo-search"
+```
+
+Raw per-record JSON is saved to `raw/<uuid>/record/<WOSID>.json`. The CLI also
+flattens that structured JSON into `export/<uuid>/record/<uuid>_record_fields.csv`,
+with matching JSONL at `<uuid>_record_fields.jsonl`. In the interactive menu, use
+`2.2 Article full record`.
 
 Useful options:
 
@@ -373,7 +404,9 @@ Before prompting for a task, the menu prints a short `Task selection:` hint so
 the available inputs are visible before the cursor waits for input.
 Interactive downloads reuse the current task by default. If the same UUID is
 already completed, iiaide-wos skips SID validation and WOS download, then prints
-the existing final artifact path.
+the existing final artifact path. A different UUID can be appended to the same
+task; its files are kept in separate `raw/<uuid>/` and `export/<uuid>/`
+directories.
 At the `WOS summary URL or UUID` prompt, pressing Enter uses the shown saved
 source when one exists. Without a saved source, enter a source, press `c` to
 return to the menu, or press `q` to exit the CLI.
@@ -389,6 +422,7 @@ The interactive workflow menu is grouped by command family:
   1.2 UUID - BIB format
 2 Export
   2.1 Author & address
+  2.2 Article full record
 3 Task manager
   3.1 New
   3.2 Switch

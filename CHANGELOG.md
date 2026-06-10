@@ -3,6 +3,55 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.3.98 - 2026-06-10
+
+- Route the CLI `records` extraction stage through the injected browser-side
+  `wos.record.viewFullRecordByWosId()` and
+  `wos.record.parseCurrentFullRecordPage()` helpers, saving the structured JSON
+  under `raw/<uuid>/record/<WOSID>.json`.
+- Flatten the structured full-record JSON into the existing record field CSV and
+  JSONL exports for indexing.
+
+## 0.3.97 - 2026-06-10
+
+- Rename the browser-side full-record page parser entry point to
+  `wos.record.parseCurrentFullRecordPage()` so the API reflects DOM parsing
+  rather than request fetching.
+
+## 0.3.96 - 2026-06-10
+
+- Add browser-side WOS full-record page expansion and structured parsing helpers
+  to `import/wos.js`, exposed through `wos.record.fetchCurrentPageInfo()`.
+
+## 0.3.95 - 2026-06-10
+
+- Rename the WOS ID CSV export directory from `export/<uuid>/full-record/` to
+  `export/<uuid>/wosid/`, because the exported artifact is the normalized WOSID
+  list rather than raw full-record data.
+- Keep reading existing `export/<uuid>/full-record/<uuid>_wosid.csv` files as a
+  legacy WOSID location for already-created tasks.
+
+## 0.3.94 - 2026-06-10
+
+- Allow a managed task to append downloads for multiple WOS UUIDs, keeping each
+  UUID's files isolated under its own `raw/<uuid>/` and `export/<uuid>/`
+  directories.
+- Ignore stale task-level summary metadata from a different UUID when deciding
+  whether current raw batches can be reused.
+
+## 0.3.93 - 2026-06-10
+
+- Add `records` and `records-pipeline` commands for full-record page field
+  extraction, with outputs under `raw/<uuid>/record/` and
+  `export/<uuid>/record/`.
+- Add the interactive `2.2 Article full record` workflow.
+
+## 0.3.92 - 2026-06-10
+
+- Expand WOS full-record controls during author extraction and store generic
+  `snMainArticle` field extraction in raw author JSON as `recordFields`,
+  `recordTables`, and `recordSections`.
+
 ## 0.3.91 - 2026-06-10
 
 - Repair missing author checkpoints from existing raw author JSON files before

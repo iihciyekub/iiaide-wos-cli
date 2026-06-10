@@ -1031,6 +1031,559 @@ class WosIdStore {
         return { [this.currentWosId]: record };
     }
 
+
+    /** 展开当前 WOS full record 页面中的折叠信息，再解析为 JSON 对象
+     * - root: full record 主内容 DOM，默认 `#snMainArticle`
+     * - options.delay: 每次点击后的等待时间，默认 350ms
+     * - options.rounds: 展开轮次，默认 4
+     */
+    async parseWosFullRecordAfterExpand(root = document.querySelector('#snMainArticle'), options = {}) {
+        await this.expandWosFullRecord(root, options);
+        return this.parseWosFullRecord(root);
+    }
+
+    /** 展开当前 WOS full record 页面中可展开的记录字段
+     * - root: full record 主内容 DOM，默认 `#snMainArticle`
+     * - 返回值: 已尝试点击的唯一控件数量
+     */
+    async expandWosFullRecord(root = document.querySelector('#snMainArticle'), options = {}) {
+        if (!root) {
+            return 0;
+        }
+
+        const delay = options.delay ?? 350;
+        const rounds = options.rounds ?? 4;
+        const clicked = new Set();
+
+        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+        const clean = s =>
+            (s || '')
+                .replace(/\s+/g, ' ')
+                .trim();
+
+        const visible = el => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' &&
+                style.visibility !== 'hidden' &&
+                style.opacity !== '0' &&
+                rect.width > 0 &&
+                rect.height > 0;
+        };
+
+        const keyOf = el =>
+            [
+                el.id,
+                el.getAttribute('data-ta'),
+                el.getAttribute('aria-label'),
+                clean(el.textContent)
+            ].filter(Boolean).join('|');
+
+        const shouldClick = el => {
+            if (!visible(el)) return false;
+
+            const tag = el.tagName.toLowerCase();
+            const href = el.getAttribute('href') || '';
+
+            if (tag === 'a' && href && !href.startsWith('javascript:') && href !== '#') {
+                return false;
+            }
+
+            const signal = clean([
+                el.id,
+                el.getAttribute('data-ta'),
+                el.getAttribute('aria-label'),
+                el.getAttribute('aria-expanded'),
+                el.textContent,
+                el.querySelector('mat-icon')?.textContent
+            ].join(' '));
+
+            if (/close|fewer|less|collapse|back|clear|add journal|view record in/i.test(signal)) {
+                return false;
+            }
+
+            if (el.getAttribute('aria-expanded') === 'false') return true;
+
+            return /show|view|expand|more|arrow_drop_down|journal impact|researcherid|orcid|details|data fields|funding/i.test(signal);
+        };
+
+        for (let round = 0; round < rounds; round++) {
+            const controls = [
+                ...root.querySelectorAll('mat-expansion-panel-header[aria-expanded="false"]'),
+                ...root.querySelectorAll('button'),
+                ...root.querySelectorAll('a[role="button"]'),
+                ...root.querySelectorAll('[role="button"][aria-expanded="false"]')
+            ].filter(shouldClick);
+
+            let count = 0;
+
+            for (const el of controls) {
+                const key = keyOf(el);
+                if (!key || clicked.has(key)) continue;
+
+                clicked.add(key);
+
+                try {
+                    el.scrollIntoView({ block: 'center', inline: 'center' });
+                    await sleep(80);
+                    el.click();
+                    count++;
+                    await sleep(delay);
+                } catch (error) {
+                    console.debug('[WOS] Failed to expand full record control.', error);
+                }
+            }
+
+            if (!count) break;
+        }
+
+        return clicked.size;
+    }
+
+    /** 解析 WOS full record 页面 DOM 或 HTML 字符串为 JSON 对象
+     * - input: `#snMainArticle` DOM、Document、Element 或 HTML 字符串
+     */
+    parseWosFullRecord(input = document.querySelector('#snMainArticle')) {
+        if (!input) {
+            return null;
+        }
+
+        const doc = typeof input === 'string'
+            ? new DOMParser().parseFromString(input, 'text/html')
+            : input;
+
+        const root = doc.querySelector?.('#snMainArticle') || doc;
+
+        const $ = (selector, base = root) => base?.querySelector?.(selector) || null;
+        const $$ = (selector, base = root) => [...(base?.querySelectorAll?.(selector) || [])];
+
+        const clean = s =>
+            (s || '')
+                .replace(/open_in_new|arrow_drop_down|arrow_drop_up|expand_more|expand_less|chevron_right/g, ' ')
+                .replace(/\u00a0/g, ' ')
+                .replace(/\s+/g, ' ')
+                .replace(/\s+;/g, ';')
+                .trim();
+
+        const cleanText = el => {
+            if (!el) return '';
+            const clone = el.cloneNode(true);
+            clone.querySelectorAll('mat-icon, script, style, .cdk-visually-hidden').forEach(x => x.remove());
+            return clean(clone.textContent);
+        };
+
+        const text = (selector, base = root) => cleanText($(selector, base));
+
+        const attr = (selector, name, base = root) =>
+            $(selector, base)?.getAttribute(name)?.trim() || '';
+
+        const absUrl = href => {
+            if (!href) return '';
+            if (/^(mailto:|https?:)/i.test(href)) return href;
+            try {
+                return new URL(href, location.origin).href;
+            } catch (error) {
+                return href;
+            }
+        };
+
+        const uniq = arr => [...new Set(arr.filter(Boolean))];
+
+        const dedupeObjects = (arr, keyFn = x => JSON.stringify(x)) => {
+            const seen = new Set();
+            return arr.filter(item => {
+                const key = keyFn(item);
+                if (!key || seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+        };
+
+        const getById = id => text(`#${CSS.escape(id)}`);
+
+        const directGridValue = labelId => {
+            const label = $(`#${CSS.escape(labelId)}`);
+            if (!label) return '';
+            const container = label.closest('.source-info-piece, .hidden-data-item, .cdx-two-column-grid-container') || label.parentElement;
+            if (!container) return '';
+            const clone = container.cloneNode(true);
+            clone.querySelector(`#${CSS.escape(labelId)}`)?.remove();
+            clone.querySelectorAll('button, mat-icon, script, style').forEach(x => x.remove());
+            return clean(clone.textContent);
+        };
+
+        const fieldByHeading = headingRegex => {
+            const headings = $$('h2, h3');
+            const heading = headings.find(h => headingRegex.test(cleanText(h)));
+            if (!heading) return '';
+
+            const box = heading.closest('.cdx-two-column-grid-container, .source-info-piece, .author-info-section, .hidden-data-item') || heading.parentElement;
+            if (!box) return '';
+
+            const clone = box.cloneNode(true);
+            clone.querySelectorAll('h2, h3, button, mat-icon, script, style').forEach(x => x.remove());
+
+            return clean(clone.textContent);
+        };
+
+        const links = (selector, base = root) =>
+            $$(selector, base).map(a => ({
+                text: cleanText(a),
+                href: absUrl(a.getAttribute('href') || '')
+            })).filter(x => x.text || x.href);
+
+        const parseMetric = prefix => {
+            const categories = $$(`[id^="${prefix}-category-name_"]`).map(el => {
+                const index = el.id.match(/_(\d+)$/)?.[1];
+
+                return {
+                    category: cleanText(el),
+                    edition: text(`#${CSS.escape(prefix)}-edition_${index}`),
+                    rank: text(`#${CSS.escape(prefix)}-rank_${index}`),
+                    quartile: text(`#${CSS.escape(prefix)}-quartile_${index}`)
+                };
+            });
+
+            return {
+                title: text(`#${CSS.escape(prefix)}`),
+                year: text(`#${CSS.escape(prefix)}-year`),
+                value: text(`#${CSS.escape(prefix)}-value`),
+                secondaryLabel: text(`#${CSS.escape(prefix)}-journal-year`),
+                secondaryValue: text(`#${CSS.escape(prefix)}-journal-value`),
+                source: text(`#${CSS.escape(prefix)}-related-Info`),
+                link: absUrl(attr(`#${CSS.escape(prefix)}-learnMore`, 'href')),
+                categories
+            };
+        };
+
+        const parseAuthorAffiliationNumbers = authorEl =>
+            $$('a[id*="FrAddrNbr"]', authorEl)
+                .map(a => cleanText(a).match(/\d+/)?.[0])
+                .filter(Boolean);
+
+        const authors = $$('span[id^="author-"]').map((authorEl, index) => {
+            const link = $('a[id^="SumAuthTa-DisplayName"]', authorEl);
+            const href = link?.getAttribute('href') || '';
+
+            return {
+                index,
+                displayName: text('a[id^="SumAuthTa-DisplayName"] span', authorEl),
+                fullName: text('span[id^="SumAuthTa-FrAuthStandard"] .value', authorEl),
+                wosAuthorUrl: absUrl(href),
+                wosAuthorRecordId: href.match(/\/record\/([^/?#]+)/)?.[1] || '',
+                affiliationNumbers: parseAuthorAffiliationNumbers(authorEl)
+            };
+        }).filter(x => x.displayName || x.fullName);
+
+        const authorIdentifiers = $$('app-full-record-author-identifiers tbody tr').map(row => {
+            const researcherLink = $('td:nth-child(2) a', row);
+            const orcidLink = $('td:nth-child(3) a', row);
+            const orcidUrl = orcidLink?.getAttribute('href') || '';
+
+            return {
+                author: text('td:nth-child(1)', row),
+                researcherId: text('td:nth-child(2) a span, td:nth-child(2) a', row),
+                researcherIdUrl: absUrl(researcherLink?.getAttribute('href') || ''),
+                orcid: orcidUrl.match(/\d{4}-\d{4}-\d{4}-\d{3}[\dX]/)?.[0] || text('td:nth-child(3) a span, td:nth-child(3) a', row),
+                orcidUrl: absUrl(orcidUrl)
+            };
+        }).filter(x => x.author);
+
+        const parseAffiliations = base =>
+            $$('.rorDisplay', base).map(block => {
+                const rorLink = $('a[href^="https://ror.org/"]', block);
+                const affiliationLink = $('a:not([href^="https://ror.org/"]) span, a:not([href^="https://ror.org/"])', block);
+
+                return {
+                    organization: cleanText(affiliationLink),
+                    organizationUrl: absUrl(affiliationLink?.closest?.('a')?.getAttribute('href') || ''),
+                    rorId: cleanText(rorLink),
+                    rorUrl: absUrl(rorLink?.getAttribute('href') || '')
+                };
+            }).filter(x => x.organization || x.rorId);
+
+        const addresses = $$('app-full-record-addresses-data app-full-record-author-organization > div')
+            .map(block => {
+                const addressLink = $('a[id^="address_"]', block);
+                if (!addressLink) return null;
+
+                return {
+                    number: text('sup strong', addressLink).replace(/\D/g, ''),
+                    address: text('.value', addressLink),
+                    affiliations: parseAffiliations(block)
+                };
+            })
+            .filter(Boolean);
+
+        const correspondingAddresses = $$('[id^="FRAiinTa-RepAddrTitle-"]').map(block => {
+            const holder = block.closest('app-full-record-author-item') || block;
+
+            return {
+                author: text('.author-display-name', holder),
+                role: cleanText(holder).includes('corresponding author') ? 'corresponding author' : '',
+                address: text('[id^="FRAOrgTa-RepAddressFull"]', holder),
+                affiliations: parseAffiliations(holder)
+            };
+        }).filter(x => x.author || x.address);
+
+        const emails = uniq(
+            $$('a[href^="mailto:"]').map(a =>
+                a.getAttribute('href').replace(/^mailto:/i, '').trim()
+            )
+        );
+
+        const authorKeywords = uniq(
+            $$('a[id^="FRkeywordsTa-authorKeywordLink"] span')
+                .map(cleanText)
+        );
+
+        const keywordsPlus = uniq(
+            $$('a[id*="keywordPlus" i] span, a[id*="KeyWordPlus" i] span')
+                .map(cleanText)
+        );
+
+        const allKeywordLinks = links('app-full-record-keywords a');
+
+        const researchAreas = uniq(
+            $$('[id^="CategoriesTa-subject-"]')
+                .map(cleanText)
+        );
+
+        const citationTopics = links('a[id^="CategoriesTa-citationTopic"] span')
+            .map(x => x.text);
+
+        const sustainableDevelopmentGoals = links('a[id^="CategoriesTa-sdg-category"] span')
+            .map(x => x.text);
+
+        const wosCategories = links('a[id^="CategoriesTa-WOSCategory"] span')
+            .map(x => x.text);
+
+        const meshTerms = (() => {
+            const rows = $$('#CategoriesTa-meshTerms-table tbody tr');
+            const terms = [];
+
+            for (const row of rows) {
+                const firstCell = $('td:nth-child(1)', row);
+                const heading = text('td:nth-child(1) a span, td:nth-child(1) a', row);
+                const qualifier = text('td:nth-child(2)', row);
+                const majorTopic = cleanText(firstCell).startsWith('*');
+
+                if (heading) {
+                    terms.push({
+                        heading,
+                        majorTopic,
+                        qualifiers: qualifier ? [qualifier] : []
+                    });
+                } else if (qualifier && terms.length) {
+                    terms[terms.length - 1].qualifiers.push(qualifier);
+                }
+            }
+
+            return terms;
+        })();
+
+        const fundingText = text('app-full-record-funding #FundingTa-fundAck + .value');
+
+        const funding = $$('app-full-record-funding td[id^="FundingTa-fundingShowHide-"]').map(td => {
+            const index = td.id.match(/-(\d+)$/)?.[1];
+            const row = td.closest('tr');
+            const detailRow = row?.nextElementSibling;
+            const detailText = cleanText(detailRow);
+
+            return {
+                agency: text(`[id="FundingTa-fundingShowHide-${index}-agencyName"]`),
+                agencyUrl: absUrl(attr(`#FundingTa-fundingShowHide-${index} a`, 'href')),
+                grantNumbers: uniq(
+                    $$(`#FundingTa-fund-table-grant-${index} a span, #FundingTa-fund-table-grant-${index} a`)
+                        .map(cleanText)
+                ),
+                grantUrls: uniq(
+                    $$(`#FundingTa-fund-table-grant-${index} a`)
+                        .map(a => absUrl(a.getAttribute('href') || ''))
+                ),
+                details: detailText,
+                appearedInSourceAs: detailText.match(/Appeared in source as:\s*(.+)$/i)?.[1] || ''
+            };
+        }).filter(x => x.agency || x.grantNumbers.length);
+
+        const documentTypes = $$('[id^="FullRTa-doctype-"]')
+            .map(el => cleanText(el).replace(/;$/, '').trim())
+            .filter(Boolean);
+
+        const citationSubsets = $$('[id^="HiddenSecTa-citationSubset-"]')
+            .map(cleanText)
+            .filter(Boolean);
+
+        const sourceTitleEl = $('.source-title-display a:first-of-type');
+        const sourceTitle = cleanText($('.source-title-display mark')) || cleanText(sourceTitleEl);
+
+        const data = {
+            title: text('#FullRTa-fullRecordtitle-0'),
+
+            authors,
+            authorIdentifiers,
+
+            source: {
+                title: sourceTitle,
+                titleUrl: absUrl(sourceTitleEl?.getAttribute('href') || ''),
+                publisher: text('#jcrSidenav-0-pub-name .cdx-right-panel-sub:last-child'),
+                volume: getById('FullRTa-volume'),
+                issue: getById('FullRTa-issue'),
+                page: getById('FullRTa-pageNo'),
+                articleNumber: getById('FullRTa-articleNumberValue'),
+                doi: getById('FullRTa-DOI'),
+                published: getById('FullRTa-pubdate'),
+                earlyAccess: getById('FullRTa-earlyAccess'),
+                indexed: getById('FullRTa-indexedDate'),
+                documentTypes
+            },
+
+            journalMetrics: {
+                journal: text('#jcrSidenav-0-main-header'),
+                publisher: text('#jcrSidenav-0-pub-name .cdx-right-panel-sub:last-child'),
+                jif: parseMetric('Sidenav-0-JCR'),
+                jci: parseMetric('Sidenav-0-JCI')
+            },
+
+            abstract: text('#FullRTa-abstract-basic'),
+
+            keywords: {
+                authorKeywords,
+                keywordsPlus,
+                allKeywordLinks
+            },
+
+            authorInformation: {
+                correspondingAddresses,
+                emails,
+                addresses
+            },
+
+            statements: {
+                dataAvailability: fieldByHeading(/^data availability statement$/i),
+                conflictOfInterest: fieldByHeading(/^conflict of interest statement$/i)
+            },
+
+            categories: {
+                researchAreas,
+                citationTopics,
+                sustainableDevelopmentGoals,
+                wosCategories,
+                meshTerms
+            },
+
+            funding: {
+                text: fundingText,
+                items: funding
+            },
+
+            identifiers: {
+                language: getById('HiddenSecTa-language-0'),
+                accessionNumber: getById('HiddenSecTa-accessionNo'),
+                pubmedId: getById('HiddenSecTa-pubmedId'),
+                issn: getById('HiddenSecTa-ISSN'),
+                eissn: getById('HiddenSecTa-EISSN'),
+                idsNumber: getById('HiddenSecTa-recordIds'),
+                citationSubsets
+            },
+
+            links: {
+                doi: getById('FullRTa-DOI') ? `https://doi.org/${getById('FullRTa-DOI')}` : '',
+                source: absUrl(sourceTitleEl?.getAttribute('href') || ''),
+                jcr: absUrl(attr('#Sidenav-0-JCR-learnMore', 'href')),
+                jci: absUrl(attr('#Sidenav-0-JCI-learnMore', 'href'))
+            }
+        };
+
+        data.authors = data.authors.map(author => {
+            const matchedIdentifier = data.authorIdentifiers.find(x =>
+                x.author &&
+                (
+                    x.author === author.fullName ||
+                    x.author === author.displayName ||
+                    author.fullName?.includes(x.author) ||
+                    x.author?.includes(author.fullName)
+                )
+            );
+
+            return {
+                ...author,
+                researcherId: matchedIdentifier?.researcherId || '',
+                researcherIdUrl: matchedIdentifier?.researcherIdUrl || '',
+                orcid: matchedIdentifier?.orcid || '',
+                orcidUrl: matchedIdentifier?.orcidUrl || '',
+                addresses: author.affiliationNumbers
+                    .map(n => data.authorInformation.addresses.find(a => a.number === n))
+                    .filter(Boolean)
+            };
+        });
+
+        data.authorInformation.addresses = dedupeObjects(
+            data.authorInformation.addresses,
+            x => `${x.number}|${x.address}`
+        );
+
+        data.funding.items = dedupeObjects(
+            data.funding.items,
+            x => `${x.agency}|${x.grantNumbers.join(',')}`
+        );
+
+        return data;
+    }
+
+    /** 解析当前 WOS full record 页面中的文献完整信息为 JSON 对象，并合并到本地缓存
+     * - wosid: 可选目标 WOS ID；为空时从当前 URL 或页面数据同步
+     * - 返回值: 成功时返回 `{ [wosid]: json }`，失败时返回 null
+    */
+    async parseCurrentFullRecordPage(wosid = '', options = {}) {
+        if (wosid) {
+            this.currentWosId = wosid;
+        } else {
+            await this.syncCurrentWosIdFromUrl();
+        }
+
+        const root = await webWait.waitForElementBySelector('#snMainArticle', 60, 100);
+        if (!root) {
+            console.warn('[WOS] Failed to find #snMainArticle on current full record page.');
+            return null;
+        }
+
+        const record = await this.parseWosFullRecordAfterExpand(root, options);
+        if (!record) {
+            return null;
+        }
+
+        const pageWosId = this.#normalizeWosId(record.identifiers?.accessionNumber || '');
+        if (pageWosId) {
+            this.currentWosId = pageWosId;
+        }
+
+        this.mergeIntoCache(this.currentWosId, record);
+        return { [this.currentWosId]: record };
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 }
 const wosIdStore = WosIdStore.getInstance();
 
@@ -3391,6 +3944,10 @@ class WOS {
             'collectRelatedRecordsByWosId',
             'collectSharedReferencesBetweenWosIds',
             'fetchFullRecordJsonByWosId',
+            'parseCurrentFullRecordPage',
+            'parseWosFullRecordAfterExpand',
+            'expandWosFullRecord',
+            'parseWosFullRecord',
 
         ]);
         defineGetter(this.record, 'currentWosId', () => wosIdStore.currentWosId);

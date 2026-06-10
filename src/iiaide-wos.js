@@ -60,6 +60,7 @@ Usage:
   iiaide-wos run [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
   iiaide-wos bib [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
   iiaide-wos pipeline [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
+  iiaide-wos records-pipeline [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
   iiaide-wos [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
   iiaide-wos import --csv <wosids.csv> [--task <task-id>] [options]
   iiaide-wos list [--tasks-root <dir>]
@@ -71,6 +72,8 @@ Usage:
   iiaide-wos sid [--sid <SID> | --from-browser] [--tasks-root <dir>] [--wos-domain <domain>] [--base-url <url>] [--headed]
   iiaide-wos authors [--sid <SID>] (--task <task-id> | --latest) [options]
   iiaide-wos authors --rebuild-only (--task <task-id> | --latest) [--tasks-root <dir>]
+  iiaide-wos records [--sid <SID>] (--task <task-id> | --latest) [options]
+  iiaide-wos records --rebuild-only (--task <task-id> | --latest) [--tasks-root <dir>]
 
 Inputs:
   --sid <SID>             Web of Science SID. Interactive commands prompt when missing or expired
@@ -117,13 +120,18 @@ Task directory layout:
   raw/<uuid>/full-record/ WOS fullRecord text batches as <uuid>_<start>_<end>.txt
   raw/<uuid>/bib/         BibTeX batches as <uuid>_<start>_<end>.bib
   raw/<uuid>/author/      One raw author extraction JSON per WOSID
-  export/<uuid>/full-record/<uuid>_wosid.csv
+  raw/<uuid>/record/      One raw full-record page JSON per WOSID
+  export/<uuid>/wosid/<uuid>_wosid.csv
   export/<uuid>/bib/<uuid>.bib
   export/<uuid>/author/<uuid>_authors.csv
   export/<uuid>/author/<uuid>_authors_simple.csv
   export/<uuid>/author/<uuid>_authors.jsonl
   export/<uuid>/author/checkpoint.json
   export/<uuid>/author/failures.json
+  export/<uuid>/record/<uuid>_record_fields.csv
+  export/<uuid>/record/<uuid>_record_fields.jsonl
+  export/<uuid>/record/checkpoint.json
+  export/<uuid>/record/failures.json
   logs/progress.jsonl
   manifest.json
   summary.json
@@ -915,6 +923,12 @@ function getRunPaths(outDir) {
     authorsJsonl: path.join(exportRoot, "authors.jsonl"),
     authorFailures: path.join(exportRoot, "failures.json"),
     authorCheckpoint: path.join(exportRoot, "checkpoint.json"),
+    recordsDir: exportRoot,
+    recordRawJsonDir: rawRoot,
+    recordFieldsCsv: path.join(exportRoot, "record_fields.csv"),
+    recordFieldsJsonl: path.join(exportRoot, "record_fields.jsonl"),
+    recordFailures: path.join(exportRoot, "record_failures.json"),
+    recordCheckpoint: path.join(exportRoot, "record_checkpoint.json"),
   };
 }
 
@@ -922,27 +936,37 @@ function withRawSource(paths, sourceId) {
   const source = safeFilePart(sourceId || "task");
   const rawSourceDir = path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), source);
   const exportSourceDir = path.join(paths.exportRoot || path.join(paths.taskDir, "export"), source);
-  const fullRecordExportDir = path.join(exportSourceDir, "full-record");
+  const wosIdsExportDir = path.join(exportSourceDir, "wosid");
+  const legacyFullRecordExportDir = path.join(exportSourceDir, "full-record");
   const bibExportDir = path.join(exportSourceDir, "bib");
   const authorsDir = path.join(exportSourceDir, "author");
+  const recordsDir = path.join(exportSourceDir, "record");
   return {
     ...paths,
     rawSourceId: source,
     rawSourceDir,
     exportSourceDir,
-    fullRecordExportDir,
+    wosIdsExportDir,
+    fullRecordExportDir: wosIdsExportDir,
+    legacyFullRecordExportDir,
     bibExportDir,
     rawDir: path.join(rawSourceDir, "full-record"),
     bibDir: path.join(rawSourceDir, "bib"),
     authorRawJsonDir: path.join(rawSourceDir, "author"),
     legacySourceAuthorRawJsonDir: path.join(rawSourceDir, "authors"),
-    dataDir: fullRecordExportDir,
+    recordRawJsonDir: path.join(rawSourceDir, "record"),
+    dataDir: wosIdsExportDir,
     authorsDir,
+    recordsDir,
     authorsCsv: path.join(authorsDir, `${source}_authors.csv`),
     authorsSimpleCsv: path.join(authorsDir, `${source}_authors_simple.csv`),
     authorsJsonl: path.join(authorsDir, `${source}_authors.jsonl`),
     authorFailures: path.join(authorsDir, "failures.json"),
     authorCheckpoint: path.join(authorsDir, "checkpoint.json"),
+    recordFieldsCsv: path.join(recordsDir, `${source}_record_fields.csv`),
+    recordFieldsJsonl: path.join(recordsDir, `${source}_record_fields.jsonl`),
+    recordFailures: path.join(recordsDir, "failures.json"),
+    recordCheckpoint: path.join(recordsDir, "checkpoint.json"),
   };
 }
 
@@ -974,7 +998,7 @@ function readCompletedRunSummary(paths, args) {
   const summary = readJson(paths.summary, null);
   if (!summary?.ok || summary.method !== "wos-js-export-fetchTxtBatches" || !sameTaskUuid(summary, args)) return null;
   const sourcePaths = withRawSource(paths, summary.uuid || args.uuid || args.taskId);
-  const csvPath = summary.files?.wosidsCsv || wosIdsCsvPath(sourcePaths, summary.uuid || args.uuid || args.taskId);
+  const csvPath = summary.files?.wosidsCsv || resolveWosIdsCsvPath(sourcePaths, summary.uuid || args.uuid || args.taskId);
   return fs.existsSync(csvPath) ? summary : null;
 }
 
@@ -1005,15 +1029,6 @@ function printCompletedArtifactPath(command, summary) {
   return summary.ok ? 0 : 1;
 }
 
-function assertNoTaskUuidConflict(paths, args) {
-  const summary = readJson(paths.summary, null);
-  if (summary?.uuid && args.uuid && summary.uuid !== args.uuid && !args.force) {
-    throw new Error(
-      `Task ${args.taskId} already contains UUID ${summary.uuid}. Switch task, create a new task, or rerun with --force to replace it.`
-    );
-  }
-}
-
 function cleanRunLayout(paths) {
   const manifest = readJson(paths.manifest, null);
   if (manifest?.command !== "iiaide-wos") {
@@ -1042,13 +1057,14 @@ function manifestArgs(args) {
 
 function wosIdsCsvPath(paths, identifier) {
   if (!identifier) throw new Error("Missing WOSID CSV identifier");
-  return path.join(paths.fullRecordExportDir || paths.dataDir, `${safeFilePart(identifier)}_wosid.csv`);
+  return path.join(paths.wosIdsExportDir || paths.fullRecordExportDir || paths.dataDir, `${safeFilePart(identifier)}_wosid.csv`);
 }
 
 function resolveWosIdsCsvPath(paths, identifier, explicitPath = "") {
   if (explicitPath) return explicitPath;
   const candidates = [
     wosIdsCsvPath(paths, identifier),
+    paths.legacyFullRecordExportDir ? path.join(paths.legacyFullRecordExportDir, `${safeFilePart(identifier)}_wosid.csv`) : "",
     paths.legacyDataDir ? path.join(paths.legacyDataDir, `${safeFilePart(identifier)}_wosid.csv`) : "",
   ].filter(Boolean);
   return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
@@ -1218,8 +1234,74 @@ function writeAuthorCheckpoint(paths, checkpoint) {
   writeJson(paths.authorCheckpoint, checkpoint, { backup: true });
 }
 
+function emptyRecordCheckpoint() {
+  return {
+    version: 1,
+    startedAt: "",
+    updatedAt: "",
+    total: 0,
+    completed: 0,
+    failed: 0,
+    records: {},
+  };
+}
+
+function readRecordCheckpoint(paths) {
+  const checkpoint = readJson(paths.recordCheckpoint, emptyRecordCheckpoint());
+  if (!checkpoint.records || typeof checkpoint.records !== "object") checkpoint.records = {};
+  return checkpoint;
+}
+
+function writeRecordCheckpoint(paths, checkpoint) {
+  checkpoint.updatedAt = new Date().toISOString();
+  const values = Object.values(checkpoint.records || {});
+  checkpoint.completed = values.filter((item) => item.status === "completed").length;
+  checkpoint.failed = values.filter((item) => item.status === "failed").length;
+  writeJson(paths.recordCheckpoint, checkpoint, { backup: true });
+}
+
 function rawAuthorJsonPath(paths, wosid) {
   return path.join(paths.authorRawJsonDir, safeWosIdFileName(wosid));
+}
+
+function rawRecordJsonPath(paths, wosid) {
+  return path.join(paths.recordRawJsonDir, safeWosIdFileName(wosid));
+}
+
+function findExistingRawRecordJson(paths, wosid) {
+  const expectedWosId = normalizeWosId(wosid);
+  if (!expectedWosId) return null;
+  const rawPath = rawRecordJsonPath(paths, expectedWosId);
+  if (!fs.existsSync(rawPath)) return null;
+  const raw = readJson(rawPath, null);
+  if (!raw) return null;
+  const rawWosId = normalizeWosId(raw.wosid) || normalizeWosId(raw.identifiers?.accessionNumber) || normalizeWosId(raw.url) || expectedWosId;
+  if (rawWosId !== expectedWosId) return null;
+  return { rawPath, raw };
+}
+
+function reconcileRecordCheckpointFromRaw(paths, wosids, checkpoint) {
+  let repaired = 0;
+  for (const [index, wosid] of wosids.entries()) {
+    const existing = findExistingRawRecordJson(paths, wosid);
+    if (!existing) continue;
+    const prior = checkpoint.records[wosid] || {};
+    const rawJsonPath = storedArtifactPath(paths, existing.rawPath);
+    if (prior.status === "completed" && prior.rawJsonPath === rawJsonPath) continue;
+    checkpoint.records[wosid] = {
+      ...prior,
+      wosid,
+      index: prior.index || index + 1,
+      status: "completed",
+      fieldCount: recordFieldRowsFromRaw(existing.raw).length,
+      tableCount: (existing.raw.recordTables || []).length,
+      rawJsonPath,
+      error: "",
+      updatedAt: prior.updatedAt || new Date().toISOString(),
+    };
+    repaired += 1;
+  }
+  return repaired;
 }
 
 function findExistingRawAuthorJson(paths, wosid) {
@@ -1471,6 +1553,89 @@ function writeAuthorAggregates(paths) {
   return { recordCount: records.length, authorRows: rows.length, authorSimpleRows: simpleRows.length };
 }
 
+function recordFieldRowsFromRaw(raw, normalizedWosId = "") {
+  const wosid = normalizedWosId || normalizeWosId(raw?.wosid) || normalizeWosId(raw?.identifiers?.accessionNumber) || normalizeWosId(raw?.url);
+  if (!wosid || !raw) return [];
+  if (Array.isArray(raw.recordFields)) {
+    return raw.recordFields.map((field) => ({
+      wosid,
+      section: field.section || "",
+      field: field.field || "",
+      value: field.value || "",
+      values: JSON.stringify(field.values || []),
+      links: JSON.stringify(field.links || []),
+      sourceId: field.sourceId || "",
+    }));
+  }
+
+  const metadataKeys = new Set(["wosid", "url", "fetchedAt"]);
+  const rows = [];
+  const scalarValue = (value) => ["string", "number", "boolean"].includes(typeof value) || value === null;
+  const cleanValue = (value) => (value === null || value === undefined ? "" : String(value));
+
+  function visit(value, pathParts) {
+    if (value === undefined || typeof value === "function") return;
+    if (scalarValue(value)) {
+      rows.push({
+        wosid,
+        section: pathParts[0] || "",
+        field: pathParts.join("."),
+        value: cleanValue(value),
+        values: JSON.stringify([]),
+        links: JSON.stringify([]),
+        sourceId: "",
+      });
+      return;
+    }
+    if (Array.isArray(value)) {
+      if (!value.length) return;
+      if (value.every(scalarValue)) {
+        const values = value.map(cleanValue).filter(Boolean);
+        rows.push({
+          wosid,
+          section: pathParts[0] || "",
+          field: pathParts.join("."),
+          value: values.join(" | "),
+          values: JSON.stringify(values),
+          links: JSON.stringify([]),
+          sourceId: "",
+        });
+        return;
+      }
+      value.forEach((item, index) => visit(item, [...pathParts, String(index + 1)]));
+      return;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (!pathParts.length && metadataKeys.has(key)) continue;
+      visit(child, [...pathParts, key]);
+    }
+  }
+
+  visit(raw, []);
+  return rows.filter((row) => row.field && row.value);
+}
+
+function writeRecordAggregates(paths) {
+  const directory = paths.recordRawJsonDir;
+  const files = fs.existsSync(directory)
+    ? fs.readdirSync(directory).filter((name) => name.endsWith(".json")).sort()
+    : [];
+  const fieldRows = [];
+  let recordCount = 0;
+  for (const name of files) {
+    const raw = readJson(path.join(directory, name), null);
+    if (!raw) continue;
+    const wosid = normalizeWosId(raw.wosid) || normalizeWosId(raw.identifiers?.accessionNumber) || normalizeWosId(raw.url);
+    if (!wosid) continue;
+    recordCount += 1;
+    fieldRows.push(...recordFieldRowsFromRaw(raw, wosid));
+  }
+  const columns = ["wosid", "section", "field", "value", "values", "links", "sourceId"];
+  writeFileAtomic(paths.recordFieldsCsv, toCsv(fieldRows, columns));
+  writeFileAtomic(paths.recordFieldsJsonl, fieldRows.map((row) => JSON.stringify(row)).join("\n") + (fieldRows.length ? "\n" : ""));
+  return { recordCount, fieldRows: fieldRows.length };
+}
+
 function rebuildAuthorsFromRaw(paths) {
   const seenWosIds = new Set();
   const rawFiles = authorRawJsonDirs(paths)
@@ -1604,7 +1769,8 @@ function canRepairWosIdsFromRaw(paths, uuid, expectedCount) {
 
 function finalWosIdsCsvExists(paths, identifier) {
   if (!identifier) return false;
-  return fs.existsSync(wosIdsCsvPath(withRawSource(paths, identifier), identifier));
+  const sourcePaths = withRawSource(paths, identifier);
+  return fs.existsSync(resolveWosIdsCsvPath(sourcePaths, identifier));
 }
 
 function finalBibExists(paths, uuid) {
@@ -1636,7 +1802,7 @@ function writeOutputs(paths, rows, meta) {
     files: {
       wosidsCsv: csvPath,
       rawDir: rawBatchDir(paths, meta.uuid || meta.taskId),
-      exportDir: outputPaths.fullRecordExportDir,
+      exportDir: outputPaths.wosIdsExportDir,
       progressLog: paths.progressLog,
     },
     finishedAt: new Date().toISOString(),
@@ -1831,6 +1997,10 @@ const EXTRACT_AUTHOR_INFO = async () => {
       .trim();
   const wosUnique = (items) => [...new Set(items.map(wosClean).filter(Boolean))];
   const textOf = (el) => wosClean(el?.innerText || el?.textContent || "");
+  const stripControlText = (value) =>
+    wosClean(String(value || "")
+      .replace(/\b(open_in_new|arrow_drop_down|arrow_drop_up|expand_more|expand_less|remove|clear)\b/g, " ")
+      .replace(/\b(Show details|Show All Details|View funding text|Close funding text|See more data fields|See fewer data fields)\b/gi, " "));
   const sleepInPage = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const absUrl = (href) => {
     if (!href || href.startsWith("javascript:") || href.startsWith("mailto:")) return href || "";
@@ -1859,18 +2029,148 @@ const EXTRACT_AUTHOR_INFO = async () => {
     }
   }
 
-  const idButton = [...document.querySelectorAll("button")].find((button) =>
-    /View Web of Science ResearcherID and ORCID/i.test(textOf(button) || button.getAttribute("aria-label") || "")
-  );
-  if (idButton) await clickButton(idButton);
+  for (let round = 0; round < 2; round += 1) {
+    const expandableButtons = [...document.querySelectorAll("button")].filter((button) => {
+      if (button.disabled || button.getAttribute("aria-disabled") === "true") return false;
+      const text = textOf(button);
+      const aria = button.getAttribute("aria-label") || "";
+      if (/Hide|Close|See fewer/i.test(`${text} ${aria}`)) return false;
+      if (/View Web of Science ResearcherID and ORCID|Show details|Show All Details|View funding text|See more data fields/i.test(`${text} ${aria}`)) {
+        return true;
+      }
+      const icon = button.querySelector(
+        "mat-icon.notranslate.font-size-26.material-icons.mat-ligature-font.mat-icon-no-color"
+      );
+      return /show affiliations/i.test(aria) && icon && /arrow_drop_down|expand_more/i.test(textOf(icon));
+    });
+    for (const button of expandableButtons) await clickButton(button);
+  }
 
-  const expandButtons = [...document.querySelectorAll("button")].filter((button) => {
-    const icon = button.querySelector(
-      "mat-icon.notranslate.font-size-26.material-icons.mat-ligature-font.mat-icon-no-color"
+  const mainArticle = document.querySelector("#snMainArticle") || document.querySelector('[id="snMainArticle"]');
+  const sectionFor = (element, root = mainArticle || document.body) => {
+    const headings = [...root.querySelectorAll("h2")].filter((heading) => textOf(heading));
+    let section = "";
+    for (const heading of headings) {
+      if (heading === element || heading.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) {
+        section = textOf(heading);
+      }
+    }
+    return section;
+  };
+  const linksOf = (scope) => [...scope.querySelectorAll("a[href]")]
+    .map((link) => ({
+      text: stripControlText(textOf(link)),
+      href: absUrl(link.getAttribute("href") || ""),
+    }))
+    .filter((link) => link.text || link.href);
+  const isFieldLabel = (element) => {
+    const text = stripControlText(textOf(element)).replace(/:$/, "");
+    if (!text || text.length > 140) return false;
+    if (/^(H1|H2|BUTTON|A|MAT-ICON|SVG)$/i.test(element.tagName)) return false;
+    const className = String(element.className || "");
+    const id = element.id || "";
+    return (
+      /(^|\s)(label|cdx-label|colonMark|section-label-data)(\s|$)/i.test(className) ||
+      /Label$|Title$/i.test(id) ||
+      /^(STRONG|TH)$/i.test(element.tagName)
     );
-    return icon && /arrow_drop_down|expand_more/i.test(textOf(icon));
-  });
-  for (const button of expandButtons) await clickButton(button);
+  };
+  const valueContainerFor = (label, root = mainArticle || document.body) => {
+    let node = label.parentElement;
+    for (let depth = 0; node && node !== root && depth < 5; depth += 1, node = node.parentElement) {
+      const className = String(node.className || "");
+      const text = textOf(node);
+      if (!text || text.length > 2500) continue;
+      if (/source-info-piece|hidden-data-item|author-info-section|cdx-two-column-grid-container|funding-info-section/i.test(className)) {
+        return node;
+      }
+      const childLabels = [...node.querySelectorAll("h3,strong,th,[class*='label' i],[id$='Label'],[id$='Title']")].filter(isFieldLabel);
+      if (childLabels.length <= 2 && text.length < 900) return node;
+    }
+    return label.parentElement || label;
+  };
+  const cloneWithoutLabels = (scope) => {
+    const clone = scope.cloneNode(true);
+    for (const removable of clone.querySelectorAll("script,style,button,mat-icon,svg,h1,h2,h3,h4,th,.label,[class*='label' i],[id$='Label'],[id$='Title']")) {
+      removable.remove();
+    }
+    return clone;
+  };
+  const valuesOf = (scope) => {
+    const values = [...scope.querySelectorAll(".section-label-data,.value,.cdx-grid-data,a[href],td,span")]
+      .filter((node) => !isFieldLabel(node) && !node.closest("button"))
+      .map((node) => stripControlText(textOf(node)))
+      .filter((value) => value && !/^(;|,)$/.test(value));
+    const fullText = stripControlText(textOf(cloneWithoutLabels(scope)));
+    if (fullText && fullText.length <= 1800) values.unshift(fullText);
+    return wosUnique(values).filter((value, index, all) =>
+      !all.some((other, otherIndex) => otherIndex !== index && other !== value && other.includes(value) && value.length < 80)
+    );
+  };
+  const extractRecordFields = (root = mainArticle || document.body) => {
+    const seen = new Set();
+    const fields = [];
+    const labelNodes = [...root.querySelectorAll("h3,strong,th,[class*='label' i],[id$='Label'],[id$='Title']")]
+      .filter(isFieldLabel);
+    for (const label of labelNodes) {
+      const field = stripControlText(textOf(label)).replace(/:$/, "");
+      if (!field) continue;
+      const container = valueContainerFor(label, root);
+      const values = valuesOf(container).filter((value) => value !== field);
+      if (!values.length) continue;
+      const section = sectionFor(label, root);
+      const key = `${section}\u0000${field}\u0000${values.join("\u0001")}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      fields.push({
+        section,
+        field,
+        value: values.join(" | "),
+        values,
+        links: linksOf(container),
+        sourceId: label.id || "",
+      });
+    }
+    return fields;
+  };
+  const extractRecordTables = (root = mainArticle || document.body) => [...root.querySelectorAll("table")]
+    .map((table, index) => {
+      const headers = [...table.querySelectorAll("thead th, tr:first-child th")].map((cell) => stripControlText(textOf(cell)));
+      const rows = [...table.querySelectorAll("tbody tr")].map((row) => {
+        const cells = [...row.querySelectorAll("td")].map((cell) => stripControlText(textOf(cell)));
+        if (!cells.length) return null;
+        if (headers.length) {
+          return Object.fromEntries(cells.map((cell, cellIndex) => [headers[cellIndex] || `column_${cellIndex + 1}`, cell]));
+        }
+        return cells;
+      }).filter(Boolean);
+      return rows.length ? {
+        section: sectionFor(table, root),
+        index: index + 1,
+        headers,
+        rows,
+      } : null;
+    })
+    .filter(Boolean);
+  const extractRecordSections = (root = mainArticle || document.body) => {
+    const headings = [...root.querySelectorAll("h2")].filter((heading) => textOf(heading));
+    return headings.map((heading) => {
+      const parts = [];
+      let node = heading.parentElement;
+      const container = valueContainerFor(heading, root);
+      if (container && container !== heading.parentElement) node = container;
+      if (node) {
+        const clone = node.cloneNode(true);
+        for (const removable of clone.querySelectorAll("button,mat-icon,svg")) removable.remove();
+        parts.push(stripControlText(textOf(clone)));
+      }
+      return {
+        section: textOf(heading),
+        text: wosClean(parts.join(" ")),
+        sourceId: heading.id || "",
+      };
+    }).filter((section) => section.section && section.text);
+  };
 
   const authors = [...document.querySelectorAll('#SumAuthTa-MainDiv-author-en [id^="author-"]')].map((node, index) => {
     const link = node.querySelector('a[id^="SumAuthTa-DisplayName-author"]');
@@ -2013,6 +2313,9 @@ const EXTRACT_AUTHOR_INFO = async () => {
   return {
     url: location.href,
     title: wosClean(document.querySelector('[id^="FullRTa-fullRecordtitle"]')?.textContent || document.title),
+    recordFields: extractRecordFields(),
+    recordTables: extractRecordTables(),
+    recordSections: extractRecordSections(),
     authors: merged,
     addresses,
     corresponding,
@@ -2344,6 +2647,13 @@ function printAuthorWorkSummary(summary, write = console.error) {
   );
 }
 
+function printRecordWorkSummary(summary, write = console.error) {
+  const range = summary.selected ? `${summary.firstIndex}-${summary.lastIndex}` : "none";
+  write(
+    `Full records: total=${summary.total}, completed=${summary.completed}, failed=${summary.failed}, selected=${summary.selected}, range=${range}, concurrency=${summary.concurrency}`
+  );
+}
+
 function remainingAuthorTimeout(deadline, timeoutMs, wosid) {
   const remaining = deadline - Date.now();
   if (remaining <= 0) {
@@ -2352,7 +2662,7 @@ function remainingAuthorTimeout(deadline, timeoutMs, wosid) {
   return remaining;
 }
 
-async function extractOneAuthorRecord(context, args, wosid) {
+async function extractOneFullRecordInfo(context, args, wosid, options = {}) {
   const timeoutMs = args.authorTimeoutMs || args.timeoutMs;
   const deadline = Date.now() + timeoutMs;
   const page = await context.newPage();
@@ -2385,11 +2695,52 @@ async function extractOneAuthorRecord(context, args, wosid) {
     const raw = await page.evaluate(EXTRACT_AUTHOR_INFO);
     raw.wosid = wosid;
     raw.fetchedAt = new Date().toISOString();
-    if (!raw.authors || !raw.authors.length) throw new Error("No authors extracted");
+    if (options.requireAuthors && (!raw.authors || !raw.authors.length)) throw new Error("No authors extracted");
     return raw;
   } catch (error) {
     if (/timeout/i.test(error?.message || "")) {
       throw new Error(`Author record timeout after ${timeoutMs}ms: ${wosid}`);
+    }
+    throw error;
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+async function extractOneAuthorRecord(context, args, wosid) {
+  return extractOneFullRecordInfo(context, args, wosid, { requireAuthors: true });
+}
+
+async function extractOneRecordInfo(context, args, wosid) {
+  const timeoutMs = args.authorTimeoutMs || args.timeoutMs;
+  const page = await context.newPage();
+  page.setDefaultTimeout(timeoutMs);
+  try {
+    await page.goto(`${args.baseUrl}/wos/`, { waitUntil: "domcontentloaded", timeout: Math.min(10000, timeoutMs) });
+    await ensureWosJsOnPage(page, args);
+    const raw = await page.evaluate(async (targetWosId) => {
+      if (!window.wos?.record?.viewFullRecordByWosId || !window.wos?.record?.parseCurrentFullRecordPage) {
+        throw new Error("wos.js record parser API missing: window.wos.record.parseCurrentFullRecordPage");
+      }
+      await window.wos.record.viewFullRecordByWosId(targetWosId);
+      const parsed = await window.wos.record.parseCurrentFullRecordPage();
+      const normalizedWosId = window.wos.record.currentWosId || targetWosId;
+      const record = parsed?.[normalizedWosId] || parsed?.[targetWosId] || parsed;
+      if (!record || typeof record !== "object") {
+        throw new Error(`No full-record JSON parsed for ${targetWosId}`);
+      }
+      return {
+        ...record,
+        wosid: normalizedWosId,
+        url: location.href,
+      };
+    }, wosid);
+    raw.wosid = normalizeWosId(raw.wosid) || wosid;
+    raw.fetchedAt = new Date().toISOString();
+    return raw;
+  } catch (error) {
+    if (/timeout/i.test(error?.message || "")) {
+      throw new Error(`Full record timeout after ${timeoutMs}ms: ${wosid}`);
     }
     throw error;
   } finally {
@@ -2608,6 +2959,211 @@ async function runAuthors(args) {
   };
 }
 
+async function runRecords(args) {
+  const task = resolveTask(args);
+  args.taskId = task.taskId;
+  args.outDir = task.taskDir;
+  args.uuid = args.uuid || task.uuid;
+  args.url = args.url || task.url || (args.uuid ? buildSummaryUrl(args.baseUrl, args.uuid, args.sortBy) : "");
+  const paths = withRawSource(createRunLayout({ ...args, force: true }), args.uuid || task.uuid || task.taskId);
+  if (args.rebuildOnly) {
+    const aggregate = writeRecordAggregates(paths);
+    appendProgress(paths, {
+      phase: "records-rebuild",
+      records: aggregate.recordCount,
+      fieldRows: aggregate.fieldRows,
+    });
+    return {
+      taskId: task.taskId,
+      taskDir: task.taskDir,
+      mode: "rebuild-only",
+      recordCount: aggregate.recordCount,
+      fieldRows: aggregate.fieldRows,
+      recordFieldsCsv: paths.recordFieldsCsv,
+      recordFieldsJsonl: paths.recordFieldsJsonl,
+    };
+  }
+
+  const wosidsPath = resolveWosIdsCsvPath(paths, args.uuid || task.uuid || task.taskId, args.wosidsCsv);
+  if (!fs.existsSync(wosidsPath)) throw new Error(`Missing WOSID CSV: ${wosidsPath}`);
+  const wosids = readWosIdsCsv(wosidsPath);
+  if (!wosids.length) throw new Error(`No WOS IDs found in ${wosidsPath}`);
+
+  const checkpoint = readRecordCheckpoint(paths);
+  if (!checkpoint.startedAt) checkpoint.startedAt = new Date().toISOString();
+  checkpoint.total = wosids.length;
+  const repairedFromRaw = !args.force ? reconcileRecordCheckpointFromRaw(paths, wosids, checkpoint) : 0;
+  if (repairedFromRaw) {
+    appendProgress(paths, { phase: "records-checkpoint-repair", repaired: repairedFromRaw });
+    writeRecordCheckpoint(paths, checkpoint);
+    if (!isInteractive()) {
+      console.error(`Existing full-record JSON found; repaired ${repairedFromRaw} checkpoint record${repairedFromRaw === 1 ? "" : "s"}.`);
+    }
+  }
+  const work = selectAuthorWork(wosids, checkpoint, args);
+  if (!work.length) {
+    printRecordWorkSummary(authorWorkSummary(wosids, checkpoint, work, args));
+    const aggregate = writeRecordAggregates(paths);
+    const stats = currentAuthorStats(wosids, checkpoint);
+    const failures = wosids
+      .map((wosid) => checkpoint.records[wosid])
+      .filter((item) => item?.status === "failed");
+    writeJson(paths.recordFailures, failures);
+    writeRecordCheckpoint(paths, checkpoint);
+    upsertTaskIndex(args, {
+      status: stats.completed === wosids.length ? "records-completed" : "records-incomplete",
+      lastError: "",
+      uuid: args.uuid || task.uuid,
+      url: args.url || task.url,
+      expectedCount: task.expectedCount,
+      uniqueCount: task.uniqueCount,
+    });
+    return {
+      taskId: task.taskId,
+      taskDir: task.taskDir,
+      totalWosIds: wosids.length,
+      selected: 0,
+      completed: stats.completed,
+      failed: stats.failed,
+      recordCount: aggregate.recordCount,
+      fieldRows: aggregate.fieldRows,
+      recordFieldsCsv: paths.recordFieldsCsv,
+      recordFieldsJsonl: paths.recordFieldsJsonl,
+      checkpoint: paths.recordCheckpoint,
+    };
+  }
+
+  printRecordWorkSummary(authorWorkSummary(wosids, checkpoint, work, args));
+  if (!args.sid) {
+    await prepareWosExport(args);
+  }
+  appendProgress(paths, { phase: "records-start", total: wosids.length, selected: work.length });
+  upsertTaskIndex(args, {
+    status: "records-running",
+    lastError: "",
+    uuid: args.uuid || task.uuid,
+    url: args.url || task.url,
+    expectedCount: task.expectedCount,
+    uniqueCount: task.uniqueCount,
+  });
+
+  const authSpinner = createSpinner("Validating WOS authentication");
+  let recordProgress = null;
+  let session = null;
+  let processed = 0;
+  let failed = 0;
+  let failuresSinceCooldown = 0;
+  try {
+    session = await prepareWosSession(args);
+    authSpinner.succeed("WOS authentication validated");
+    recordProgress = createProgress("Fetching full records", work.length);
+    await runPool(work, args.concurrency, async (item) => {
+      const { wosid, index } = item;
+      const startedAt = new Date().toISOString();
+      appendProgress(paths, { phase: "records-record-start", wosid, index, total: wosids.length });
+      const prior = checkpoint.records[wosid] || {};
+      checkpoint.records[wosid] = {
+        ...prior,
+        wosid,
+        index,
+        status: "running",
+        attempts: Number(prior.attempts || 0) + 1,
+        startedAt,
+        updatedAt: startedAt,
+      };
+      writeRecordCheckpoint(paths, checkpoint);
+      try {
+        const raw = await extractOneRecordInfo(session.context, args, wosid);
+        const fieldCount = recordFieldRowsFromRaw(raw, wosid).length;
+        const rawPath = rawRecordJsonPath(paths, wosid);
+        writeJson(rawPath, raw);
+        checkpoint.records[wosid] = {
+          ...checkpoint.records[wosid],
+          status: "completed",
+          fieldCount,
+          tableCount: (raw.recordTables || []).length,
+          rawJsonPath: storedArtifactPath(paths, rawPath),
+          error: "",
+          updatedAt: new Date().toISOString(),
+        };
+        writeRecordCheckpoint(paths, checkpoint);
+        appendProgress(paths, { phase: "records-record", status: "completed", wosid, index, fieldCount });
+        if (!isInteractive()) {
+          console.error(`records OK ${index}/${wosids.length} ${wosid} fields=${fieldCount}`);
+        }
+      } catch (error) {
+        failed += 1;
+        failuresSinceCooldown += 1;
+        checkpoint.records[wosid] = {
+          ...checkpoint.records[wosid],
+          status: "failed",
+          error: error && error.stack ? error.stack : String(error),
+          updatedAt: new Date().toISOString(),
+        };
+        writeRecordCheckpoint(paths, checkpoint);
+        appendProgress(paths, { phase: "records-record", status: "failed", wosid, index, error: error.message || String(error) });
+        if (!isInteractive()) {
+          console.error(`records FAIL ${index}/${wosids.length} ${wosid}: ${error.message || error}`);
+        }
+      }
+      processed += 1;
+      recordProgress.update(processed, `${index}/${wosids.length} ${wosid}`, failed);
+      if (
+        args.failureCooldownThreshold > 0 &&
+        failuresSinceCooldown >= args.failureCooldownThreshold &&
+        args.failureCooldownMs > 0
+      ) {
+        appendProgress(paths, {
+          phase: "records-failure-cooldown",
+          failures: failuresSinceCooldown,
+          threshold: args.failureCooldownThreshold,
+          cooldownMs: args.failureCooldownMs,
+        });
+        if (!isInteractive()) {
+          console.error(`records cooldown ${args.failureCooldownMs}ms after ${failuresSinceCooldown} failures`);
+        }
+        await sleep(args.failureCooldownMs);
+        failuresSinceCooldown = 0;
+      }
+      if (args.cooldownMs) await sleep(args.cooldownMs);
+    });
+    recordProgress.stop("Full-record fetch complete");
+  } finally {
+    authSpinner.stop();
+    recordProgress?.stop("Full-record fetch stopped");
+    await session?.close?.();
+  }
+
+  const aggregate = writeRecordAggregates(paths);
+  const failures = Object.values(checkpoint.records).filter((item) => item.status === "failed");
+  writeJson(paths.recordFailures, failures);
+  const finalCheckpoint = readRecordCheckpoint(paths);
+  writeRecordCheckpoint(paths, finalCheckpoint);
+  const stats = currentAuthorStats(wosids, finalCheckpoint);
+  const status = stats.completed === wosids.length ? "records-completed" : "records-incomplete";
+  upsertTaskIndex(args, {
+    status,
+    lastError: "",
+    uuid: args.uuid || task.uuid,
+    url: args.url || task.url,
+    expectedCount: task.expectedCount,
+    uniqueCount: task.uniqueCount,
+  });
+  return {
+    taskId: task.taskId,
+    taskDir: task.taskDir,
+    totalWosIds: wosids.length,
+    selected: work.length,
+    completed: stats.completed,
+    failed: stats.failed,
+    recordCount: aggregate.recordCount,
+    fieldRows: aggregate.fieldRows,
+    recordFieldsCsv: paths.recordFieldsCsv,
+    recordFieldsJsonl: paths.recordFieldsJsonl,
+    checkpoint: paths.recordCheckpoint,
+  };
+}
+
 function validateTask(args) {
   const task = resolveTask(args);
   const basePaths = getRunPaths(task.taskDir);
@@ -2626,11 +3182,15 @@ function validateTask(args) {
     ? fs.readdirSync(bibBatchDir(paths, bibUuid)).filter((name) => name.endsWith(".bib"))
     : [];
   const checkpoint = readAuthorCheckpoint(paths);
+  const recordCheckpoint = readRecordCheckpoint(paths);
   const aggregateRows = fs.existsSync(paths.authorsCsv)
     ? Math.max(0, fs.readFileSync(paths.authorsCsv, "utf8").split(/\r?\n/).filter(Boolean).length - 1)
     : 0;
   const aggregateSimpleRows = fs.existsSync(paths.authorsSimpleCsv)
     ? Math.max(0, fs.readFileSync(paths.authorsSimpleCsv, "utf8").split(/\r?\n/).filter(Boolean).length - 1)
+    : 0;
+  const recordFieldRows = fs.existsSync(paths.recordFieldsCsv)
+    ? Math.max(0, fs.readFileSync(paths.recordFieldsCsv, "utf8").split(/\r?\n/).filter(Boolean).length - 1)
     : 0;
   const issues = [];
   if (!fs.existsSync(paths.manifest)) issues.push("missing manifest.json");
@@ -2665,6 +3225,12 @@ function validateTask(args) {
       failed: checkpoint.failed || 0,
       aggregateRows,
       aggregateSimpleRows,
+    },
+    recordCheckpoint: {
+      total: recordCheckpoint.total || 0,
+      completed: recordCheckpoint.completed || 0,
+      failed: recordCheckpoint.failed || 0,
+      fieldRows: recordFieldRows,
     },
     issues,
   };
@@ -2730,8 +3296,8 @@ async function run(args) {
     console.error("WOS ID CSV already exists; skipping download.");
     return completedSummary;
   }
-  assertNoTaskUuidConflict(initialPaths, args);
-  const priorSummary = readJson(initialPaths.summary, {});
+  const priorSummaryRaw = readJson(initialPaths.summary, {});
+  const priorSummary = sameTaskUuid(priorSummaryRaw, args) ? priorSummaryRaw : {};
   const outputHasFiles = fs.existsSync(args.outDir) &&
     fs.readdirSync(args.outDir).some((name) => name !== ".DS_Store");
   if (args.force && !args.reuseRaw && outputHasFiles) {
@@ -2759,6 +3325,10 @@ async function run(args) {
     rowText: priorSummary.rowText || "",
   };
   const rawUuid = args.uuid || priorSummary.uuid || "";
+  if (args.reuseRaw && rawUuid && !info.expectedCount) {
+    const coverage = rawBatchCoverage(paths, rawUuid);
+    if (coverage.files.length && coverage.firstStart === 1) info.expectedCount = coverage.lastEnd;
+  }
   const canRepairFromRaw = !args.force &&
     rawUuid &&
     !finalWosIdsCsvExists(paths, rawUuid) &&
@@ -2822,7 +3392,6 @@ async function runBib(args) {
     console.error("BibTeX already exists; skipping download.");
     return completedSummary;
   }
-  assertNoTaskUuidConflict(initialPaths, args);
   const outputHasFiles = fs.existsSync(args.outDir) &&
     fs.readdirSync(args.outDir).some((name) => name !== ".DS_Store");
   if (args.force && outputHasFiles) {
@@ -2830,7 +3399,8 @@ async function runBib(args) {
   }
   const paths = createRunLayout(args);
   upsertTaskIndex(args, { status: "bib-running", lastError: "" });
-  const priorSummary = readJson(paths.summary, {});
+  const priorSummaryRaw = readJson(paths.summary, {});
+  const priorSummary = sameTaskUuid(priorSummaryRaw, args) ? priorSummaryRaw : {};
   writeJson(paths.manifest, {
     command: "iiaide-wos",
     operation: "bib",
@@ -2949,6 +3519,31 @@ async function runPipeline(args) {
     taskId: summary.taskId,
     run: summary,
     authors,
+  };
+}
+
+async function runRecordsPipeline(args) {
+  const summary = await run(args);
+  if (!summary.ok) {
+    return {
+      ok: false,
+      taskId: summary.taskId,
+      run: summary,
+      records: null,
+    };
+  }
+  const records = await runRecords({
+    ...args,
+    force: false,
+    uuid: summary.uuid || args.uuid,
+    url: summary.summaryHref || summary.inputUrl || args.url,
+    wosidsCsv: summary.files?.wosidsCsv,
+  });
+  return {
+    ok: !records.failed,
+    taskId: summary.taskId,
+    run: summary,
+    records,
   };
 }
 
@@ -3125,6 +3720,12 @@ async function executeCommand(args) {
     console.log(result.authorsCsv || "");
     return result.failed ? 1 : 0;
   }
+  if (args.command === "records") {
+    if (!args.rebuildOnly) loadSavedSid(args);
+    const result = await runRecords(args);
+    console.log(result.recordFieldsCsv || "");
+    return result.failed ? 1 : 0;
+  }
   if (args.command === "bib") {
     if (!args.url || !args.uuid || !args.outDir) {
       console.error(usage());
@@ -3143,6 +3744,15 @@ async function executeCommand(args) {
     }
     const result = await runPipeline(args);
     console.log(result.authors?.authorsCsv || result.run.files.wosidsCsv);
+    return result.ok ? 0 : 1;
+  }
+  if (args.command === "records-pipeline") {
+    if (!args.url || !args.uuid || !args.outDir) {
+      console.error(usage());
+      return 2;
+    }
+    const result = await runRecordsPipeline(args);
+    console.log(result.records?.recordFieldsCsv || result.run.files.wosidsCsv);
     return result.ok ? 0 : 1;
   }
   if (args.command === "latest") {
@@ -3173,7 +3783,7 @@ function recordCommandFailure(args, error) {
     args?.taskId &&
     args?.outDir &&
     fs.existsSync(args.outDir) &&
-    ["run", "import", "authors", "pipeline", "bib"].includes(args.command)
+    ["run", "import", "authors", "records", "pipeline", "records-pipeline", "bib"].includes(args.command)
   ) {
     try {
       upsertTaskIndex(args, {
@@ -3295,6 +3905,8 @@ module.exports = {
   run,
   runBib,
   runPipeline,
+  runRecords,
+  runRecordsPipeline,
   importWosIds,
   initializeWorkspace,
   workspaceStatus,
@@ -3349,4 +3961,5 @@ module.exports = {
   parseExistingRawBatches,
   readJson,
   writeJson,
+  recordFieldRowsFromRaw,
 };
