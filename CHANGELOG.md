@@ -3,6 +3,94 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.3.84 - 2026-06-10
+
+- Speed up author no-data detection by waiting only for navigation commit and
+  then racing author-page selectors against WOS root redirects instead of
+  waiting for `networkidle`.
+
+## 0.3.83 - 2026-06-10
+
+- Stop waiting for author-page details when a WOS full-record URL redirects
+  back to the WOS root page; the record is marked failed as no WOS data.
+
+## 0.3.82 - 2026-06-10
+
+- Add author failure cooldown controls; by default the author stage pauses for
+  60 seconds after 20 failed records in one run before continuing.
+
+## 0.3.81 - 2026-06-10
+
+- Add a per-author WOSID timeout with a 20 second default so slow full-record
+  author pages fail quickly and the batch can continue.
+
+## 0.3.80 - 2026-06-10
+
+- Change the default author extraction concurrency from `2` to `1` for steadier
+  single-SID runs while keeping `--concurrency` available for explicit parallel
+  tabs.
+
+## 0.3.79 - 2026-06-10
+
+- Store raw author extraction JSON under `raw/authors/` so all raw task inputs
+  live under the task `raw/` directory.
+
+## 0.3.78 - 2026-06-10
+
+- Highlight the active interactive task id in the workspace panel and task
+  list.
+
+## 0.3.77 - 2026-06-10
+
+- Replace the flat interactive workflow menu with folded command groups:
+  download literature, export, and task manager.
+
+## 0.3.76 - 2026-06-10
+
+- Add a highlighted background to the `[ W O S - C L I ]` logo in the
+  interactive dashboard.
+
+## 0.3.75 - 2026-06-10
+
+- Move the WOS origin URL into the left interactive dashboard panel under the
+  `iiaide-wos CLI` title and remove the right-panel Origin row.
+
+## 0.3.74 - 2026-06-10
+
+- Redraw the interactive workspace dashboard after manual SID entry or browser
+  login SID detection so refreshed authentication status is visible before the
+  next workflow prompt.
+
+## 0.3.73 - 2026-06-10
+
+- Treat `c` as "back to the previous interactive step" and `q` as "quit the
+  interactive CLI".
+- Require a WOS source when no saved source exists instead of treating Enter as
+  cancellation.
+
+## 0.3.72 - 2026-06-10
+
+- Let interactive prompts accept `c` as a back shortcut across
+  workflow selection, task selection, WOS source input, SID setup, confirmations,
+  and author option prompts, while keeping `q` as the CLI exit shortcut.
+
+## 0.3.71 - 2026-06-10
+
+- Print interactive task selection commands as aligned multi-line hints before
+  the task prompt.
+
+## 0.3.70 - 2026-06-10
+
+- Generate new timestamp task ids with the `TID` prefix instead of `WOS`.
+
+## 0.3.69 - 2026-06-10
+
+- Store raw full-record and BibTeX export batches under UUID parent
+  directories, such as `raw/full-record/<uuid>/<uuid>_<start>_<end>.txt` and
+  `raw/bib/<uuid>/<uuid>_<start>_<end>.bib`.
+- Point task summaries and validation at the UUID-specific raw batch
+  directories.
+
 ## 0.3.68 - 2026-06-10
 
 - Add the existing `latest` task command to CLI help so command docs and

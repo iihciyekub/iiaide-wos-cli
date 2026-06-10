@@ -7,18 +7,29 @@ const ORANGE = "33";
 const CLI_AUTHOR = "lyj";
 const CLI_VERSION_UPDATED_AT = "2026-06-10";
 const DEFAULT_AUTHOR_OPTIONS = {
-  concurrency: 2,
+  concurrency: 1,
+  authorTimeoutMs: 20000,
   cooldownMs: 250,
+  failureCooldownThreshold: 20,
+  failureCooldownMs: 60000,
   fromIndex: 1,
   limit: 0,
   retryFailed: false,
   failedOnly: false,
 };
+const CONTROL_BACK = Symbol.for("iiaide-wos.interactive.back");
+const CONTROL_QUIT = Symbol.for("iiaide-wos.interactive.quit");
+
+function stripAnsi(value) {
+  return String(value || "").replace(/\x1b\[[0-9;]*m/g, "");
+}
 
 function fit(value, width) {
   const text = String(value || "");
-  if (text.length <= width) return text.padEnd(width);
-  return width <= 3 ? text.slice(0, width) : `${text.slice(0, width - 3)}...`;
+  const visibleLength = stripAnsi(text).length;
+  if (visibleLength <= width) return `${text}${" ".repeat(width - visibleLength)}`;
+  const plain = stripAnsi(text);
+  return width <= 3 ? plain.slice(0, width) : `${plain.slice(0, width - 3)}...`;
 }
 
 function border(width, title = "") {
@@ -35,6 +46,18 @@ function centerLine(value, width) {
   const space = Math.max(0, width - text.length);
   const left = Math.floor(space / 2);
   return `${" ".repeat(left)}${text}`;
+}
+
+function centerHighlightedLine(value, width) {
+  const text = String(value || "");
+  const space = Math.max(0, width - text.length);
+  const left = Math.floor(space / 2);
+  const right = space - left;
+  return `${" ".repeat(left)}${color("1;30;43", text, stdout)}${" ".repeat(right)}`;
+}
+
+function highlightTaskId(value) {
+  return color("1;30;46", value, stdout);
 }
 
 function centerBlock(lines, height) {
@@ -69,10 +92,6 @@ function sidCheckLine(status, sidMasked) {
   return `SID check: Auth ${sidOkLabel(status)} | SID ${sidMasked || "none"}`;
 }
 
-function sidOriginHint(origin) {
-  return origin || "login needed";
-}
-
 function formatRuntime(value = 0) {
   const totalSeconds = Math.max(0, Math.floor(Number(value || 0) / 1000));
   const seconds = totalSeconds % 60;
@@ -105,13 +124,13 @@ function printHeader(version, workspace = {}) {
   const sidStatus = sidCheck.status || (workspace.hasSavedSid ? "unknown" : "missing");
   const sidMasked = sidCheck.sidMasked || workspace.sidMasked || "";
   const sidOrigin = sidCheck.origin || workspace.wosOrigin || "";
+  const originUrl = sidOrigin || workspace.baseUrl || "https://www.webofscience.com";
   const rightLines = [
     kvLine("Workspace", workspacePath),
-    kvLine("Task ID", currentTask || "none"),
+    kvLine("Task ID", currentTask ? highlightTaskId(currentTask) : "none"),
     "",
     kvLine("Auth", sidOkLabel(sidStatus)),
     kvLine("SID Value", sidMasked || "none"),
-    kvLine("Origin", sidOriginHint(sidOrigin)),
     "",
     kvLine("Playwright", workspace.wosBrowserMode || "background"),
     kvLine("Profile", workspace.wosProfileName || ".browser-profile"),
@@ -119,10 +138,11 @@ function printHeader(version, workspace = {}) {
   ];
   const leftContentWidth = panelWidth - 4;
   const leftBlock = [
-    centerLine("[ W O S - C L I ]", leftContentWidth),
+    centerHighlightedLine("[ W O S - C L I ]", leftContentWidth),
     "",
     "",
     centerLine("iiaide-wos CLI", leftContentWidth),
+    centerLine(originUrl, leftContentWidth),
     centerLine(CLI_AUTHOR, leftContentWidth),
     centerLine(CLI_VERSION_UPDATED_AT, leftContentWidth),
   ];
@@ -173,12 +193,16 @@ async function askRequiredWithFallback(rl, message, fallback, help) {
 }
 
 async function askParameterOrCancel(rl, message, help, fallback = "") {
-  const hint = fallback ? "(Enter uses saved)" : "(Enter cancels)";
+  const hint = fallback ? "(Enter uses saved, c back, q quit)" : "(c back, q quit)";
   for (;;) {
     const answer = (await rl.question(`${message} ${color("2", hint, stdout)}: `)).trim();
-    const lowered = answer.toLowerCase();
-    if (lowered === "q" || lowered === "quit" || lowered === "exit" || lowered === "cancel") return "";
-    if (!answer) return fallback || "";
+    if (isBackInput(answer)) return CONTROL_BACK;
+    if (isQuitInput(answer)) return CONTROL_QUIT;
+    if (!answer && fallback) return fallback;
+    if (!answer) {
+      stdout.write(`${color("33", "Required:", stdout)} ${help}; c goes back, q quits\n`);
+      continue;
+    }
     if (answer) return answer;
     stdout.write(`${color("33", "Required:", stdout)} ${help}\n`);
   }
@@ -187,8 +211,10 @@ async function askParameterOrCancel(rl, message, help, fallback = "") {
 async function askOptionalInteger(rl, message, fallback, minimum = 0, maximum = Infinity) {
   for (;;) {
     const answer = await ask(rl, message, String(fallback));
+    if (isBackInput(answer)) return CONTROL_BACK;
+    if (isQuitInput(answer)) return CONTROL_QUIT;
     if (!/^\d+$/.test(answer)) {
-      stdout.write(`${color("33", "Required:", stdout)} enter an integer\n`);
+      stdout.write(`${color("33", "Required:", stdout)} enter an integer, c to go back, or q to quit\n`);
       continue;
     }
     const value = Number(answer);
@@ -205,9 +231,11 @@ async function askOptionalBoolean(rl, message, fallback = false) {
   const fallbackText = fallback ? "y" : "n";
   for (;;) {
     const answer = (await ask(rl, message, fallbackText)).toLowerCase();
+    if (isBackInput(answer)) return CONTROL_BACK;
+    if (isQuitInput(answer)) return CONTROL_QUIT;
     if (answer === "y" || answer === "yes") return true;
     if (answer === "n" || answer === "no") return false;
-    stdout.write(`${color("33", "Required:", stdout)} enter y or n\n`);
+    stdout.write(`${color("33", "Required:", stdout)} enter y, n, c to go back, or q to quit\n`);
   }
 }
 
@@ -215,7 +243,9 @@ function formatAuthorOptions(options = {}) {
   const values = { ...DEFAULT_AUTHOR_OPTIONS, ...options };
   return [
     `concurrency=${values.concurrency}`,
+    `timeout=${values.authorTimeoutMs}ms`,
     `cooldown=${values.cooldownMs}ms`,
+    `failCool=${values.failureCooldownThreshold}/${values.failureCooldownMs}ms`,
     `from=${values.fromIndex}`,
     `limit=${values.limit || "all"}`,
     `retryFailed=${values.retryFailed ? "yes" : "no"}`,
@@ -227,7 +257,10 @@ function authorOptionsToArgs(options = {}) {
   const values = { ...DEFAULT_AUTHOR_OPTIONS, ...options };
   const args = [
     "--concurrency", String(values.concurrency),
+    "--author-timeout-ms", String(values.authorTimeoutMs),
     "--cooldown-ms", String(values.cooldownMs),
+    "--failure-cooldown-threshold", String(values.failureCooldownThreshold),
+    "--failure-cooldown-ms", String(values.failureCooldownMs),
     "--from-index", String(values.fromIndex),
   ];
   if (values.limit) args.push("--limit", String(values.limit));
@@ -240,20 +273,58 @@ async function askAuthorOptions(rl, defaults = DEFAULT_AUTHOR_OPTIONS) {
   const base = { ...DEFAULT_AUTHOR_OPTIONS, ...defaults };
   stdout.write(`${color("36", "Author options:", stdout)} ${formatAuthorOptions(base)}\n`);
   const change = await askOptionalBoolean(rl, "Change author download options? Enter uses defaults", false);
+  if (isBackResult(change) || isQuitResult(change)) return change;
   if (!change) return [];
+  const concurrency = await askOptionalInteger(rl, "Concurrency", base.concurrency, 1, 10);
+  if (isBackResult(concurrency) || isQuitResult(concurrency)) return concurrency;
+  const authorTimeoutMs = await askOptionalInteger(rl, "Author timeout ms", base.authorTimeoutMs, 5000);
+  if (isBackResult(authorTimeoutMs) || isQuitResult(authorTimeoutMs)) return authorTimeoutMs;
+  const cooldownMs = await askOptionalInteger(rl, "Cooldown ms", base.cooldownMs, 0);
+  if (isBackResult(cooldownMs) || isQuitResult(cooldownMs)) return cooldownMs;
+  const failureCooldownThreshold = await askOptionalInteger(rl, "Failure cooldown threshold 0=off", base.failureCooldownThreshold, 0);
+  if (isBackResult(failureCooldownThreshold) || isQuitResult(failureCooldownThreshold)) return failureCooldownThreshold;
+  const failureCooldownMs = await askOptionalInteger(rl, "Failure cooldown ms", base.failureCooldownMs, 0);
+  if (isBackResult(failureCooldownMs) || isQuitResult(failureCooldownMs)) return failureCooldownMs;
+  const fromIndex = await askOptionalInteger(rl, "From WOS ID index", base.fromIndex, 1);
+  if (isBackResult(fromIndex) || isQuitResult(fromIndex)) return fromIndex;
+  const limit = await askOptionalInteger(rl, "Limit 0=all", base.limit, 0);
+  if (isBackResult(limit) || isQuitResult(limit)) return limit;
+  const retryFailed = await askOptionalBoolean(rl, "Retry failed records", base.retryFailed);
+  if (isBackResult(retryFailed) || isQuitResult(retryFailed)) return retryFailed;
+  const failedOnly = await askOptionalBoolean(rl, "Only failed records", base.failedOnly);
+  if (isBackResult(failedOnly) || isQuitResult(failedOnly)) return failedOnly;
   const options = {
-    concurrency: await askOptionalInteger(rl, "Concurrency", base.concurrency, 1, 10),
-    cooldownMs: await askOptionalInteger(rl, "Cooldown ms", base.cooldownMs, 0),
-    fromIndex: await askOptionalInteger(rl, "From WOS ID index", base.fromIndex, 1),
-    limit: await askOptionalInteger(rl, "Limit 0=all", base.limit, 0),
-    retryFailed: await askOptionalBoolean(rl, "Retry failed records", base.retryFailed),
-    failedOnly: await askOptionalBoolean(rl, "Only failed records", base.failedOnly),
+    concurrency,
+    authorTimeoutMs,
+    cooldownMs,
+    failureCooldownThreshold,
+    failureCooldownMs,
+    fromIndex,
+    limit,
+    retryFailed,
+    failedOnly,
   };
   return authorOptionsToArgs(options);
 }
 
+function isBackInput(value) {
+  return /^(c|cancel)$/i.test(String(value || "").trim());
+}
+
+function isQuitInput(value) {
+  return /^(q|quit|exit)$/i.test(String(value || "").trim());
+}
+
 function isControlInput(value) {
-  return /^(q|quit|exit|cancel)$/i.test(String(value || "").trim());
+  return isBackInput(value) || isQuitInput(value);
+}
+
+function isBackResult(value) {
+  return value === CONTROL_BACK;
+}
+
+function isQuitResult(value) {
+  return value === CONTROL_QUIT;
 }
 
 function isWosSourceLike(value) {
@@ -268,7 +339,7 @@ function defaultTaskId() {
   const date = new Date();
   const pad = (value, width = 2) => String(value).padStart(width, "0");
   return [
-    "WOS",
+    "TID",
     date.getFullYear(),
     pad(date.getMonth() + 1),
     pad(date.getDate()),
@@ -291,8 +362,10 @@ function listTaskHints(workspace) {
   stdout.write(`  ${"-".repeat(indexWidth)}  ${"-".repeat(taskIdWidth)}\n`);
   const currentTask = workspace.currentTask || workspace.latestTask || "";
   for (const [index, task] of tasks.entries()) {
-    const marker = task.taskId === currentTask ? " *" : "";
-    stdout.write(`  ${String(index + 1).padStart(indexWidth)}  ${color("36", task.taskId, stdout)}${marker}\n`);
+    const isCurrent = task.taskId === currentTask;
+    const marker = isCurrent ? " *" : "";
+    const taskId = isCurrent ? highlightTaskId(task.taskId) : color("36", task.taskId, stdout);
+    stdout.write(`  ${String(index + 1).padStart(indexWidth)}  ${taskId}${marker}\n`);
   }
   stdout.write("\n");
 }
@@ -309,6 +382,12 @@ function currentTaskSelection(workspace) {
 function resolveTaskSelection(workspace, value, fallback = "", newTaskId = "") {
   const tasks = Array.isArray(workspace?.tasks) ? workspace.tasks : [];
   const raw = String(value || "").trim();
+  if (isBackInput(raw)) {
+    return { taskId: "", task: null, fromIndex: false, isNew: false, invalidIndex: false, back: true };
+  }
+  if (isQuitInput(raw)) {
+    return { taskId: "", task: null, fromIndex: false, isNew: false, invalidIndex: false, quit: true };
+  }
   if (/^new$/i.test(raw) && String(newTaskId || "").trim()) {
     return { taskId: String(newTaskId).trim(), task: null, fromIndex: false, isNew: true, invalidIndex: false };
   }
@@ -329,52 +408,89 @@ function resolveTaskSelection(workspace, value, fallback = "", newTaskId = "") {
 }
 
 function taskPromptHelp(mode, fallback, generatedTaskId, taskCount) {
+  if (mode === "new") {
+    return `Enter creates ${generatedTaskId}; type a custom task id; c goes back; q quits`;
+  }
   if (mode === "existing") {
     return taskCount
-      ? `Enter=${fallback}, number=select existing task, or type an exact task id`
+      ? `Enter keeps ${fallback}; type 1-${taskCount} to select an existing task; type an exact task id; c goes back; q quits`
       : "no existing tasks are available";
   }
   if (taskCount) {
-    return `Enter=${fallback}, number=resume existing task, new=${generatedTaskId}, or type a new custom task id`;
+    return `Enter keeps ${fallback}; type 1-${taskCount} to switch; type new to create ${generatedTaskId}; type a custom task id; c goes back; q quits`;
   }
-  return `Enter=${generatedTaskId}, new=${generatedTaskId}, or type a custom task id`;
+  return `Enter creates ${generatedTaskId}; type new or a custom task id to create another task; c goes back; q quits`;
+}
+
+function taskHintLine(command, description) {
+  return `  ${String(command).padEnd(7)}${description}`;
 }
 
 function taskSelectionHint(mode, fallback, generatedTaskId, taskCount) {
+  if (mode === "new") {
+    return [
+      taskHintLine("Enter", `create ${generatedTaskId}`),
+      taskHintLine("custom", "type a custom task id"),
+      taskHintLine("c", "back"),
+      taskHintLine("q", "quit"),
+    ].join("\n");
+  }
   if (mode === "existing") {
-    return taskCount
-      ? `Enter keeps ${fallback}; type 1-${taskCount} or an exact task id.`
-      : "No existing tasks are available.";
+    if (!taskCount) return "  no existing tasks are available";
+    return [
+      taskHintLine("Enter", `keep ${fallback}`),
+      taskHintLine(`1-${taskCount}`, "select an existing task"),
+      taskHintLine("custom", "type an exact task id"),
+      taskHintLine("c", "back"),
+      taskHintLine("q", "quit"),
+    ].join("\n");
   }
   if (taskCount) {
-    return `Enter keeps ${fallback}; type 1-${taskCount} to switch, new to create ${generatedTaskId}, or type a custom task id.`;
+    return [
+      taskHintLine("Enter", `keep ${fallback}`),
+      taskHintLine(`1-${taskCount}`, "switch to a listed task"),
+      taskHintLine("new", `create ${generatedTaskId}`),
+      taskHintLine("custom", "type a custom task id"),
+      taskHintLine("c", "back"),
+      taskHintLine("q", "quit"),
+    ].join("\n");
   }
-  return `Enter creates ${generatedTaskId}; type new or a custom task id to create another task.`;
+  return [
+    taskHintLine("Enter", `create ${generatedTaskId}`),
+    taskHintLine("new", `create ${generatedTaskId}`),
+    taskHintLine("custom", "type a custom task id"),
+    taskHintLine("c", "back"),
+    taskHintLine("q", "quit"),
+  ].join("\n");
 }
 
 async function askTaskSelection(rl, workspace, options = {}) {
   const mode = options.mode || "any";
   const tasks = Array.isArray(workspace?.tasks) ? workspace.tasks : [];
   const generatedTaskId = options.generatedTaskId || defaultTaskId();
-  const fallback = mode === "existing"
+  const fallback = mode === "new"
+    ? generatedTaskId
+    : mode === "existing"
     ? (workspace.latestTask || tasks[0]?.taskId || "")
     : (workspace.latestTask || generatedTaskId);
 
   if (mode === "existing" && !tasks.length) {
-    stdout.write(`${color("33", "No tasks to clear.", stdout)} create one with any download workflow first.\n\n`);
+    stdout.write(`${color("33", "No existing tasks.", stdout)} create one with Task manager 3.1 first.\n\n`);
     return null;
   }
 
-  stdout.write(`${color("36", "Task selection:", stdout)} ${taskSelectionHint(mode, fallback, generatedTaskId, tasks.length)}\n`);
+  stdout.write(`${color("36", "Task selection:", stdout)}\n${taskSelectionHint(mode, fallback, generatedTaskId, tasks.length)}\n\n`);
 
   for (;;) {
     const taskInput = await askRequiredWithFallback(
       rl,
-      mode === "existing" ? "Task to clear" : "Task",
+      mode === "existing" ? "Task" : "Task",
       fallback,
       taskPromptHelp(mode, fallback, generatedTaskId, tasks.length)
     );
-    const selection = resolveTaskSelection(workspace, taskInput, fallback, generatedTaskId);
+    const selection = resolveTaskSelection(mode === "new" ? { tasks: [] } : workspace, taskInput, fallback, generatedTaskId);
+    if (selection.back) return CONTROL_BACK;
+    if (selection.quit) return CONTROL_QUIT;
     if (selection.invalidIndex) {
       stdout.write(`${color("33", "Invalid task number:", stdout)} choose 1-${tasks.length}, or type a custom task id.\n`);
       continue;
@@ -387,21 +503,37 @@ async function askTaskSelection(rl, workspace, options = {}) {
   }
 }
 
+function workflowGroup(value, label) {
+  stdout.write(`  ${color("36", value, stdout)}  ${label}\n`);
+}
+
+function workflowItem(value, label, description) {
+  stdout.write(`     ${color("36", value.padEnd(3), stdout)} ${label}\n`);
+  if ((stdout.columns || 100) >= 60) {
+    stdout.write(`         ${color("2", description, stdout)}\n`);
+  }
+}
+
 async function askWorkflow(rl) {
-  option("1", "Download WOS IDs", "URL/UUID -> full-record txt -> data/<uuid>_wosid.csv");
-  option("2", "Download WOS literature txt", "URL/UUID -> raw/full-record/*.txt and derived WOS IDs");
-  option("3", "Export author information", "URL/UUID -> txt -> WOS IDs -> authors pipeline");
-  option("4", "Download WOS BibTeX", "URL/UUID -> raw/bib/*.bib");
-  option("5", "Switch task", "Select or create the current task without running a download");
-  option("6", "Clear task", "Remove the selected managed task directory and index entry");
+  workflowGroup("1", "Download literature");
+  workflowItem("1.1", "UUID - TXT format", "URL/UUID -> raw/<uuid>/full-record/*.txt and WOS IDs");
+  workflowItem("1.2", "UUID - BIB format", "URL/UUID -> raw/<uuid>/bib/*.bib");
+  workflowGroup("2", "Export");
+  workflowItem("2.1", "Author & address", "URL/UUID -> TXT -> WOS IDs -> authors CSV");
+  workflowGroup("3", "Task manager");
+  workflowItem("3.1", "New", "Create a fresh current task");
+  workflowItem("3.2", "Switch", "Select an existing current task");
+  workflowItem("3.3", "Clear", "Remove a managed task");
+  option("c", "Back", "Return to the workspace menu");
   option("q", "Exit", "Close without running a command");
   stdout.write("\n");
 
   for (;;) {
     const choice = (await ask(rl, "Select workflow")).toLowerCase();
-    if (choice === "q" || choice === "quit" || choice === "exit") return "";
-    if (["1", "2", "3", "4", "5", "6"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 1, 2, 3, 4, 5, 6, or q\n`);
+    if (isBackInput(choice)) return CONTROL_BACK;
+    if (isQuitInput(choice)) return CONTROL_QUIT;
+    if (["1.1", "1.2", "2.1", "3.1", "3.2", "3.3"].includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2.1, 3.1, 3.2, 3.3, c to go back, or q to quit\n`);
   }
 }
 
@@ -415,10 +547,12 @@ async function promptSid(message = "Enter a current WOS SID") {
     },
   });
   const rl = readline.createInterface({ input: stdin, output: mutedOutput, terminal: true });
-  stdout.write(`${message}: `);
+  stdout.write(`${message} (c back, q quit): `);
   try {
     const sid = (await rl.question("")).trim();
     stdout.write("\n");
+    if (isBackInput(sid)) return CONTROL_BACK;
+    if (isQuitInput(sid)) return CONTROL_QUIT;
     return sid;
   } finally {
     rl.close();
@@ -434,8 +568,9 @@ async function confirmAction(message, defaultYes = true) {
       const answer = (await rl.question(`${message}${suffix}: `)).trim().toLowerCase();
       if (!answer) return defaultYes;
       if (answer === "y" || answer === "yes") return true;
-      if (answer === "n" || answer === "no" || answer === "q" || answer === "quit" || answer === "cancel") return false;
-      stdout.write(`${color("33", "Required:", stdout)} enter y or n\n`);
+      if (answer === "n" || answer === "no" || isBackInput(answer)) return false;
+      if (isQuitInput(answer)) return CONTROL_QUIT;
+      stdout.write(`${color("33", "Required:", stdout)} enter y, n, c to go back, or q to quit\n`);
     }
   } finally {
     rl.close();
@@ -449,12 +584,16 @@ async function askSidFromBrowserOrManual(getRl, readBrowserSid, promptManualSid)
     stdout.write(`${color("1", "SID setup", stdout)}\n`);
     option("1", "Manual input", "Paste a current WOS SID");
     option("2", "Open browser login", "Log in to WOS, then auto-detect SID");
+    option("c", "Back", "Return to workflow selection");
     option("q", "Exit", "Close without running a command");
     stdout.write("\n");
     const action = (await ask(getRl(), "Select SID method")).toLowerCase();
-    if (action === "q" || action === "quit" || action === "exit") return "";
+    if (isBackInput(action)) return CONTROL_BACK;
+    if (isQuitInput(action)) return CONTROL_QUIT;
     if (action === "1" || action === "m" || action === "manual") {
       const sid = await promptManualSid();
+      if (isBackResult(sid)) continue;
+      if (isQuitResult(sid)) return CONTROL_QUIT;
       if (sid) {
         stdout.write(`${color("32", "SID:", stdout)} received manually.\n\n`);
         return sid;
@@ -477,7 +616,7 @@ async function askSidFromBrowserOrManual(getRl, readBrowserSid, promptManualSid)
       stdout.write("Choose browser login again, or use manual input.\n\n");
       continue;
     }
-    stdout.write(`${color("33", "Required:", stdout)} choose 1, 2, or q\n`);
+    stdout.write(`${color("33", "Required:", stdout)} choose 1, 2, c to go back, or q to quit\n`);
   }
 }
 
@@ -532,11 +671,13 @@ async function interactiveArgs(version, workspace, helpers = {}) {
   try {
     const generatedTaskId = helpers.makeTaskId?.() || defaultTaskId();
     const choice = await askWorkflow(rl);
-    if (!choice) return null;
+    if (isBackResult(choice)) return { refresh: true };
+    if (isQuitResult(choice)) return null;
 
-    if (choice === "5") {
-      const selection = await askTaskSelection(rl, activeWorkspace, { mode: "any", generatedTaskId });
-      if (!selection) return null;
+    if (choice === "3.1") {
+      const selection = await askTaskSelection(rl, activeWorkspace, { mode: "new", generatedTaskId });
+      if (isBackResult(selection)) return { refresh: true };
+      if (isQuitResult(selection)) return null;
       const nextWorkspace = await refreshWorkspace(selection.taskId);
       stdout.write(`${color("32", "Current task:", stdout)} ${selection.taskId}\n\n`);
       printHeader(version, nextWorkspace);
@@ -544,9 +685,23 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       return { refresh: true };
     }
 
-    if (choice === "6") {
+    if (choice === "3.2") {
       const selection = await askTaskSelection(rl, activeWorkspace, { mode: "existing", generatedTaskId });
-      if (!selection) return null;
+      if (isBackResult(selection)) return { refresh: true };
+      if (isQuitResult(selection)) return null;
+      if (!selection) return { refresh: true };
+      const nextWorkspace = await refreshWorkspace(selection.taskId);
+      stdout.write(`${color("32", "Current task:", stdout)} ${selection.taskId}\n\n`);
+      printHeader(version, nextWorkspace);
+      listTaskHints(nextWorkspace);
+      return { refresh: true };
+    }
+
+    if (choice === "3.3") {
+      const selection = await askTaskSelection(rl, activeWorkspace, { mode: "existing", generatedTaskId });
+      if (isBackResult(selection)) return { refresh: true };
+      if (isQuitResult(selection)) return null;
+      if (!selection) return { refresh: true };
       stdout.write(`${color("32", "Clearing task:", stdout)} ${selection.taskId}\n\n`);
       return ["clear", "--task", selection.taskId, "--tasks-root", activeWorkspace.tasksRoot];
     }
@@ -565,7 +720,14 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     let sid = "";
     if (!workspace.hasSavedSid) {
       sid = await askSidFromBrowserOrManual(() => rl, helpers.readBrowserSid, promptManualSid);
-      if (!sid) return null;
+      if (isBackResult(sid)) return { refresh: true };
+      if (isQuitResult(sid)) return null;
+      if (!sid) return { refresh: true };
+      if (typeof helpers.saveSid === "function") {
+        activeWorkspace = await helpers.saveSid(sid);
+        stdout.write(`${color("32", "SID:", stdout)} saved. Refreshing workspace panel.\n\n`);
+        return { refresh: true };
+      }
     }
 
     const sourceFallback = [task?.url, task?.uuid].find(isWosSourceLike) || "";
@@ -578,15 +740,22 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       "paste a WOS summary URL or result-set UUID",
       sourceFallback
     );
+    if (isBackResult(source)) return { refresh: true };
+    if (isQuitResult(source)) return null;
     if (!source) {
-      stdout.write(`${color("33", "Cancelled:", stdout)} no WOS summary URL or UUID entered.\n\n`);
+      stdout.write(`${color("33", "Required:", stdout)} WOS summary URL or UUID is required.\n\n`);
       return { refresh: true };
     }
     const sourceFlag = /^https?:\/\//i.test(source) ? "--url" : "--uuid";
-    const command = choice === "3" ? "pipeline" : (choice === "4" ? "bib" : "run");
+    const command = choice === "2.1" ? "pipeline" : (choice === "1.2" ? "bib" : "run");
     const result = [command, sourceFlag, source, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot];
     if (command !== "bib") result.push("--reuse-raw");
-    if (choice === "3") result.push(...await askAuthorOptions(rl));
+    if (choice === "2.1") {
+      const authorArgs = await askAuthorOptions(rl);
+      if (isBackResult(authorArgs)) return { refresh: true };
+      if (isQuitResult(authorArgs)) return null;
+      result.push(...authorArgs);
+    }
     if (sid) result.push("--sid", sid);
     return result;
   } finally {
@@ -610,6 +779,8 @@ module.exports = {
   printHeader,
   promptSid,
   resolveTaskSelection,
+  isBackResult,
+  isQuitResult,
   taskSelectionHint,
   taskPromptHelp,
 };

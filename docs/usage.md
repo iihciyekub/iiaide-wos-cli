@@ -50,7 +50,7 @@ The `run` command:
 4. Opens the WOS summary page to prepare the same-origin request context.
 5. Reads and reports the result-set UUID and expected record count.
 6. Calls the injected `window.wos.export.fetchTxtBatches` API in batches.
-7. Stores every raw batch under `raw/full-record/<uuid>_<start>_<end>.txt`.
+7. Stores every raw batch under `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
 8. Parses the `UT` field into normalized WOS IDs.
 9. Writes the normalized WOSID CSV, metadata, logs, and a summary.
 
@@ -84,10 +84,10 @@ count, and then download BibTeX through the injected
 buttons or frontend click flows for the main download path. The browser-side
 wos.js helper owns WOS request details such as `saveToBibtex`; the CLI owns task
 file writing, progress logging, and final BibTeX composition.
-Batch files are kept under `raw/bib/`, then combined into one final BibTeX
-file. The interactive menu labels this workflow as `Download WOS BibTeX`; after
-source input it prints the resolved UUID before SID validation and then shows
-download progress for each WOS BibTeX batch.
+Batch files are kept under `raw/<uuid>/bib/`, then combined into one final BibTeX
+file. In the folded interactive menu, use `1.2 UUID - BIB format`; after source
+input it prints the resolved UUID before SID validation and then shows download
+progress for each WOS BibTeX batch.
 
 When `--limit` is omitted, `bib` requests records up to the WOS summary count.
 If WOS does not expose a count, the command stops instead of guessing the final
@@ -100,7 +100,7 @@ record type query`, the UUID belongs to a non-record result set. Copy a normal
 WOS Core Collection records summary URL/UUID and run the export again.
 
 ```text
-tasks/<task-id>/raw/bib/<uuid>_<start>_<end>.bib
+tasks/<task-id>/raw/<uuid>/bib/<uuid>_<start>_<end>.bib
 tasks/<task-id>/data/<uuid>.bib
 ```
 
@@ -112,7 +112,7 @@ page.
 For every successfully processed WOS ID it writes:
 
 ```text
-authors/raw-json/<WOSID>.json
+raw/<uuid>/authors/<WOSID>.json
 ```
 
 It also maintains:
@@ -143,20 +143,34 @@ Resume behavior:
 - Aggregate CSV and JSONL files are regenerated at the end.
 
 `--concurrency` opens and processes multiple full-record pages at the same time.
+The default is `1`, which is steadier for a single WOS SID and browser profile;
+raise it only when you intentionally want multiple tabs.
+Each WOSID author page has a separate default `--author-timeout-ms 20000`
+deadline. A slow record is marked failed and the batch continues; rerun with
+`--failed-only` or `--retry-failed` to revisit failures.
+If a full-record page redirects back to `https://www.webofscience.com/wos/`,
+the CLI treats that WOSID as having no WOS data, marks it failed immediately,
+and does not wait for deeper author-page selectors. Author page extraction does
+not wait for WOS `networkidle`; it waits for the first useful signal: author
+content or a WOS root redirect.
+When 20 author records fail during one run, the CLI pauses for 60 seconds before
+continuing. Tune this with `--failure-cooldown-threshold` and
+`--failure-cooldown-ms`, or set the threshold to `0` to disable failure
+cooldown.
 The progress bar advances when records finish, so the visible completion events
 still appear one by one. `--from-index 1` is the default scan start for selecting
 work; resume still skips checkpointed `completed` records before building the
 work queue.
 
-In the interactive `Export author information` workflow, the CLI shows the
+In the interactive `2.1 Author & address` workflow, the CLI shows the
 default author options before the pipeline starts:
 
 ```text
-concurrency=2 | cooldown=250ms | from=1 | limit=all | retryFailed=no | failedOnly=no
+concurrency=1 | timeout=20000ms | cooldown=250ms | failCool=20/60000ms | from=1 | limit=all | retryFailed=no | failedOnly=no
 ```
 
-Press Enter to keep defaults, or choose to edit concurrency, cooldown, start
-index, limit, and retry filters for that run.
+Press Enter to keep defaults, or choose to edit concurrency, per-author timeout,
+cooldown, failure cooldown, start index, limit, and retry filters for that run.
 
 ## Task Lifecycle
 
@@ -179,9 +193,9 @@ tasks/latest
 In the interactive CLI, `tasks/latest` is also the current task pointer. Menu
 startup automatically creates a managed current task when none exists. The
 Current workspace panel shows that task id as `Task ID`, and the task list
-marks it with `*`. Before any task prompt, the menu prints a `Task selection:`
-hint that shows whether Enter keeps the current task, numeric input switches
-tasks, or `new` creates a fresh task.
+highlights it with `*`. Before any task prompt, the menu prints a
+`Task selection:` hint that shows whether Enter keeps the current task, numeric
+input switches tasks, or `new` creates a fresh task.
 
 Task commands:
 
@@ -200,10 +214,24 @@ refuses to remove directories that do not contain a `iiaide-wos` manifest.
 In the interactive menu, the `Task id` prompt accepts a numbered task selection
 from the current workspace list, an existing task id, `new` for a fresh
 generated task id, or a new task id that you type directly. The menu asks for
-the workflow first, then shows the right task prompt for task-management
-actions. Download workflows run directly in the current task marked with `*`.
-Use `Switch task` before downloading when you want to select an existing task or
-create a fresh task; clear only accepts existing tasks.
+the folded workflow first, then shows the right task prompt for task-management
+actions:
+
+```text
+1 Download literature
+  1.1 UUID - TXT format
+  1.2 UUID - BIB format
+2 Export
+  2.1 Author & address
+3 Task manager
+  3.1 New
+  3.2 Switch
+  3.3 Clear
+```
+
+Download workflows run directly in the current task marked with `*`. Use
+`3.1 New` before downloading when you want a fresh task, `3.2 Switch` to select
+an existing task, and `3.3 Clear` to remove an existing managed task.
 
 Interactive downloads reuse the current task by default. If the task already
 has a completed TXT or BibTeX export for the same UUID, the CLI prints the
@@ -211,7 +239,8 @@ existing artifact path and skips SID validation and WOS download. Use `--force`
 only when you intentionally want to replace a managed task's existing outputs.
 For download workflows, pressing Enter at the `WOS summary URL or UUID` prompt
 uses the shown saved source when one exists. If no saved source is available,
-Enter cancels that workflow and returns to the menu. Saved task sources are
+enter a source, press `c` to return to the menu, or press `q` to exit the CLI.
+Saved task sources are
 shown only when they look like a WOS summary URL or UUID, and
 SID/authentication state is shown in the dashboard rather than inside each
 workflow.
@@ -287,12 +316,17 @@ when the helper file is stored somewhere else.
 When the interactive CLI starts, it runs a lightweight SID probe against the WOS
 initialization URL. This does not open Chromium and does not save or overwrite
 the SID. It only classifies startup status as `valid`, `invalid`, `unknown`, or
-`missing` for the dashboard. The dashboard also shows the detected WOS origin
-when the probe can resolve it. If no origin is confirmed, the CLI prints a hint
-to reopen WOS with
+`missing` for the dashboard. The dashboard shows the WOS origin URL under the
+left-side `iiaide-wos CLI` title, using the detected origin when the probe can
+resolve it. The left dashboard logo is highlighted in color-capable terminals.
+If no origin is confirmed, the CLI prints a hint to reopen WOS with
 `https://www.webofscience.com/wos/?Init=Yes&SrcApp=CR&SID=<SID>`. Commands that
 download or extract WOS data still perform strict persistent Playwright
 validation before doing network work.
+
+In interactive menu mode, manual SID entry and browser login SID detection save
+the refreshed SID, return to the outer menu loop, rerun the lightweight probe,
+and redraw the dashboard before asking for the next workflow input.
 
 The CLI does not log in to WOS or manage user account credentials.
 

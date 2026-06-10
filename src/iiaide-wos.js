@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
 const { readJson, writeFileAtomic, writeJson } = require("./lib/io");
-const { confirmAction, interactiveArgs, isUserAbortError, promptSid } = require("./lib/interactive");
+const { confirmAction, interactiveArgs, isBackResult, isQuitResult, isUserAbortError, promptSid } = require("./lib/interactive");
 const { createProgress, createSpinner, isInteractive } = require("./lib/terminal");
 const { updateCli } = require("./lib/update");
 const { exportBibBatchesViaWosJs, exportTxtBatchesViaWosJs } = require("./lib/wos-browser-export");
@@ -10,13 +10,16 @@ const { version: VERSION } = require("../package.json");
 
 const DEFAULT_BATCH_SIZE = 200;
 const DEFAULT_TIMEOUT_MS = 120000;
+const DEFAULT_AUTHOR_TIMEOUT_MS = 20000;
+const DEFAULT_AUTHOR_FAILURE_COOLDOWN_THRESHOLD = 20;
+const DEFAULT_AUTHOR_FAILURE_COOLDOWN_MS = 60000;
 const DEFAULT_WOS_PROTOCOL = "https";
 const DEFAULT_WOS_DOMAIN = "www.webofscience.com";
 const DEFAULT_BASE_URL = `${DEFAULT_WOS_PROTOCOL}://${DEFAULT_WOS_DOMAIN}`;
 const DEFAULT_WOSJS_PATH = path.resolve(__dirname, "..", "import", "wos.js");
 const HIDDEN_BROWSER_POSITION = "-32000,0";
 const DEFAULT_TASK_ID_CONFIG = {
-  prefix: "WOS",
+  prefix: "TID",
   pattern: "yyyyMMddHHmmss",
 };
 const CLI_STARTED_AT = Date.now();
@@ -30,8 +33,20 @@ class UserCancelledError extends Error {
   }
 }
 
+class UserQuitError extends UserCancelledError {
+  constructor(message) {
+    super(message);
+    this.name = "UserQuitError";
+    this.code = "USER_QUIT";
+  }
+}
+
 function isUserCancelledError(error) {
   return error?.code === "USER_CANCELLED" || error?.name === "UserCancelledError";
+}
+
+function isUserQuitError(error) {
+  return error?.code === "USER_QUIT" || error?.name === "UserQuitError";
 }
 
 function usage() {
@@ -88,18 +103,21 @@ Range options:
   --limit <n>             Process only n records/WOS IDs
 
 Author options:
-  --concurrency <n>       Parallel full-record pages. Default: 2
+  --concurrency <n>       Parallel full-record pages. Default: 1
   --retry-failed          Retry failed WOS IDs
   --failed-only           Process only failed WOS IDs
   --rebuild-only          Rebuild normalized JSON and authors.csv/authors.jsonl from existing JSON only
+  --author-timeout-ms <n> Per-author full-record timeout. Default: 20000
   --cooldown-ms <n>       Delay after each record. Default: 250
+  --failure-cooldown-threshold <n>  Cool down after n failed author records. Default: 20, 0 disables
+  --failure-cooldown-ms <n>         Failure cooldown delay. Default: 60000
 
 Task directory layout:
-  raw/full-record/        WOS fullRecord text batches as <uuid>_<start>_<end>.txt
-  raw/bib/                BibTeX batches as <uuid>_<start>_<end>.bib
+  raw/<uuid>/full-record/ WOS fullRecord text batches as <uuid>_<start>_<end>.txt
+  raw/<uuid>/bib/         BibTeX batches as <uuid>_<start>_<end>.bib
+  raw/<uuid>/authors/     One raw author extraction JSON per WOSID
   data/<uuid>.bib         Combined BibTeX file
   data/<uuid>_wosid.csv   One-column WOSID CSV
-  authors/raw-json/       One raw author extraction JSON per WOSID
   authors/authors.csv
   authors/authors.jsonl
   authors/checkpoint.json
@@ -138,7 +156,10 @@ function parseArgs(argv) {
     headed: false,
     force: false,
     reuseRaw: false,
-    concurrency: 2,
+    concurrency: 1,
+    authorTimeoutMs: DEFAULT_AUTHOR_TIMEOUT_MS,
+    failureCooldownThreshold: DEFAULT_AUTHOR_FAILURE_COOLDOWN_THRESHOLD,
+    failureCooldownMs: DEFAULT_AUTHOR_FAILURE_COOLDOWN_MS,
     limit: 0,
     fromIndex: 1,
     retryFailed: false,
@@ -199,7 +220,10 @@ function parseArgs(argv) {
     else if (arg === "--retry-failed") args.retryFailed = true;
     else if (arg === "--failed-only") args.failedOnly = true;
     else if (arg === "--rebuild-only") args.rebuildOnly = true;
+    else if (arg === "--author-timeout-ms" || arg === "--author-timeout") args.authorTimeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--cooldown-ms") args.cooldownMs = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--failure-cooldown-threshold") args.failureCooldownThreshold = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--failure-cooldown-ms") args.failureCooldownMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--check") args.checkOnly = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -214,6 +238,9 @@ function parseArgs(argv) {
   if (!args.url && args.uuid) args.url = buildSummaryUrl(args.baseUrl, args.uuid, args.sortBy);
   assertIntegerRange("--batch-size", args.batchSize, 1, 500);
   assertIntegerRange("--timeout-ms", args.timeoutMs, 5000);
+  assertIntegerRange("--author-timeout-ms", args.authorTimeoutMs, 5000);
+  assertIntegerRange("--failure-cooldown-threshold", args.failureCooldownThreshold, 0);
+  assertIntegerRange("--failure-cooldown-ms", args.failureCooldownMs, 0);
   assertIntegerRange("--concurrency", args.concurrency, 1, 10);
   assertIntegerRange("--limit", args.limit, 0);
   assertIntegerRange("--from-index", args.fromIndex, 1);
@@ -276,6 +303,17 @@ function urlDomain(value) {
     return new URL(String(value || "")).hostname;
   } catch (_) {
     return "";
+  }
+}
+
+function isWosRootRecordRedirect(value, baseUrl = DEFAULT_BASE_URL) {
+  try {
+    const current = new URL(String(value || ""));
+    const base = new URL(String(baseUrl || DEFAULT_BASE_URL));
+    const pathname = current.pathname.replace(/\/+$/, "") || "/";
+    return current.origin === base.origin && pathname === "/wos";
+  } catch (_) {
+    return false;
   }
 }
 
@@ -630,6 +668,8 @@ async function ensureSid(args, message = "Enter a current WOS SID", prompt = pro
     throw new Error(`Missing SID. Pass --sid, set WOS_SID, or run: iiaide-wos sid`);
   }
   const sid = await prompt(message);
+  if (isQuitResult(sid)) throw new UserQuitError("SID input quit by user");
+  if (isBackResult(sid)) throw new UserCancelledError("SID input cancelled by user");
   if (!sid) throw new Error("SID must not be empty");
   args.sid = sid;
   args.sidSource = "prompt";
@@ -835,22 +875,40 @@ function readLatestTaskId(tasksRoot) {
 }
 
 function getRunPaths(outDir) {
+  const rawRoot = path.join(outDir, "raw");
   return {
     taskDir: outDir,
     runDir: outDir,
-    rawDir: path.join(outDir, "raw", "full-record"),
-    bibDir: path.join(outDir, "raw", "bib"),
+    rawRoot,
+    rawDir: rawRoot,
+    bibDir: rawRoot,
+    legacyFullRecordDir: path.join(outDir, "raw", "full-record"),
+    legacyBibDir: path.join(outDir, "raw", "bib"),
+    legacyAuthorRawJsonDir: path.join(outDir, "raw", "authors"),
     dataDir: path.join(outDir, "data"),
     logsDir: path.join(outDir, "logs"),
     manifest: path.join(outDir, "manifest.json"),
     summary: path.join(outDir, "summary.json"),
     progressLog: path.join(outDir, "logs", "progress.jsonl"),
     authorsDir: path.join(outDir, "authors"),
-    authorRawJsonDir: path.join(outDir, "authors", "raw-json"),
+    authorRawJsonDir: path.join(outDir, "raw", "authors"),
     authorsCsv: path.join(outDir, "authors", "authors.csv"),
     authorsJsonl: path.join(outDir, "authors", "authors.jsonl"),
     authorFailures: path.join(outDir, "authors", "failures.json"),
     authorCheckpoint: path.join(outDir, "authors", "checkpoint.json"),
+  };
+}
+
+function withRawSource(paths, sourceId) {
+  const source = safeFilePart(sourceId || "task");
+  const rawSourceDir = path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), source);
+  return {
+    ...paths,
+    rawSourceId: source,
+    rawSourceDir,
+    rawDir: path.join(rawSourceDir, "full-record"),
+    bibDir: path.join(rawSourceDir, "bib"),
+    authorRawJsonDir: path.join(rawSourceDir, "authors"),
   };
 }
 
@@ -867,12 +925,10 @@ function createRunLayout(args) {
 
   const paths = getRunPaths(args.outDir);
   for (const dir of [
-    paths.rawDir,
-    paths.bibDir,
+    paths.rawRoot,
     paths.dataDir,
     paths.logsDir,
     paths.authorsDir,
-    paths.authorRawJsonDir,
   ]) fs.mkdirSync(dir, { recursive: true });
   return paths;
 }
@@ -928,7 +984,7 @@ function cleanRunLayout(paths) {
   if (manifest?.command !== "iiaide-wos") {
     throw new Error(`Refusing to clean unmanaged output directory: ${paths.taskDir}`);
   }
-  for (const directory of [path.dirname(paths.rawDir), paths.dataDir, paths.authorsDir, paths.logsDir]) {
+  for (const directory of [paths.rawRoot || path.join(paths.taskDir, "raw"), paths.dataDir, paths.authorsDir, paths.logsDir]) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
   for (const filePath of [paths.manifest, paths.summary]) {
@@ -1019,6 +1075,7 @@ async function confirmDownloadPlan(label, availableCount, selectedCount, batchSi
   console.error(`${label} to download: ${selectedCount}`);
   console.error(`${label} batches: ${batches} x ${batchSize} records`);
   const confirmed = await confirmAction(`Continue ${label.toLowerCase()} download?`);
+  if (isQuitResult(confirmed)) throw new UserQuitError(`${label} download quit by user`);
   if (!confirmed) throw new UserCancelledError(`${label} download cancelled by user`);
   return { batches };
 }
@@ -1109,6 +1166,13 @@ function writeAuthorCheckpoint(paths, checkpoint) {
 
 function rawAuthorJsonPath(paths, wosid) {
   return path.join(paths.authorRawJsonDir, safeWosIdFileName(wosid));
+}
+
+function authorRawJsonDirs(paths) {
+  const directories = [paths.authorRawJsonDir, paths.legacyAuthorRawJsonDir]
+    .filter(Boolean)
+    .map((directory) => path.resolve(directory));
+  return [...new Set(directories)];
 }
 
 function storedArtifactPath(paths, filePath) {
@@ -1252,11 +1316,14 @@ function flattenAuthorRows(normalizedRecords) {
 }
 
 function writeAuthorAggregates(paths) {
-  const records = fs.readdirSync(paths.authorRawJsonDir)
-    .filter((name) => name.endsWith(".json"))
-    .sort()
-    .map((name) => {
-      const raw = readJson(path.join(paths.authorRawJsonDir, name), null);
+  const records = authorRawJsonDirs(paths)
+    .filter((directory) => fs.existsSync(directory))
+    .flatMap((directory) => fs.readdirSync(directory)
+      .filter((name) => name.endsWith(".json"))
+      .sort()
+      .map((name) => ({ directory, name })))
+    .map(({ directory, name }) => {
+      const raw = readJson(path.join(directory, name), null);
       if (!raw) return null;
       const wosid = raw.wosid || raw.url?.match(/full-record\/(WOS:[^/?#]+)/i)?.[1] || "";
       return wosid ? normalizeAuthorRecord(wosid, raw) : null;
@@ -1290,13 +1357,15 @@ function writeAuthorAggregates(paths) {
 }
 
 function rebuildAuthorsFromRaw(paths) {
-  if (!fs.existsSync(paths.authorRawJsonDir)) return { rawRecords: 0, normalizedRecords: 0 };
-  const rawFiles = fs.readdirSync(paths.authorRawJsonDir)
-    .filter((name) => name.endsWith(".json"))
-    .sort();
+  const rawFiles = authorRawJsonDirs(paths)
+    .filter((directory) => fs.existsSync(directory))
+    .flatMap((directory) => fs.readdirSync(directory)
+      .filter((name) => name.endsWith(".json"))
+      .sort()
+      .map((name) => ({ directory, name })));
   let normalizedRecords = 0;
-  for (const name of rawFiles) {
-    const rawPath = path.join(paths.authorRawJsonDir, name);
+  for (const { directory, name } of rawFiles) {
+    const rawPath = path.join(directory, name);
     const raw = readJson(rawPath, null);
     if (!raw) continue;
     const wosid = raw.wosid || raw.url?.match(/full-record\/(WOS:[^/?#]+)/i)?.[1] || "";
@@ -1327,11 +1396,37 @@ function batchFileName(uuid, markFrom, markTo, extension = "txt") {
   return `${safeFilePart(uuid)}_${markFrom}_${markTo}.${extension}`;
 }
 
+function rawBatchDir(paths, uuid) {
+  if (!uuid) throw new Error("Missing raw batch UUID");
+  const safeUuid = safeFilePart(uuid);
+  const nextDir = path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), safeUuid, "full-record");
+  const legacyDir = path.join(paths.legacyFullRecordDir || path.join(paths.taskDir, "raw", "full-record"), safeUuid);
+  return fs.existsSync(nextDir) || !fs.existsSync(legacyDir) ? nextDir : legacyDir;
+}
+
+function rawBatchPath(paths, uuid, markFrom, markTo) {
+  return path.join(rawBatchDir(paths, uuid), batchFileName(uuid, markFrom, markTo));
+}
+
+function bibBatchDir(paths, uuid) {
+  if (!uuid) throw new Error("Missing BibTeX batch UUID");
+  const safeUuid = safeFilePart(uuid);
+  const nextDir = path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), safeUuid, "bib");
+  const legacyDir = path.join(paths.legacyBibDir || path.join(paths.taskDir, "raw", "bib"), safeUuid);
+  return fs.existsSync(nextDir) || !fs.existsSync(legacyDir) ? nextDir : legacyDir;
+}
+
+function bibBatchPath(paths, uuid, markFrom, markTo) {
+  return path.join(bibBatchDir(paths, uuid), batchFileName(uuid, markFrom, markTo, "bib"));
+}
+
 function rawBatchFiles(paths, uuid) {
   if (!uuid) throw new Error("Missing raw batch UUID");
+  const directory = rawBatchDir(paths, uuid);
+  if (!fs.existsSync(directory)) return [];
   const prefix = `${safeFilePart(uuid)}_`;
   return fs
-    .readdirSync(paths.rawDir)
+    .readdirSync(directory)
     .filter((name) => name.startsWith(prefix) && /_(\d+)_(\d+)\.txt$/.test(name))
     .sort((a, b) => Number(a.match(/_(\d+)_(\d+)\.txt$/)[1]) - Number(b.match(/_(\d+)_(\d+)\.txt$/)[1]));
 }
@@ -1363,7 +1458,7 @@ function parseExistingRawBatches(paths, uuid) {
     const match = fileName.match(/_(\d+)_(\d+)\.txt$/);
     const batchStart = Number(match[1]);
     const batchEnd = Number(match[2]);
-    const text = fs.readFileSync(path.join(paths.rawDir, fileName), "utf8");
+    const text = fs.readFileSync(path.join(rawBatchDir(paths, uuid), fileName), "utf8");
     rows.push(...parseExportText(text, batchStart, batchEnd));
   }
   return rows;
@@ -1390,7 +1485,7 @@ function writeOutputs(paths, rows, meta) {
     uniqueCount: uniqueRows.length,
     files: {
       wosidsCsv: csvPath,
-      rawDir: paths.rawDir,
+      rawDir: rawBatchDir(paths, meta.uuid || meta.taskId),
       progressLog: paths.progressLog,
     },
     finishedAt: new Date().toISOString(),
@@ -1522,6 +1617,8 @@ async function validateSidWithRetry(
     if (!canPrompt()) throw error;
     report(`WOS SID is invalid or expired: ${error.message || error}`);
     const sid = await prompt("Enter a new WOS SID to validate and save");
+    if (isQuitResult(sid)) throw new UserQuitError("SID update quit by user");
+    if (isBackResult(sid)) throw new UserCancelledError("SID update cancelled by user");
     if (!sid) throw new Error("SID update cancelled");
     args.sid = sid;
     args.sidSource = "prompt";
@@ -1871,7 +1968,7 @@ async function exportFromWos(args, paths) {
     });
 
     for (const batch of exportResult.batches) {
-      const rawPath = path.join(paths.rawDir, batchFileName(info.uuid, batch.markFrom, batch.markTo));
+      const rawPath = rawBatchPath(paths, info.uuid, batch.markFrom, batch.markTo);
       let text = batch.text;
       if (args.reuseRaw && fs.existsSync(rawPath)) {
         text = fs.readFileSync(rawPath, "utf8");
@@ -1996,7 +2093,7 @@ async function exportBibFromWos(args, paths) {
         break;
       }
       const markTo = batch.markFrom + entryCount - 1;
-      const bibPath = path.join(paths.bibDir, batchFileName(uuid, batch.markFrom, markTo, "bib"));
+      const bibPath = bibBatchPath(paths, uuid, batch.markFrom, markTo);
       writeFileAtomic(bibPath, batch.text);
       files.push(bibPath);
       downloadedEntries += entryCount;
@@ -2095,25 +2192,54 @@ function printAuthorWorkSummary(summary, write = console.error) {
   );
 }
 
+function remainingAuthorTimeout(deadline, timeoutMs, wosid) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new Error(`Author record timeout after ${timeoutMs}ms: ${wosid}`);
+  }
+  return remaining;
+}
+
 async function extractOneAuthorRecord(context, args, wosid) {
+  const timeoutMs = args.authorTimeoutMs || args.timeoutMs;
+  const deadline = Date.now() + timeoutMs;
   const page = await context.newPage();
-  page.setDefaultTimeout(args.timeoutMs);
+  page.setDefaultTimeout(timeoutMs);
   const url = `${args.baseUrl}/wos/woscc/full-record/${encodeURI(wosid)}`;
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: args.timeoutMs });
-    await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
+    await page.goto(url, {
+      waitUntil: "commit",
+      timeout: Math.min(10000, remainingAuthorTimeout(deadline, timeoutMs, wosid)),
+    });
+    if (isWosRootRecordRedirect(page.url(), args.baseUrl)) {
+      throw new Error(`No WOS data for ${wosid}: full-record redirected to ${page.url()}`);
+    }
+    const baseOrigin = urlOrigin(args.baseUrl);
     await page.waitForFunction(
-      () =>
-        Boolean(document.querySelector('#SumAuthTa-MainDiv-author-en [id^="author-"]')) ||
-        /Author Information/i.test(document.body?.innerText || ""),
-      null,
-      { timeout: args.timeoutMs }
+      (origin) => {
+        const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
+        return (
+          (window.location.origin === origin && pathname === "/wos") ||
+          Boolean(document.querySelector('#SumAuthTa-MainDiv-author-en [id^="author-"]')) ||
+          /Author Information/i.test(document.body?.innerText || "")
+        );
+      },
+      baseOrigin,
+      { timeout: remainingAuthorTimeout(deadline, timeoutMs, wosid) }
     );
+    if (isWosRootRecordRedirect(page.url(), args.baseUrl)) {
+      throw new Error(`No WOS data for ${wosid}: full-record redirected to ${page.url()}`);
+    }
     const raw = await page.evaluate(EXTRACT_AUTHOR_INFO);
     raw.wosid = wosid;
     raw.fetchedAt = new Date().toISOString();
     if (!raw.authors || !raw.authors.length) throw new Error("No authors extracted");
     return raw;
+  } catch (error) {
+    if (/timeout/i.test(error?.message || "")) {
+      throw new Error(`Author record timeout after ${timeoutMs}ms: ${wosid}`);
+    }
+    throw error;
   } finally {
     await page.close().catch(() => {});
   }
@@ -2125,7 +2251,7 @@ async function runAuthors(args) {
   args.outDir = task.taskDir;
   args.uuid = args.uuid || task.uuid;
   args.url = args.url || task.url || (args.uuid ? buildSummaryUrl(args.baseUrl, args.uuid, args.sortBy) : "");
-  const paths = createRunLayout({ ...args, force: true });
+  const paths = withRawSource(createRunLayout({ ...args, force: true }), args.uuid || task.uuid || task.taskId);
   if (args.rebuildOnly) {
     const normalized = rebuildAuthorsFromRaw(paths);
     const aggregate = writeAuthorAggregates(paths);
@@ -2206,6 +2332,7 @@ async function runAuthors(args) {
   let session = null;
   let processed = 0;
   let failed = 0;
+  let failuresSinceCooldown = 0;
   try {
     session = await prepareWosSession(args);
     authSpinner.succeed("WOS authentication validated");
@@ -2245,6 +2372,7 @@ async function runAuthors(args) {
         }
       } catch (error) {
         failed += 1;
+        failuresSinceCooldown += 1;
         checkpoint.records[wosid] = {
           ...checkpoint.records[wosid],
           status: "failed",
@@ -2259,6 +2387,23 @@ async function runAuthors(args) {
       }
       processed += 1;
       authorProgress.update(processed, `${index}/${wosids.length} ${wosid}`, failed);
+      if (
+        args.failureCooldownThreshold > 0 &&
+        failuresSinceCooldown >= args.failureCooldownThreshold &&
+        args.failureCooldownMs > 0
+      ) {
+        appendProgress(paths, {
+          phase: "authors-failure-cooldown",
+          failures: failuresSinceCooldown,
+          threshold: args.failureCooldownThreshold,
+          cooldownMs: args.failureCooldownMs,
+        });
+        if (!isInteractive()) {
+          console.error(`authors cooldown ${args.failureCooldownMs}ms after ${failuresSinceCooldown} failures`);
+        }
+        await sleep(args.failureCooldownMs);
+        failuresSinceCooldown = 0;
+      }
       if (args.cooldownMs) await sleep(args.cooldownMs);
     });
     authorProgress.stop("Author fetch complete");
@@ -2298,14 +2443,21 @@ async function runAuthors(args) {
 
 function validateTask(args) {
   const task = resolveTask(args);
-  const paths = getRunPaths(task.taskDir);
-  const summary = readJson(paths.summary, {});
+  const basePaths = getRunPaths(task.taskDir);
+  const initialSummary = readJson(basePaths.summary, {});
+  const rawSource = initialSummary.uuid || task.uuid || task.taskId;
+  const paths = withRawSource(basePaths, rawSource);
+  const summary = initialSummary;
   const isBibTask = summary.method === "wos-js-export-fetchBibBatches";
   const wosidsCsv = wosIdsCsvPath(paths, summary.uuid || task.uuid || task.taskId);
   const combinedBib = isBibTask ? bibFilePath(paths, summary.uuid || task.uuid) : "";
   const wosids = !isBibTask && fs.existsSync(wosidsCsv) ? readWosIdsCsv(wosidsCsv) : [];
-  const rawFiles = fs.existsSync(paths.rawDir) ? fs.readdirSync(paths.rawDir).filter((name) => name.endsWith(".txt")) : [];
-  const bibFiles = fs.existsSync(paths.bibDir) ? fs.readdirSync(paths.bibDir).filter((name) => name.endsWith(".bib")) : [];
+  const rawUuid = summary.uuid || task.uuid || "";
+  const rawFiles = rawUuid ? rawBatchFiles(paths, rawUuid) : [];
+  const bibUuid = isBibTask ? (summary.uuid || task.uuid || "") : "";
+  const bibFiles = bibUuid && fs.existsSync(bibBatchDir(paths, bibUuid))
+    ? fs.readdirSync(bibBatchDir(paths, bibUuid)).filter((name) => name.endsWith(".bib"))
+    : [];
   const checkpoint = readAuthorCheckpoint(paths);
   const aggregateRows = fs.existsSync(paths.authorsCsv)
     ? Math.max(0, fs.readFileSync(paths.authorsCsv, "utf8").split(/\r?\n/).filter(Boolean).length - 1)
@@ -2313,7 +2465,7 @@ function validateTask(args) {
   const issues = [];
   if (!fs.existsSync(paths.manifest)) issues.push("missing manifest.json");
   if (!fs.existsSync(paths.summary)) issues.push("missing summary.json");
-  if (isBibTask && !bibFiles.length) issues.push("missing raw/bib batches");
+  if (isBibTask && !bibFiles.length) issues.push("missing raw/<uuid>/bib batches");
   if (isBibTask && !fs.existsSync(combinedBib)) issues.push(`missing combined BibTeX file: ${path.relative(paths.taskDir, combinedBib)}`);
   if (!isBibTask && !fs.existsSync(wosidsCsv)) issues.push(`missing WOSID CSV: ${path.relative(paths.taskDir, wosidsCsv)}`);
   if (!isBibTask && summary.expectedCount && summary.uniqueCount !== summary.expectedCount) {
@@ -2322,7 +2474,7 @@ function validateTask(args) {
   if (!isBibTask && summary.uniqueCount && wosids.length !== summary.uniqueCount) {
     issues.push(`WOSID CSV rows mismatch: csv=${wosids.length} summary.uniqueCount=${summary.uniqueCount}`);
   }
-  if (!isBibTask && summary.method !== "imported-wosid-csv" && !rawFiles.length) issues.push("missing raw/full-record batches");
+  if (!isBibTask && summary.method !== "imported-wosid-csv" && !rawFiles.length) issues.push("missing raw/<uuid>/full-record batches");
   const completed = Object.values(checkpoint.records || {}).filter((item) => item.status === "completed");
   for (const item of completed) {
     if (!item.rawJsonPath || !fs.existsSync(resolvedArtifactPath(paths, item.rawJsonPath))) {
@@ -2436,7 +2588,7 @@ async function run(args) {
     rowText: priorSummary.rowText || "",
   };
 
-  if (args.reuseRaw && fs.existsSync(paths.rawDir) && fs.readdirSync(paths.rawDir).some((name) => name.endsWith(".txt"))) {
+  if (args.reuseRaw && args.uuid && rawBatchFiles(paths, args.uuid).length) {
     if (!info.expectedCount) {
       throw new Error("Cannot reuse raw batches without a known WOS record count. Re-run without --reuse-raw to refresh from WOS.");
     }
@@ -2527,7 +2679,7 @@ async function runBib(args) {
     files: {
       bibFile: combinedBib,
       bibFiles: result.files,
-      bibDir: paths.bibDir,
+      bibDir: bibBatchDir(paths, uuid),
       progressLog: paths.progressLog,
     },
     finishedAt: new Date().toISOString(),
@@ -2763,6 +2915,10 @@ async function runParsedCommand(args) {
   try {
     return await executeCommand(args);
   } catch (error) {
+    if (isUserQuitError(error)) {
+      console.error(error.message || "Quit by user");
+      return 130;
+    }
     if (isUserCancelledError(error)) {
       console.error(error.message || "Cancelled by user");
       return 0;
@@ -2794,6 +2950,13 @@ async function runInteractiveMenu(argv = process.argv) {
       const selectedArgs = await interactiveArgs(VERSION, workspaceStatus(menuArgs, sidCheck), {
         makeTaskId,
         readBrowserSid: () => readSidFromBrowser(menuArgs),
+        async saveSid(sid) {
+          menuArgs.sid = sid;
+          menuArgs.sidSource = menuArgs.sidSource || "prompt";
+          saveSidConfig(menuArgs, sid);
+          const refreshedSidCheck = await quickValidateSid(menuArgs);
+          return workspaceStatus(menuArgs, refreshedSidCheck);
+        },
         setCurrentTask(taskId) {
           setCurrentTaskId(menuArgs, taskId);
           return workspaceStatus(menuArgs, sidCheck);
@@ -2806,10 +2969,12 @@ async function runInteractiveMenu(argv = process.argv) {
         const args = parseArgs([argv[0], argv[1], ...selectedArgs]);
         args.keepWosSession = true;
         const exitCode = await runParsedCommand(args);
+        if (exitCode === 130) return 0;
         if (exitCode) {
           console.error(`Command exited with code ${exitCode}. Returning to menu.`);
         }
       } catch (error) {
+        if (isUserQuitError(error)) return 0;
         if (isUserCancelledError(error)) {
           console.error(error.message || "Cancelled by user");
           continue;
@@ -2878,6 +3043,7 @@ module.exports = {
   resolveWosJsPath,
   requireWosJsPath,
   applyValidatedWosOrigin,
+  isWosRootRecordRedirect,
   runAuthors,
   validateTask,
   clearTask,
@@ -2890,6 +3056,7 @@ module.exports = {
   boundedRecordCount,
   confirmDownloadPlan,
   isUserCancelledError,
+  isUserQuitError,
   isUserAbortError,
   runPool,
   prepareWosRequestContext,

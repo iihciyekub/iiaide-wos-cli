@@ -24,13 +24,13 @@ Every workflow is managed as a task under `tasks/<task-id>/`.
 
 ```text
 tasks/<task-id>/
-  raw/full-record/          # <uuid>_<start>_<end>.txt raw WOS export batches
-  raw/bib/                  # <uuid>_<start>_<end>.bib BibTeX export batches
+  raw/<uuid>/full-record/   # <uuid>_<start>_<end>.txt raw WOS export batches
+  raw/<uuid>/bib/           # <uuid>_<start>_<end>.bib BibTeX export batches
+  raw/<uuid>/authors/       # <WOSID>.json raw author page extraction
   data/
     <uuid>.bib              # combined BibTeX file
     <uuid>_wosid.csv        # normalized one-column WOS ID list
   authors/
-    raw-json/               # raw page extraction, one file per WOS ID
     authors.csv             # expanded author/address/affiliation rows
     authors.jsonl
     checkpoint.json         # resume state
@@ -198,8 +198,13 @@ or `WOSJS_PATH` when that helper lives elsewhere.
 
 When the interactive CLI starts, it also runs a lightweight SID probe with a
 short HTTP timeout. The dashboard reports `SID valid`, `SID invalid`, or
-`SID not confirmed`. Export commands still run the stricter persistent
-Playwright validation before downloading.
+`SID not confirmed`, and shows the WOS origin URL under the left-side
+`iiaide-wos CLI` title. The left dashboard logo is highlighted in color-capable
+terminals. Export commands still run the stricter persistent Playwright
+validation before downloading. In menu mode, after a SID is entered manually or
+detected from a browser login, the CLI saves it and redraws the workspace
+dashboard so the refreshed authentication state is visible before the next
+workflow prompt.
 
 For scripts and CI, prompts are disabled. Supply authentication explicitly:
 
@@ -273,16 +278,25 @@ iiaide-wos import \
 ### 3. Extract Author Information
 
 ```bash
-iiaide-wos authors --task "demo-search" --concurrency 3
+iiaide-wos authors --task "demo-search"
 ```
 
 The author stage is checkpointed. Running the same command again skips
 completed WOS IDs and continues incomplete work.
 `--concurrency` controls how many full-record pages are processed at the same
-time. Progress updates when each record finishes, so completion messages still
-arrive one by one. The default `--from-index 1` is only the scan start; completed
+time. It defaults to `1` because a single WOS SID/profile is usually steadier
+with one author tab; raise it only when you want to test parallel tabs. Each
+WOSID author page has a separate default `--author-timeout-ms 20000` deadline,
+so a slow record is marked failed and the batch continues. After 20 author
+failures in one run, the CLI pauses for 60 seconds before continuing. Progress
+updates when each record finishes, so completion messages still arrive one by
+one. The default `--from-index 1` is only the scan start; completed
 checkpoint entries are skipped during resume.
-In the interactive `Export author information` workflow, iiaide-wos shows these
+If WOS redirects a full-record page back to `https://www.webofscience.com/wos/`,
+the CLI marks that WOSID as failed with no WOS data and skips deeper author-page
+waiting. Author extraction does not wait for WOS `networkidle`; it stops as soon
+as it sees author content or a WOS root redirect.
+In the interactive `2.1 Author & address` workflow, iiaide-wos shows these
 defaults before starting; press Enter to keep them, or choose to edit the
 values for that run.
 
@@ -295,6 +309,8 @@ Useful options:
 --failed-only       Process only failed records
 --force             Refetch completed records
 --cooldown-ms 500   Delay between records
+--failure-cooldown-threshold 20
+--failure-cooldown-ms 60000
 ```
 
 ### 4. Validate And Deliver The Task
@@ -325,20 +341,35 @@ Use `clear` only when intentionally removing a CLI-managed task directory and
 its workspace index entry.
 The interactive CLI always has a current task. On menu startup, iiaide-wos
 creates one if the workspace has no current task, shows it in the Current
-workspace panel as `Task ID`, and marks it with `*` in the task list.
+workspace panel as `Task ID`, and highlights it with a `*` marker in the task
+list.
 Before prompting for a task, the menu prints a short `Task selection:` hint so
 the available inputs are visible before the cursor waits for input.
 Interactive downloads reuse the current task by default. If the same UUID is
 already completed, iiaide-wos skips SID validation and WOS download, then prints
 the existing final artifact path.
 At the `WOS summary URL or UUID` prompt, pressing Enter uses the shown saved
-source when one exists; without a saved source, Enter cancels the current
-workflow and returns to the menu.
+source when one exists. Without a saved source, enter a source, press `c` to
+return to the menu, or press `q` to exit the CLI.
 Authentication status stays in the dashboard instead of being repeated inside
 each workflow prompt.
+The interactive workflow menu is grouped by command family:
+
+```text
+1 Download literature
+  1.1 UUID - TXT format
+  1.2 UUID - BIB format
+2 Export
+  2.1 Author & address
+3 Task manager
+  3.1 New
+  3.2 Switch
+  3.3 Clear
+```
+
 Download workflows run directly in the current task marked with `*`. Use
-`Switch task` before downloading when you want to select an existing task or
-create a fresh task. Clear uses only existing task choices.
+`3.1 New` before downloading when you want a fresh task, `3.2 Switch` to select
+an existing task, and `3.3 Clear` to remove an existing managed task.
 
 ## Documentation
 

@@ -184,7 +184,7 @@ curl "${WOS_BASE_URL}/api/wosnx/indic/export/saveToFile" \
 
 Batch behavior:
 
-- CLI writes raw batches to `raw/full-record/<uuid>_<start>_<end>.txt`.
+- CLI writes raw batches to `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
 - CLI parses `UT` fields from the response text.
 - CLI writes a single WOSID CSV to `data/<uuid>_wosid.csv`.
 
@@ -264,7 +264,7 @@ Batch behavior:
   final range.
 - CLI counts BibTeX entries in each response.
 - Raw batches are named by the actual returned range:
-  `raw/bib/<uuid>_<start>_<actual-end>.bib`.
+  `raw/<uuid>/bib/<uuid>_<start>_<actual-end>.bib`.
 - CLI combines all batch files into `data/<uuid>.bib`.
 
 Explicit range example:
@@ -332,6 +332,12 @@ Important distinction:
 - Author extraction is currently browser/page based.
 - The CLI opens full-record pages with Playwright and reads rendered author,
   address, affiliation, email, ResearcherID, ORCID, and ROR data from the page.
+- CLI writes one raw author extraction JSON per WOS ID to
+  `raw/<uuid>/authors/<WOSID>.json`.
+- If the full-record URL redirects back to `https://www.webofscience.com/wos/`,
+  the CLI treats that WOS ID as no-data and stops waiting for author selectors.
+- Author extraction waits for navigation commit and then races author selectors
+  against WOS root redirects; it does not wait for page `networkidle`.
 - This is not currently a request-only JSON API path in the CLI.
 
 ## 6. Local-Only Methods
