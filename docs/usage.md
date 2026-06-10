@@ -9,7 +9,7 @@ For request-level equivalents of the WOS methods used by the CLI, see
 A task represents one complete WOS data-processing job:
 
 ```text
-input -> UUID WOSID index -> task-level WOS data JSON cache -> validated task package
+input -> UUID WOSID index -> global SQLite WOS data -> validated task package
 ```
 
 Inputs currently supported:
@@ -35,6 +35,17 @@ tasks/<task-id>/raw/<uuid-or-task-id>/full-record/<uuid-or-task-id>_wosid.csv
 This allows later commands to work independently of how the WOS IDs were
 obtained.
 When a repeated `run` finds complete raw full-record batches but the WOSID index is missing, it rebuilds `raw/<uuid>/full-record/<uuid>_wosid.csv` locally before attempting another WOS download.
+
+The default global SQLite database lives at:
+
+```text
+~/.iiaide-wos/wosdata.sqlite
+```
+
+It is an aggregation database built from parsed WOS full-record page data. It
+does not store raw full-record `.txt` batches, BibTeX `.bib` files, WOS
+usernames, passwords, or SID values. All task workspaces use this same database
+unless `--db <file>` is supplied.
 
 ## URL And UUID Workflow
 
@@ -113,15 +124,13 @@ tasks/<task-id>/export/<uuid>/bib/<uuid>.bib
 
 ## WOS Data Parse Workflow
 
-The `parse` command reads the task's WOSID CSV and opens each WOS full-record page through the injected browser-side `wos.js` parser. Its deliverable is raw structured JSON, not a CSV export.
+The `parse` command reads the task's WOSID CSV and opens missing WOS full-record
+pages through the injected browser-side `wos.js` parser. Its deliverable is the
+global SQLite database, not local JSON files or a CSV export.
 
-For every successfully processed WOS ID it writes one shared task-level file:
-
-```text
-raw/wosdata/<WOSID>.json
-```
-
-The raw JSON mirrors the `wos.record.parseCurrentFullRecordPage()` object and is augmented with `wosid`, `url`, and `fetchedAt`. Because the files are keyed only by WOSID, separate UUID result sets in the same task reuse the same parsed record instead of downloading it repeatedly.
+For every successfully processed WOS ID it validates the parsed object, augments
+it with `wosid`, `url`, and `fetchedAt`, and writes it directly to
+`~/.iiaide-wos/wosdata.sqlite`.
 
 The UUID's WOSID CSV remains the index for that result set:
 
@@ -149,16 +158,49 @@ iiaide-wos parse --csv "./input/wosids.csv" --task "<task-id>"
 
 This normalizes the CSV into
 `raw/<task-id>/full-record/<task-id>_wosid.csv` before parsing that index. The
-parsed JSON still goes to the shared `raw/wosdata/<WOSID>.json` cache.
+parsed data goes directly to SQLite.
 
-Resume behavior is file-based:
+Resume behavior is database-based:
 
-- Existing `raw/wosdata/<WOSID>.json` files are skipped.
-- `--force` refetches existing WOSID JSON files.
+- Existing SQLite WOSID records are skipped by default.
+- `--force` refetches existing WOSID records and overwrites the SQLite row after validation.
 - `--from-index` and `--limit` select a slice of the WOSID index.
 - Failures are recorded at `raw/<uuid>/full-record/<uuid>_parse_failures.json`.
 
-In the interactive menu, use `2.1 WOS data`. The default parse options are:
+Before the parse stage, WOSIDs already present in the global SQLite database are
+treated as completed and are skipped. After the parse stage, newly completed
+records are inserted directly into `~/.iiaide-wos/wosdata.sqlite`.
+
+## WOS Data SQLite Workflow
+
+The `wosdata` command manages the local SQLite aggregation database only. It
+does not open a browser, validate SID, or contact WOS.
+
+Merge records from another WOS SQLite database:
+
+```bash
+iiaide-wos wosdata --merge-db "./shared/other-wosdata.sqlite"
+```
+
+Query one WOSID in the active database:
+
+```bash
+iiaide-wos wosdata --wosid "WOS:000000000000001"
+```
+
+The default database is `~/.iiaide-wos/wosdata.sqlite`; override it with
+`--db <file>`. Database merge validates each record's stored JSON before
+writing. By default, existing WOSID rows are skipped; `--force` overwrites them.
+Advanced queries are available with `wosdata --query "<SELECT ...>"` and are
+restricted to read-only `SELECT` statements. The database stores one
+primary row per WOSID in `wos_records`
+with common query columns such as title, year, DOI, source title, document type,
+URL, fetched time, and the complete raw JSON. `wos_record_sources` records which
+task, parse run, or merged database contributed each WOSID.
+
+In the interactive menu, use `2 WOS IDs to SQL`. Paste either a WOS summary
+URL/result-set UUID or a local `.csv` file path; the CLI chooses the matching
+parse pipeline automatically. The default parse options are:
 
 ```text
 concurrency=1 | timeout=20000ms | cooldown=250ms | from=1 | limit=all
@@ -189,6 +231,9 @@ highlights it with `*`. Before any task prompt, the menu prints a
 `Task selection:` hint that shows whether Enter keeps the current task, numeric
 input switches tasks, or `new` creates a fresh task.
 
+The same startup panel shows the active global WOS data database path, WOSID
+record count, and database size.
+
 Task commands:
 
 ```bash
@@ -214,13 +259,15 @@ actions:
 1 Download literature
   1.1 UUID - TXT format
   1.2 UUID - BIB format
-2 Parse
-  2.1 WOS data
-  2.2 WOSID CSV
+2 WOS IDs to SQL
 3 Task manager
   3.1 New
   3.2 Switch
   3.3 Clear
+4 SQL database
+  4.1 Status
+  4.2 Merge database
+  4.3 Query WOSID
 c Check SID
 u Update
 B Back
@@ -230,8 +277,13 @@ q Exit
 Download workflows run directly in the current task marked with `*`. Use
 `c Check SID` to validate the saved SID from the startup panel and go
 directly into browser login when WOS rejects it.
-Use `2.2 WOSID CSV` to parse WOS data from a local WOSID CSV without entering a
-WOS URL or UUID.
+Use `2 WOS IDs to SQL` to parse from either a local WOSID CSV or a WOS summary
+URL/UUID; `.csv` input runs the CSV path and URL/UUID input runs the WOS export
+path first.
+Use `4.1 Status` to inspect the global SQLite database, `4.2 Merge database`
+to merge another WOS SQLite database, and `4.3 Query WOSID` to enter one WOSID
+and print its SQLite record. Merge asks whether existing SQL rows should be
+force overwritten; the default is no.
 Use `u Update` to install the latest release and restart the interactive CLI.
 Use
 `3.1 New` before downloading when you want a fresh task, `3.2 Switch` to select
@@ -241,8 +293,10 @@ Interactive downloads reuse the current task by default. If the task already
 has a completed TXT or BibTeX export for the same UUID, the CLI prints the
 existing artifact path and skips SID validation and WOS download. If the input
 is a different UUID, the CLI appends that source to the same task and writes it
-under separate `raw/<uuid>/` directories, while parsed page JSON is shared under `raw/wosdata/`. Use `--force`
-only when you intentionally want to replace a managed task's existing outputs.
+under separate `raw/<uuid>/` directories, while parsed page data is shared in
+the global SQLite database. Use `--force` only when you intentionally want to
+replace a managed task's existing outputs or overwrite existing WOSID database
+rows.
 For download workflows, pressing Enter at the `WOS summary URL or UUID` prompt
 uses the shown saved source when one exists. If no saved source is available,
 enter a source, press `B` to return to the menu, or press `q` to exit the CLI.
@@ -261,7 +315,7 @@ For URL/UUID tasks it checks:
 - normalized WOS ID index
 - expected and actual WOS ID counts
 - raw WOS export batches
-- task-level parsed WOS data JSON coverage
+- parsed WOS data coverage in SQLite
 
 For imported CSV tasks, raw WOS export batches are not required.
 
@@ -340,7 +394,8 @@ In interactive menu mode, manual SID entry and browser login SID detection save
 the refreshed SID, return to the outer menu loop, rerun the lightweight probe,
 and redraw the dashboard before asking for the next workflow input.
 
-The CLI does not log in to WOS or manage user account credentials.
+The CLI does not log in to WOS or manage user account credentials. SQLite
+imports also keep credentials out of the database.
 
 ## Extension Direction
 
@@ -382,12 +437,6 @@ Remove the globally installed package:
 
 ```bash
 npm uninstall --global iiaide-wos-cli
-```
-
-If an older command package was installed before the rename, remove it too:
-
-```bash
-npm uninstall --global wos-aide-cli
 ```
 
 For a local development link, remove the global link:

@@ -7,6 +7,16 @@ const { confirmAction, interactiveArgs, isBackResult, isQuitResult, isUserAbortE
 const { createProgress, createSpinner, isInteractive } = require("./lib/terminal");
 const { updateCli } = require("./lib/update");
 const { exportBibBatchesViaWosJs, exportTxtBatchesViaWosJs } = require("./lib/wos-browser-export");
+const {
+  defaultWosDataDbPath,
+  existingWosDataIds,
+  importWosDataRecord,
+  linkExistingWosDataSources,
+  mergeWosDataDatabase,
+  queryWosDataByWosId,
+  queryWosDataDatabase,
+  wosDataDbStats,
+} = require("./lib/wos-sqlite");
 const { version: VERSION } = require("../package.json");
 
 const DEFAULT_BATCH_SIZE = 200;
@@ -69,6 +79,7 @@ Usage:
   iiaide-wos clear (--task <task-id> | --latest) [--tasks-root <dir>]
   iiaide-wos sid [--sid <SID> | --from-browser] [--tasks-root <dir>] [--wos-domain <domain>] [--base-url <url>] [--headed]
   iiaide-wos parse [--sid <SID>] (--task <task-id> | --latest | --csv <wosids.csv>) [options]
+  iiaide-wos wosdata (--merge-db <file> | --wosid <WOSID> | --query <sql>) [--db <file>] [--tasks-root <dir>]
 
 Inputs:
   --sid <SID>             Web of Science SID. Interactive commands prompt when missing or expired
@@ -76,13 +87,17 @@ Inputs:
   --url <summary-url>     WOS summary URL
   --uuid <uuid>           WOS result-set UUID; used when --url is not provided
   --csv <file>            Existing CSV containing a wosid/UT column or WOS IDs in its first column
+  --merge-db <file>       Merge records from another WOS SQLite database into --db
+  --wosid <WOSID>         Query one WOS record from the SQLite database
+  --query <sql>           Run a read-only SELECT query against the WOS SQLite database
 
 Output management:
   --task <task-id>        Stable task id. If omitted, creates a timestamp-based task id
   --task-label <label>    Human label stored in task metadata
   --tasks-root <dir>      Parent directory for tasks. Default: ./tasks
+  --db <file>             SQLite WOS data database. Default: ~/.iiaide-wos/wosdata.sqlite
   --out-dir <dir>         Exact task directory override
-  --force                 Allow writing into a non-empty --out-dir
+  --force                 Allow managed task replacement and overwrite existing SQLite WOS records
   --reuse-raw             Rebuild CSV from existing raw batches when present
 
 Export options:
@@ -110,7 +125,7 @@ Task directory layout:
   raw/<uuid>/full-record/ WOS fullRecord text batches as <uuid>_<start>_<end>.txt
   raw/<uuid>/full-record/<uuid>_wosid.csv
   raw/<uuid>/bib/         BibTeX batches as <uuid>_<start>_<end>.bib
-  raw/wosdata/            One parsed WOS full-record page JSON per WOSID
+  ~/.iiaide-wos/wosdata.sqlite
   export/<uuid>/bib/<uuid>.bib
   logs/progress.jsonl
   manifest.json
@@ -130,10 +145,14 @@ function parseArgs(argv) {
     urlHadProtocol: false,
     uuid: "",
     csvPath: "",
+    mergeDbPath: "",
+    queryWosId: "",
+    sqlQuery: "",
     taskId: "",
     taskLabel: "",
     outDir: "",
     tasksRoot: path.resolve(process.cwd(), "tasks"),
+    dbPath: "",
     sortBy: "relevance",
     batchSize: DEFAULT_BATCH_SIZE,
     timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -177,11 +196,15 @@ function parseArgs(argv) {
     }
     else if (arg === "--uuid") args.uuid = readValue(arg, i++);
     else if (arg === "--csv") args.csvPath = readValue(arg, i++);
+    else if (arg === "--merge-db") args.mergeDbPath = readValue(arg, i++);
+    else if (arg === "--wosid" || arg === "--wos-id") args.queryWosId = readValue(arg, i++);
+    else if (arg === "--query" || arg === "--sql") args.sqlQuery = readValue(arg, i++);
     else if (arg === "--task") args.taskId = normalizeTaskId(readValue(arg, i++));
     else if (arg === "--latest") args.latest = true;
     else if (arg === "--task-label" || arg === "--label") args.taskLabel = readValue(arg, i++);
     else if (arg === "--out-dir" || arg === "--download-dir") args.outDir = readValue(arg, i++);
     else if (arg === "--tasks-root" || arg === "--output-root") args.tasksRoot = readValue(arg, i++);
+    else if (arg === "--db") args.dbPath = readValue(arg, i++);
     else if (arg === "--sort-by") args.sortBy = readValue(arg, i++);
     else if (arg === "--batch-size") args.batchSize = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--timeout-ms" || arg === "--timeout") args.timeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
@@ -225,6 +248,8 @@ function parseArgs(argv) {
   assertIntegerRange("--cooldown-ms", args.cooldownMs, 0);
   args.tasksRoot = path.resolve(args.tasksRoot);
   if (args.csvPath) args.csvPath = path.resolve(args.csvPath);
+  if (args.mergeDbPath) args.mergeDbPath = path.resolve(args.mergeDbPath);
+  args.dbPath = args.dbPath ? path.resolve(args.dbPath) : defaultWosDataDbPath();
   if (!args.taskId && args.uuid) args.taskId = makeTaskId();
   if (!args.taskId && (command === "import" || command === "parse") && args.csvPath) args.taskId = makeTaskId();
   if (args.outDir) {
@@ -756,6 +781,7 @@ function workspaceStatus(args, sidCheck = null) {
     sidMasked: maskSid(sid),
     sidSource,
     sidCheck,
+    wosDataDb: wosDataDbStats(args.dbPath),
     tasks: tasks.map((task) => ({
       taskId: task.taskId,
       status: task.status || "",
@@ -874,15 +900,11 @@ function getRunPaths(outDir) {
     exportRoot,
     rawDir: rawRoot,
     bibDir: rawRoot,
-    legacyFullRecordDir: path.join(outDir, "raw", "full-record"),
-    legacyBibDir: path.join(outDir, "raw", "bib"),
-    legacyDataDir: path.join(outDir, "data"),
     dataDir: exportRoot,
     logsDir: path.join(outDir, "logs"),
     manifest: path.join(outDir, "manifest.json"),
     summary: path.join(outDir, "summary.json"),
     progressLog: path.join(outDir, "logs", "progress.jsonl"),
-    wosDataDir: path.join(rawRoot, "wosdata"),
   };
 }
 
@@ -902,7 +924,6 @@ function withRawSource(paths, sourceId) {
     rawDir: fullRecordDir,
     bibDir: path.join(rawSourceDir, "bib"),
     dataDir: fullRecordDir,
-    wosDataDir: paths.wosDataDir || path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), "wosdata"),
     parseFailures: path.join(fullRecordDir, `${source}_parse_failures.json`),
   };
 }
@@ -976,7 +997,6 @@ function cleanRunLayout(paths) {
   for (const directory of [
     paths.rawRoot || path.join(paths.taskDir, "raw"),
     paths.exportRoot || path.join(paths.taskDir, "export"),
-    paths.legacyDataDir,
     paths.logsDir,
   ].filter(Boolean)) {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -1079,10 +1099,6 @@ async function confirmDownloadPlan(label, availableCount, selectedCount, batchSi
   return { batches };
 }
 
-function safeWosIdFileName(wosid) {
-  return safeFilePart(String(wosid || "").replace(/^WOS:/i, "WOS_")) + ".json";
-}
-
 function normalizeWosId(value) {
   const match = String(value || "").match(/WOS:[A-Z0-9]+/i);
   return match ? match[0].toUpperCase() : "";
@@ -1141,44 +1157,35 @@ function parseCsv(text) {
   return rows;
 }
 
-function wosDataJsonPath(paths, wosid) {
-  return path.join(paths.wosDataDir, safeWosIdFileName(wosid));
+function existingWosDataState(paths, wosids, args = {}) {
+  const globalIds = existingWosDataIds(args.dbPath, wosids);
+  return { globalIds };
 }
 
-function findExistingRawRecordJson(paths, wosid) {
-  const expectedWosId = normalizeWosId(wosid);
-  if (!expectedWosId) return null;
-  const rawPath = wosDataJsonPath(paths, expectedWosId);
-  if (!fs.existsSync(rawPath)) return null;
-  const raw = readJson(rawPath, null);
-  if (!raw) return null;
-  const rawWosId = normalizeWosId(raw.wosid) || normalizeWosId(raw.identifiers?.accessionNumber) || normalizeWosId(raw.url) || expectedWosId;
-  if (rawWosId !== expectedWosId) return null;
-  return { rawPath, raw };
-}
-
-function storedArtifactPath(paths, filePath) {
-  const relative = path.relative(paths.taskDir, filePath);
-  return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : filePath;
+function hasExistingWosData(state, wosid) {
+  const normalized = normalizeWosId(wosid);
+  return Boolean(normalized && state.globalIds.has(normalized));
 }
 
 function selectParseWork(paths, wosids, args) {
   let indexed = wosids.map((wosid, index) => ({ wosid, index: index + 1 }));
   indexed = indexed.filter((item) => item.index >= args.fromIndex);
   if (!args.force) {
-    indexed = indexed.filter((item) => !findExistingRawRecordJson(paths, item.wosid));
+    const state = existingWosDataState(paths, wosids, args);
+    indexed = indexed.filter((item) => !hasExistingWosData(state, item.wosid));
   }
   if (args.limit) indexed = indexed.slice(0, args.limit);
   return indexed;
 }
 
-function parseStats(paths, wosids) {
-  const completed = wosids.filter((wosid) => Boolean(findExistingRawRecordJson(paths, wosid))).length;
+function parseStats(paths, wosids, args = {}) {
+  const state = existingWosDataState(paths, wosids, args);
+  const completed = wosids.filter((wosid) => hasExistingWosData(state, wosid)).length;
   return { completed, missing: Math.max(0, wosids.length - completed) };
 }
 
 function parseWorkSummary(paths, wosids, work, args) {
-  const stats = parseStats(paths, wosids);
+  const stats = parseStats(paths, wosids, args);
   const firstIndex = work[0]?.index || 0;
   const lastIndex = work[work.length - 1]?.index || 0;
   return {
@@ -1198,6 +1205,48 @@ function printParseWorkSummary(summary, write = console.error) {
   write(
     `WOS data records: total=${summary.total}, skipped=${summary.skipped}, missing=${summary.missing}, selected=${summary.selected}, range=${range}, concurrency=${summary.concurrency}`
   );
+}
+
+function importParsedWosData(args, taskId, wosids = []) {
+  const linked = linkExistingWosDataSources({
+    dbPath: args.dbPath,
+    wosids,
+    taskId,
+  });
+  return {
+    ok: true,
+    dbPath: args.dbPath,
+    taskId,
+    total: 0,
+    imported: 0,
+    skipped: 0,
+    linked: linked.linked || 0,
+    sourceLinked: linked.linked || 0,
+  };
+}
+
+function runWosDataImport(args) {
+  if (args.queryWosId) {
+    return queryWosDataByWosId({
+      dbPath: args.dbPath,
+      wosid: args.queryWosId,
+    });
+  }
+  if (args.sqlQuery) {
+    return queryWosDataDatabase({
+      dbPath: args.dbPath,
+      sql: args.sqlQuery,
+      limit: args.limit || 50,
+    });
+  }
+  if (args.mergeDbPath) {
+    return mergeWosDataDatabase({
+      dbPath: args.dbPath,
+      sourceDbPath: args.mergeDbPath,
+      force: args.force,
+    });
+  }
+  throw new Error("Missing wosdata operation: use --merge-db, --wosid, or --query");
 }
 
 function sleep(ms) {
@@ -1223,9 +1272,7 @@ function batchFileName(uuid, markFrom, markTo, extension = "txt") {
 function rawBatchDir(paths, uuid) {
   if (!uuid) throw new Error("Missing raw batch UUID");
   const safeUuid = safeFilePart(uuid);
-  const nextDir = path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), safeUuid, "full-record");
-  const legacyDir = path.join(paths.legacyFullRecordDir || path.join(paths.taskDir, "raw", "full-record"), safeUuid);
-  return fs.existsSync(nextDir) || !fs.existsSync(legacyDir) ? nextDir : legacyDir;
+  return path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), safeUuid, "full-record");
 }
 
 function rawBatchPath(paths, uuid, markFrom, markTo) {
@@ -1235,9 +1282,7 @@ function rawBatchPath(paths, uuid, markFrom, markTo) {
 function bibBatchDir(paths, uuid) {
   if (!uuid) throw new Error("Missing BibTeX batch UUID");
   const safeUuid = safeFilePart(uuid);
-  const nextDir = path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), safeUuid, "bib");
-  const legacyDir = path.join(paths.legacyBibDir || path.join(paths.taskDir, "raw", "bib"), safeUuid);
-  return fs.existsSync(nextDir) || !fs.existsSync(legacyDir) ? nextDir : legacyDir;
+  return path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), safeUuid, "bib");
 }
 
 function bibBatchPath(paths, uuid, markFrom, markTo) {
@@ -1831,11 +1876,12 @@ async function runParse(args) {
   if (!wosids.length) throw new Error(`No WOS IDs found in ${wosidsPath}`);
 
   const work = selectParseWork(paths, wosids, args);
-  const beforeStats = parseStats(paths, wosids);
+  const beforeStats = parseStats(paths, wosids, args);
   printParseWorkSummary(parseWorkSummary(paths, wosids, work, args));
   if (!work.length) {
     const failures = [];
     writeJson(paths.parseFailures, failures);
+    const sqlite = beforeStats.completed ? importParsedWosData(args, task.taskId, wosids) : null;
     upsertTaskIndex(args, {
       status: beforeStats.completed === wosids.length ? "parse-completed" : "parse-incomplete",
       lastError: "",
@@ -1852,7 +1898,8 @@ async function runParse(args) {
       parsed: 0,
       completed: beforeStats.completed,
       failed: 0,
-      wosDataDir: paths.wosDataDir,
+      dbPath: args.dbPath,
+      sqlite,
       failures: paths.parseFailures,
     };
   }
@@ -1879,19 +1926,24 @@ async function runParse(args) {
   try {
     session = await prepareWosSession(args);
     authSpinner.succeed("WOS authentication validated");
-    fs.mkdirSync(paths.wosDataDir, { recursive: true });
     parseProgress = createProgress("Parsing WOS data", work.length);
     await runPool(work, args.concurrency, async (item) => {
       const { wosid, index } = item;
       appendProgress(paths, { phase: "parse-record-start", wosid, index, total: wosids.length });
       try {
         const raw = await extractOneRecordInfo(session.context, args, wosid);
-        const rawPath = wosDataJsonPath(paths, wosid);
-        writeJson(rawPath, raw);
+        const sqliteResult = importWosDataRecord({
+          dbPath: args.dbPath,
+          record: raw,
+          taskId: task.taskId,
+          source: raw.url || `wos:${wosid}`,
+          expectedWosId: wosid,
+          force: args.force,
+        });
         parsed += 1;
-        appendProgress(paths, { phase: "parse-record", status: "completed", wosid, index, rawPath: storedArtifactPath(paths, rawPath) });
+        appendProgress(paths, { phase: "parse-record", status: "completed", wosid, index, dbPath: args.dbPath, imported: sqliteResult.imported, skipped: sqliteResult.skipped });
         if (!isInteractive()) {
-          console.error(`parse OK ${index}/${wosids.length} ${wosid} -> ${rawPath}`);
+          console.error(`parse OK ${index}/${wosids.length} ${wosid} -> ${args.dbPath}`);
         }
       } catch (error) {
         const failure = {
@@ -1918,8 +1970,9 @@ async function runParse(args) {
   }
 
   writeJson(paths.parseFailures, failures);
-  const finalStats = parseStats(paths, wosids);
-  const status = finalStats.completed === wosids.length ? "parse-completed" : "parse-incomplete";
+  const finalStats = parseStats(paths, wosids, args);
+  const status = !failures.length && finalStats.completed === wosids.length ? "parse-completed" : "parse-incomplete";
+  const sqlite = finalStats.completed ? importParsedWosData(args, task.taskId, wosids) : null;
   upsertTaskIndex(args, {
     status,
     lastError: "",
@@ -1936,7 +1989,8 @@ async function runParse(args) {
     parsed,
     completed: finalStats.completed,
     failed: failures.length,
-    wosDataDir: paths.wosDataDir,
+    dbPath: args.dbPath,
+    sqlite,
     failures: paths.parseFailures,
   };
 }
@@ -1958,7 +2012,7 @@ function validateTask(args) {
   const bibFiles = bibUuid && fs.existsSync(bibBatchDir(paths, bibUuid))
     ? fs.readdirSync(bibBatchDir(paths, bibUuid)).filter((name) => name.endsWith(".bib"))
     : [];
-  const wosData = parseStats(paths, wosids);
+  const wosData = parseStats(paths, wosids, args);
   const issues = [];
   if (!fs.existsSync(paths.manifest)) issues.push("missing manifest.json");
   if (!fs.existsSync(paths.summary)) issues.push("missing summary.json");
@@ -2469,8 +2523,21 @@ async function executeCommand(args) {
     }
     loadSavedSid(args);
     const result = await runParse(args);
-    console.log(result.wosDataDir || "");
+    console.log(result.sqlite?.dbPath || result.dbPath || "");
     return result.failed ? 1 : 0;
+  }
+  if (args.command === "wosdata") {
+    if (!args.queryWosId && !args.sqlQuery && !args.mergeDbPath) {
+      console.error(usage());
+      return 2;
+    }
+    const result = runWosDataImport(args);
+    if (args.queryWosId || args.sqlQuery) {
+      console.log(JSON.stringify(result, null, 2));
+      return result.ok ? 0 : 1;
+    }
+    console.log(result.dbPath);
+    return result.ok ? 0 : 1;
   }
   if (args.command === "bib") {
     if (!args.url || !args.uuid || !args.outDir) {
@@ -2489,7 +2556,7 @@ async function executeCommand(args) {
       return 2;
     }
     const result = await runParsePipeline(args);
-    console.log(result.parse?.wosDataDir || result.run.files.wosidsCsv);
+    console.log(result.parse?.sqlite?.dbPath || result.parse?.dbPath || result.run.files.wosidsCsv);
     return result.ok ? 0 : 1;
   }
   if (args.command === "latest") {
@@ -2662,6 +2729,7 @@ module.exports = {
   runBib,
   runParse,
   runParsePipeline,
+  runWosDataImport,
   importWosIds,
   initializeWorkspace,
   workspaceStatus,
@@ -2712,7 +2780,10 @@ module.exports = {
   rawBatchFiles,
   bibBatchFiles,
   parseExistingRawBatches,
-  wosDataJsonPath,
+  importWosDataRecord,
+  mergeWosDataDatabase,
+  queryWosDataByWosId,
+  queryWosDataDatabase,
   readJson,
   writeJson,
 };

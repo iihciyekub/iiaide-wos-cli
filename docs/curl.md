@@ -338,15 +338,20 @@ Important distinction:
 - The CLI starts from a WOS page with injected `import/wos.js`, calls
   `wos.record.viewFullRecordByWosId()`, then calls
   `wos.record.parseCurrentFullRecordPage()` in the page context.
-- CLI writes one structured raw JSON file per WOS ID to
-  `raw/wosdata/<WOSID>.json`.
+- CLI validates the structured page data and writes one SQLite row per WOSID to
+  `~/.iiaide-wos/wosdata.sqlite`.
 - The UUID-specific WOSID index remains at
   `raw/<uuid>/full-record/<uuid>_wosid.csv` and is the input list for parse.
 - For `parse --csv`, the local CSV is normalized into
   `raw/<task-id>/full-record/<task-id>_wosid.csv` before the same parse stage
   runs.
-- If a parsed WOSID JSON already exists in `raw/wosdata/`, `parse` skips it
-  unless `--force` is set.
+- If a WOSID already exists in SQLite, `parse` skips it unless `--force` is set.
+- SQLite aggregation is local-only and global to the user by default at
+  `~/.iiaide-wos/wosdata.sqlite`. `iiaide-wos wosdata --merge-db` can merge
+  another WOS SQLite database, `wosdata --wosid` can look up one saved WOSID,
+  and `wosdata --query` can run read-only `SELECT` queries; parse itself writes
+  directly to SQLite. These local SQLite paths do not call WOS request APIs or
+  import raw `.txt`/`.bib` files.
 
 ## 6. Local-Only Methods
 
@@ -372,7 +377,7 @@ tasks/<task-id>/manifest.json
 tasks/<task-id>/summary.json
 tasks/<task-id>/raw/<uuid-or-task-id>/full-record/<uuid-or-task-id>_wosid.csv
 tasks/<task-id>/export/<uuid>/bib/<uuid>.bib
-tasks/<task-id>/raw/wosdata/<WOSID>.json
+~/.iiaide-wos/wosdata.sqlite
 ```
 
 ## 7. Debug Checklist

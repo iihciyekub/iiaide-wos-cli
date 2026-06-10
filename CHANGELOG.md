@@ -3,6 +3,88 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.13 - 2026-06-10
+
+- Remove the obsolete `wosdata --json-dir` and managed-task JSON import paths;
+  SQLite data now enters through parse, direct validated record writes, or
+  database merge.
+- Remove legacy raw artifact directory fallback code so raw full-record and
+  BibTeX batches use only the current `raw/<uuid>/...` layout.
+- Refresh docs and tests to match the SQLite-only WOS data workflow.
+
+## 0.4.12 - 2026-06-10
+
+- Fix interactive `2 WOS IDs to SQL` indentation so it renders as a top-level
+  workflow command instead of an indented submenu item.
+
+## 0.4.11 - 2026-06-10
+
+- Promote interactive `WOS IDs to SQL` from `2.1` to top-level `2`, removing
+  the extra Parse submenu level.
+
+## 0.4.10 - 2026-06-10
+
+- Merge the interactive Parse panel into one `2.1 WOS IDs to SQL` action.
+- Add automatic interactive input detection so `.csv` paths run the CSV parse
+  path and WOS URL/UUID input runs the export-plus-parse pipeline.
+
+## 0.4.9 - 2026-06-10
+
+- Change interactive `4.3 Query` to prompt for a single WOSID and return that
+  SQLite record, instead of requiring the user to type a SQL statement.
+- Add `wosdata --wosid <WOSID>` for simple command-line WOSID lookup.
+
+## 0.4.8 - 2026-06-10
+
+- Replace interactive SQLite JSON import actions with global database merge and
+  read-only query actions.
+- Add `wosdata --merge-db <file>` for merging another WOS SQLite database into
+  the active global database, skipping existing WOSIDs unless `--force` is used.
+- Add `wosdata --query <sql>` for simple read-only `SELECT` queries against the
+  WOS SQLite database.
+
+## 0.4.7 - 2026-06-10
+
+- Render the interactive workflow footer shortcuts (`c`, `u`, `B`, and `q`) as
+  one compact line instead of multi-line descriptions.
+
+## 0.4.6 - 2026-06-10
+
+- Add interactive `4 SQL database` management actions for global SQLite status,
+  importing existing task-local WOSID JSON, and importing a standalone WOSID JSON
+  directory.
+- Let interactive SQLite imports choose whether to force overwrite existing SQL
+  rows; the default remains non-destructive skip behavior.
+
+## 0.4.5 - 2026-06-10
+
+- Change `parse` and `parse-pipeline` to validate parsed WOS page data and write
+  directly to SQLite instead of writing task-local `raw/wosdata/<WOSID>.json`
+  files.
+- Keep SQLite inserts non-destructive by default: existing WOSID rows are
+  skipped, while `--force` refetches and overwrites the existing database row
+  after validation.
+- Make parse commands print the SQLite database path as their final artifact.
+
+## 0.4.4 - 2026-06-10
+
+- Move the default WOS data SQLite database from the tasks root to the user
+  global path `~/.iiaide-wos/wosdata.sqlite`, so all task workspaces share one
+  WOSID cache by default.
+- Show global SQLite database path, size, and WOSID count in the interactive
+  startup dashboard and `workspace` status output.
+- Make `parse` skip WOSIDs already present in the global SQLite database and
+  insert new WOSID JSON only when the database does not already contain it.
+
+## 0.4.3 - 2026-06-10
+
+- Add a workspace SQLite WOS data index at `<tasks-root>/wosdata.sqlite`,
+  populated from parsed `raw/wosdata/<WOSID>.json` records.
+- Add `iiaide-wos wosdata` for local JSON-to-SQLite imports from a managed task
+  or an explicit `--json-dir`, without requiring raw `.txt` or `.bib` files.
+- Upsert parsed WOSID JSON into SQLite after `parse` and `parse-pipeline`, while
+  keeping WOS usernames, passwords, and SID values out of the database.
+
 ## 0.4.2 - 2026-06-10
 
 - Change `iiaide-wos check` to print only a short safe status message instead

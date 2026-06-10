@@ -104,6 +104,16 @@ function formatRuntime(value = 0) {
   return `${seconds}s`;
 }
 
+function formatBytes(value = 0) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  const kib = bytes / 1024;
+  if (kib < 1024) return `${kib.toFixed(1)} KiB`;
+  const mib = kib / 1024;
+  if (mib < 1024) return `${mib.toFixed(1)} MiB`;
+  return `${(mib / 1024).toFixed(1)} GiB`;
+}
+
 function panel(title, lines, width, minLines = lines.length) {
   const body = [...lines];
   while (body.length < minLines) body.push("");
@@ -125,9 +135,14 @@ function printHeader(version, workspace = {}) {
   const sidMasked = sidCheck.sidMasked || workspace.sidMasked || "";
   const sidOrigin = sidCheck.origin || workspace.wosOrigin || "";
   const originUrl = sidOrigin || workspace.baseUrl || "https://www.webofscience.com";
+  const wosDataDb = workspace.wosDataDb || {};
   const rightLines = [
     kvLine("Workspace", workspacePath),
     kvLine("Task ID", currentTask ? highlightTaskId(currentTask) : "none"),
+    "",
+    kvLine("WOS DB", wosDataDb.dbPath || "none"),
+    kvLine("WOS IDs", String(wosDataDb.recordCount || 0)),
+    kvLine("DB Size", formatBytes(wosDataDb.sizeBytes || 0)),
     "",
     kvLine("Auth", sidOkLabel(sidStatus)),
     kvLine("SID Value", sidMasked || "none"),
@@ -316,6 +331,14 @@ function isWosSourceLike(value) {
     /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-[0-9a-f]{10})?/i.test(text);
 }
 
+function classifyWosIdsToSqlInput(value) {
+  const input = String(value || "").trim();
+  if (!input) return { kind: "", value: "" };
+  if (/\.csv$/i.test(input)) return { kind: "csv", value: input };
+  if (isWosSourceLike(input)) return { kind: "wos-source", value: input };
+  return { kind: "unknown", value: input };
+}
+
 function defaultTaskId() {
   const date = new Date();
   const pad = (value, width = 2) => String(value).padStart(width, "0");
@@ -488,6 +511,13 @@ function workflowGroup(value, label) {
   stdout.write(`  ${color("36", value, stdout)}  ${label}\n`);
 }
 
+function workflowTopItem(value, label, description) {
+  stdout.write(`  ${color("36", value, stdout)}  ${label}\n`);
+  if ((stdout.columns || 100) >= 60) {
+    stdout.write(`     ${color("2", description, stdout)}\n`);
+  }
+}
+
 function workflowItem(value, label, description) {
   stdout.write(`     ${color("36", value.padEnd(3), stdout)} ${label}\n`);
   if ((stdout.columns || 100) >= 60) {
@@ -495,21 +525,40 @@ function workflowItem(value, label, description) {
   }
 }
 
+function shortcutRow(items) {
+  const separator = `  ${color("2", "|", stdout)}  `;
+  const text = items.map(([value, label]) => `${color("36", value, stdout)} ${label}`).join(separator);
+  stdout.write(`  ${text}\n`);
+}
+
+function printWosDataDbStatus(workspace) {
+  const db = workspace?.wosDataDb || {};
+  stdout.write(`${color("32", "WOS data SQLite:", stdout)} ${db.dbPath || "none"}\n`);
+  stdout.write(`  WOS IDs ${Number(db.recordCount || 0)}\n`);
+  stdout.write(`  Sources ${Number(db.sourceCount || 0)}\n`);
+  stdout.write(`  Size    ${formatBytes(db.sizeBytes || 0)}\n\n`);
+}
+
+function appendWosDataDbArg(result, workspace) {
+  const dbPath = workspace?.wosDataDb?.dbPath;
+  if (dbPath) result.push("--db", dbPath);
+  return result;
+}
+
 async function askWorkflow(rl) {
   workflowGroup("1", "Download literature");
   workflowItem("1.1", "UUID - TXT format", "URL/UUID -> raw/<uuid>/full-record/*.txt and WOS IDs");
   workflowItem("1.2", "UUID - BIB format", "URL/UUID -> raw/<uuid>/bib/*.bib");
-  workflowGroup("2", "Parse");
-  workflowItem("2.1", "WOS data", "URL/UUID -> TXT -> WOS IDs -> raw/wosdata JSON");
-  workflowItem("2.2", "WOSID CSV", "Local CSV -> WOS IDs -> raw/wosdata JSON");
+  workflowTopItem("2", "WOS IDs to SQL", "CSV path or URL/UUID -> WOS IDs -> SQLite");
   workflowGroup("3", "Task manager");
   workflowItem("3.1", "New", "Create a fresh current task");
   workflowItem("3.2", "Switch", "Select an existing current task");
   workflowItem("3.3", "Clear", "Remove a managed task");
-  option("c", "Check SID", "Probe the saved SID and refresh it through browser login when needed");
-  option("u", "Update", "Install the latest release and restart the interactive CLI");
-  option("B", "Back", "Return to the workspace menu");
-  option("q", "Exit", "Close without running a command");
+  workflowGroup("4", "SQL database");
+  workflowItem("4.1", "Status", "Show global SQLite path, WOSID count, source count, and size");
+  workflowItem("4.2", "Merge database", "Merge another WOS SQLite database into the global database");
+  workflowItem("4.3", "Query WOSID", "Enter one WOSID and print its SQLite record");
+  shortcutRow([["c", "Check SID"], ["u", "Update"], ["B", "Back"], ["q", "Exit"]]);
   stdout.write("\n");
 
   for (;;) {
@@ -518,8 +567,8 @@ async function askWorkflow(rl) {
     if (isQuitInput(choice)) return CONTROL_QUIT;
     if (choice === "c") return "c";
     if (choice === "u") return "u";
-    if (["1.1", "1.2", "2.1", "2.2", "3.1", "3.2", "3.3"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2.1, 2.2, 3.1, 3.2, 3.3, c to check SID, u to update, B to go back, or q to quit\n`);
+    if (["1.1", "1.2", "2", "3.1", "3.2", "3.3", "4.1", "4.2", "4.3"].includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, c to check SID, u to update, B to go back, or q to quit\n`);
   }
 }
 
@@ -723,6 +772,45 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       return ["clear", "--task", selection.taskId, "--tasks-root", activeWorkspace.tasksRoot];
     }
 
+    if (choice === "4.1") {
+      printWosDataDbStatus(activeWorkspace);
+      return { refresh: true };
+    }
+
+    if (choice === "4.2") {
+      const sourceDb = await askParameterOrCancel(
+        rl,
+        "Source SQLite database",
+        "enter a local .sqlite database file to merge"
+      );
+      if (isBackResult(sourceDb)) return { refresh: true };
+      if (isQuitResult(sourceDb)) return null;
+      const result = appendWosDataDbArg(
+        ["wosdata", "--merge-db", sourceDb, "--tasks-root", activeWorkspace.tasksRoot],
+        activeWorkspace
+      );
+      const force = await askOptionalBoolean(rl, "Force overwrite existing SQL rows", false);
+      if (isBackResult(force)) return { refresh: true };
+      if (isQuitResult(force)) return null;
+      if (force) result.push("--force");
+      return result;
+    }
+
+    if (choice === "4.3") {
+      const wosid = await askParameterOrCancel(
+        rl,
+        "WOSID",
+        "enter one WOSID, for example WOS:000000000000001"
+      );
+      if (isBackResult(wosid)) return { refresh: true };
+      if (isQuitResult(wosid)) return null;
+      const result = appendWosDataDbArg(
+        ["wosdata", "--wosid", wosid, "--tasks-root", activeWorkspace.tasksRoot],
+        activeWorkspace
+      );
+      return result;
+    }
+
     let selection = currentTaskSelection(activeWorkspace);
     if (!selection.taskId) {
       await refreshWorkspace(generatedTaskId);
@@ -747,31 +835,57 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       }
     }
 
-    if (choice === "2.2") {
-      const csvPath = await askParameterOrCancel(
-        rl,
-        "WOSID CSV path",
-        "enter a local CSV file containing a wosid or UT column"
-      );
-      if (isBackResult(csvPath)) return { refresh: true };
-      if (isQuitResult(csvPath)) return null;
-      if (!csvPath) {
-        stdout.write(`${color("33", "Required:", stdout)} WOSID CSV path is required.\n\n`);
-        return { refresh: true };
-      }
-      const result = ["parse", "--csv", csvPath, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot];
-      const parseArgs = await askParseOptions(rl);
-      if (isBackResult(parseArgs)) return { refresh: true };
-      if (isQuitResult(parseArgs)) return null;
-      result.push(...parseArgs);
-      if (sid) result.push("--sid", sid);
-      return result;
-    }
-
     const sourceFallback = [task?.url, task?.uuid].find(isWosSourceLike) || "";
     if (sourceFallback) {
       stdout.write(`${color("2", "Saved source:", stdout)} ${sourceFallback}\n`);
     }
+
+    if (choice === "2") {
+      const input = await askParameterOrCancel(
+        rl,
+        "CSV path, WOS URL, or UUID",
+        "enter a .csv file, WOS summary URL, or WOS result-set UUID",
+        sourceFallback
+      );
+      if (isBackResult(input)) return { refresh: true };
+      if (isQuitResult(input)) return null;
+      const parsed = classifyWosIdsToSqlInput(input);
+      if (parsed.kind === "csv") {
+        const result = appendWosDataDbArg(
+          ["parse", "--csv", parsed.value, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot],
+          activeWorkspace
+        );
+        const parseArgs = await askParseOptions(rl);
+        if (isBackResult(parseArgs)) return { refresh: true };
+        if (isQuitResult(parseArgs)) return null;
+        result.push(...parseArgs);
+        if (sid) result.push("--sid", sid);
+        return result;
+      }
+      if (parsed.kind !== "wos-source") {
+        stdout.write(`${color("33", "Required:", stdout)} enter a .csv file, WOS summary URL, or WOS result-set UUID.\n\n`);
+        return { refresh: true };
+      }
+      const sourceFlag = /^https?:\/\//i.test(parsed.value) ? "--url" : "--uuid";
+      const result = [
+        "parse-pipeline",
+        sourceFlag,
+        parsed.value,
+        "--task",
+        taskId,
+        "--tasks-root",
+        activeWorkspace.tasksRoot,
+        "--reuse-raw",
+      ];
+      const parseArgs = await askParseOptions(rl);
+      if (isBackResult(parseArgs)) return { refresh: true };
+      if (isQuitResult(parseArgs)) return null;
+      result.push(...parseArgs);
+      appendWosDataDbArg(result, activeWorkspace);
+      if (sid) result.push("--sid", sid);
+      return result;
+    }
+
     const source = await askParameterOrCancel(
       rl,
       "WOS summary URL or UUID",
@@ -785,15 +899,9 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       return { refresh: true };
     }
     const sourceFlag = /^https?:\/\//i.test(source) ? "--url" : "--uuid";
-    const command = choice === "2.1" ? "parse-pipeline" : (choice === "1.2" ? "bib" : "run");
+    const command = choice === "1.2" ? "bib" : "run";
     const result = [command, sourceFlag, source, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot];
     if (command !== "bib") result.push("--reuse-raw");
-    if (choice === "2.1") {
-      const parseArgs = await askParseOptions(rl);
-      if (isBackResult(parseArgs)) return { refresh: true };
-      if (isQuitResult(parseArgs)) return null;
-      result.push(...parseArgs);
-    }
     if (sid) result.push("--sid", sid);
     return result;
   } finally {
@@ -810,9 +918,11 @@ module.exports = {
   askParseOptions,
   parseOptionsToArgs,
   formatParseOptions,
+  formatBytes,
   formatRuntime,
   currentTaskSelection,
   isWosSourceLike,
+  classifyWosIdsToSqlInput,
   askTaskSelection,
   listTaskHints,
   printHeader,
