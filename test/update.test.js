@@ -47,13 +47,42 @@ test("authenticates private GitHub release requests", async () => {
 
 test("explains private GitHub release access failures", async () => {
   await assert.rejects(
-    fetchLatestRelease("owner/private-repo", async () => ({
-      ok: false,
-      status: 404,
-      statusText: "Not Found",
-    })),
+    fetchLatestRelease("owner/private-repo", async () => (
+      {
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+      }
+    )),
     /gh auth login/
   );
+});
+
+test("explains accessible repositories without releases", async () => {
+  const requested = [];
+  await assert.rejects(
+    fetchLatestRelease("owner/private-repo", async (url) => {
+      requested.push(url);
+      if (url.endsWith("/releases/latest")) {
+        return {
+          ok: false,
+          status: 404,
+          statusText: "Not Found",
+        };
+      }
+      return {
+        ok: true,
+        async json() {
+          return { full_name: "owner/private-repo" };
+        },
+      };
+    }),
+    /No GitHub Releases found/
+  );
+  assert.deepEqual(requested, [
+    "https://api.github.com/repos/owner/private-repo/releases/latest",
+    "https://api.github.com/repos/owner/private-repo",
+  ]);
 });
 
 test("checks for updates without installing", async () => {
@@ -89,7 +118,7 @@ test("installs the latest GitHub release tag", async () => {
 
   assert.equal(result.status, "updated");
   assert.match(command, /^npm(?:\.cmd)?$/);
-  assert.deepEqual(args, ["install", "--global", "github:iihciyekub/wos-aide-cli#v0.3.0"]);
+  assert.deepEqual(args, ["install", "--global", "github:iihciyekub/iiaide-wos-cli#v0.3.0"]);
 });
 
 test("does not reinstall an up-to-date version", async () => {

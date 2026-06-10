@@ -1,15 +1,15 @@
 {
-  "name": "wos-aide-cli",
-  "version": "0.3.1",
+  "name": "iiaide-wos-cli",
+  "version": "0.3.67",
   "private": true,
   "description": "Task-oriented CLI for interacting with Web of Science, extracting WOS IDs and author data, and delivering reusable data packages.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/iihciyekub/wos-aide-cli.git"
+    "url": "https://github.com/iihciyekub/iiaide-wos-cli.git"
   },
-  "homepage": "https://github.com/iihciyekub/wos-aide-cli#readme",
+  "homepage": "https://github.com/iihciyekub/iiaide-wos-cli#readme",
   "bugs": {
-    "url": "https://github.com/iihciyekub/wos-aide-cli/issues"
+    "url": "https://github.com/iihciyekub/iiaide-wos-cli/issues"
   },
   "files": [
     "bin/",
@@ -19,15 +19,15 @@
     "CHANGELOG.md"
   ],
   "bin": {
-    "wos-aide": "bin/wos-aide.js"
+    "iiaide-wos": "bin/iiaide-wos.js"
   },
   "scripts": {
-    "lint": "node --check bin/wos-aide.js && node --check src/wos-aide.js && node --check src/lib/io.js && node --check src/lib/interactive.js && node --check src/lib/terminal.js && node --check src/lib/update.js",
+    "lint": "node --check bin/iiaide-wos.js && node --check src/iiaide-wos.js && node --check src/lib/io.js && node --check src/lib/interactive.js && node --check src/lib/terminal.js && node --check src/lib/update.js && node --check src/lib/wos-browser-export.js && node --check import/wos.js",
     "check": "npm run lint",
     "test": "node --test",
     "verify": "npm run check && npm test",
-    "help": "node bin/wos-aide.js --help",
-    "menu": "node bin/wos-aide.js menu",
+    "help": "node bin/iiaide-wos.js --help",
+    "menu": "node bin/iiaide-wos.js menu",
     "prepublishOnly": "node -e \"console.error('Publishing to the npm Registry is disabled; publish a private GitHub Release instead.'); process.exit(1)\""
   },
   "engines": {

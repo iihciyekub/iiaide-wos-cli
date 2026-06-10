@@ -85,6 +85,7 @@ function createProgress(label, total, options = {}) {
   const enabled = isInteractive(stream);
   const width = Math.max(10, Math.min(30, Number(options.width) || 24));
   const startedAt = Date.now();
+  let totalSteps = Math.max(0, Number(total) || 0);
   let completed = 0;
   let failed = 0;
   let detail = "";
@@ -92,29 +93,34 @@ function createProgress(label, total, options = {}) {
 
   const render = () => {
     if (!enabled || stopped) return;
-    const ratio = total ? Math.min(1, completed / total) : 1;
+    const ratio = totalSteps ? Math.min(1, completed / totalSteps) : 1;
     const filled = Math.round(width * ratio);
     const bar = `${"=".repeat(filled)}${" ".repeat(width - filled)}`;
     const failures = failed ? color("31", ` ${failed} failed`, stream) : "";
     readline.clearLine(stream, 0);
     readline.cursorTo(stream, 0);
     stream.write(
-      `${color("36", label, stream)} [${bar}] ${completed}/${total}${failures}${detail ? `  ${detail}` : ""}`
+      `${color("36", label, stream)} [${bar}] ${completed}/${totalSteps}${failures}${detail ? `  ${detail}` : ""}`
     );
   };
 
-  if (!enabled && !options.quiet) stream.write(`${label}: 0/${total}\n`);
+  if (!enabled && !options.quiet) stream.write(`${label}: 0/${totalSteps}\n`);
   else render();
 
   return {
+    setTotal(nextTotal) {
+      totalSteps = Math.max(completed, Number(nextTotal) || 0);
+      render();
+    },
     update(value, nextDetail = "", nextFailed = failed) {
-      completed = Math.max(0, Math.min(total, Number(value) || 0));
+      completed = Math.max(0, Math.min(totalSteps, Number(value) || 0));
       failed = Math.max(0, Number(nextFailed) || 0);
       detail = nextDetail;
       render();
     },
     increment(nextDetail = "", wasFailure = false) {
       completed += 1;
+      if (completed > totalSteps) totalSteps = completed;
       if (wasFailure) failed += 1;
       detail = nextDetail;
       render();
@@ -128,7 +134,7 @@ function createProgress(label, total, options = {}) {
       }
       if (!options.quiet) {
         const suffix = failed ? `, ${failed} failed` : "";
-        stream.write(`${message || label}: ${completed}/${total}${suffix} (${formatDuration(startedAt)})\n`);
+        stream.write(`${message || label}: ${completed}/${totalSteps}${suffix} (${formatDuration(startedAt)})\n`);
       }
     },
   };

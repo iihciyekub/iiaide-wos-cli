@@ -1,5 +1,6 @@
 node_modules/
 tasks/
+import/
 .DS_Store
 *.tmp
 *.bak

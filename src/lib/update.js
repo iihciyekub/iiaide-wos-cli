@@ -1,6 +1,6 @@
 const { spawnSync } = require("node:child_process");
 
-const DEFAULT_REPOSITORY = "iihciyekub/wos-aide-cli";
+const DEFAULT_REPOSITORY = "iihciyekub/iiaide-wos-cli";
 
 function resolveGitHubToken(options = {}) {
   const env = options.env || process.env;
@@ -34,7 +34,7 @@ function compareVersions(left, right) {
 async function fetchLatestRelease(repository = DEFAULT_REPOSITORY, request = fetch, token = "") {
   const headers = {
     accept: "application/vnd.github+json",
-    "user-agent": "wos-aide-cli",
+    "user-agent": "iiaide-wos-cli",
     "x-github-api-version": "2022-11-28",
   };
   if (token) headers.authorization = `Bearer ${token}`;
@@ -43,6 +43,14 @@ async function fetchLatestRelease(repository = DEFAULT_REPOSITORY, request = fet
     headers,
   });
   if (!response.ok) {
+    if (response.status === 404) {
+      const repoResponse = await request(`https://api.github.com/repos/${repository}`, { headers });
+      if (repoResponse.ok) {
+        throw new Error(
+          `No GitHub Releases found for ${repository}. Create a release tag before running iiaide-wos update.`
+        );
+      }
+    }
     if (response.status === 401 || response.status === 403 || response.status === 404) {
       throw new Error(
         "Private GitHub release access failed. Run `gh auth login` or set GH_TOKEN with repository read access."
