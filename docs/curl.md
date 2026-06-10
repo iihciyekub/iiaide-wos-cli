@@ -101,7 +101,7 @@ readSummaryInfo()
 Used by:
 
 - `iiaide-wos run`
-- `iiaide-wos pipeline`
+- `iiaide-wos parse-pipeline`
 
 Purpose:
 
@@ -139,7 +139,7 @@ Used by:
 
 ```bash
 iiaide-wos run --uuid "${WOS_UUID}" --batch-size 200
-iiaide-wos pipeline --uuid "${WOS_UUID}" --batch-size 200
+iiaide-wos parse-pipeline --uuid "${WOS_UUID}" --batch-size 200
 ```
 
 Endpoint:
@@ -187,7 +187,7 @@ Batch behavior:
 - CLI writes raw batches to `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
 - CLI parses `UT` fields from the response text.
 - CLI writes a single WOSID CSV to
-  `export/<uuid>/full-record/<uuid>_wosid.csv`.
+  `raw/<uuid>/full-record/<uuid>_wosid.csv`.
 
 ## 4. WOS BibTeX Export
 
@@ -306,21 +306,25 @@ curl "${WOS_BASE_URL}/api/wosnx/indic/export/saveToFile" \
   -o "${WOS_UUID}_1_200.bib"
 ```
 
-## 5. Author Full-Record Pages
+## 5. WOS Data Full-Record Pages
 
 CLI method:
 
 ```text
-extractOneAuthorRecord()
+extractOneRecordInfo()
+  -> window.wos.record.viewFullRecordByWosId(wosid)
+  -> window.wos.record.parseCurrentFullRecordPage()
 ```
 
 Used by:
 
 ```bash
-iiaide-wos authors --task "<task-id>"
+iiaide-wos parse --task "<task-id>"
+iiaide-wos parse --csv "./input/wosids.csv" --task "<task-id>"
+iiaide-wos parse-pipeline --uuid "<uuid>" --task "<task-id>"
 ```
 
-Page URL:
+Page URL shape:
 
 ```bash
 curl -L \
@@ -330,24 +334,19 @@ curl -L \
 
 Important distinction:
 
-- Author extraction is currently browser/page based.
-- The CLI opens full-record pages with Playwright and reads rendered author,
-  address, affiliation, email, ResearcherID, ORCID, and ROR data from the page.
-- CLI writes one raw author extraction JSON per WOS ID to
-  `raw/<uuid>/author/<WOSID>.json`.
-- Article full-record extraction uses the injected `wos.js` page API
-  (`wos.record.viewFullRecordByWosId()` plus
-  `wos.record.parseCurrentFullRecordPage()`) and writes one structured raw JSON
-  file per WOS ID to `raw/<uuid>/record/<WOSID>.json`.
-- CLI also writes `export/<uuid>/author/<uuid>_authors_simple.csv`, a
-  deduplicated six-column address/affiliation table with `wosid`,
-  `authorIndex`, `address`, `affiliation`, `rorId`, and
-  `correspondingAddress`.
-- If the full-record URL redirects back to `https://www.webofscience.com/wos/`,
-  the CLI treats that WOS ID as no-data and stops waiting for author selectors.
-- Author extraction waits for navigation commit and then races author selectors
-  against WOS root redirects; it does not wait for page `networkidle`.
-- This is not currently a request-only JSON API path in the CLI.
+- Page parsing is browser/page based, not a request-only JSON API path.
+- The CLI starts from a WOS page with injected `import/wos.js`, calls
+  `wos.record.viewFullRecordByWosId()`, then calls
+  `wos.record.parseCurrentFullRecordPage()` in the page context.
+- CLI writes one structured raw JSON file per WOS ID to
+  `raw/wosdata/<WOSID>.json`.
+- The UUID-specific WOSID index remains at
+  `raw/<uuid>/full-record/<uuid>_wosid.csv` and is the input list for parse.
+- For `parse --csv`, the local CSV is normalized into
+  `raw/<task-id>/full-record/<task-id>_wosid.csv` before the same parse stage
+  runs.
+- If a parsed WOSID JSON already exists in `raw/wosdata/`, `parse` skips it
+  unless `--force` is set.
 
 ## 6. Local-Only Methods
 
@@ -371,9 +370,9 @@ tasks/latest
 tasks/config.json
 tasks/<task-id>/manifest.json
 tasks/<task-id>/summary.json
-tasks/<task-id>/export/<uuid-or-task-id>/full-record/<uuid-or-task-id>_wosid.csv
+tasks/<task-id>/raw/<uuid-or-task-id>/full-record/<uuid-or-task-id>_wosid.csv
 tasks/<task-id>/export/<uuid>/bib/<uuid>.bib
-tasks/<task-id>/export/<uuid>/author/<uuid>_authors_simple.csv
+tasks/<task-id>/raw/wosdata/<WOSID>.json
 ```
 
 ## 7. Debug Checklist

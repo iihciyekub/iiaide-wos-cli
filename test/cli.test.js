@@ -8,7 +8,7 @@ const test = require("node:test");
 
 const cli = require("../src/iiaide-wos");
 const { readJson, writeJson } = require("../src/lib/io");
-const { authorOptionsToArgs, currentTaskSelection, formatAuthorOptions, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
+const { currentTaskSelection, formatParseOptions, formatRuntime, isWosSourceLike, listTaskHints, parseOptionsToArgs, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
 const { createProgress, createSpinner } = require("../src/lib/terminal");
 const { normalizeBatchResult } = require("../src/lib/wos-browser-export");
 
@@ -94,19 +94,6 @@ test("calculates bounded WOS record ranges before download confirmation", () => 
   assert.equal(cli.boundedRecordCount(800, 201, 200), 200);
   assert.equal(cli.boundedRecordCount(800, 701, 200), 100);
   assert.equal(cli.boundedRecordCount(800, 900, 200), 0);
-});
-
-test("author worker pool honors configured concurrency", async () => {
-  let active = 0;
-  let maxActive = 0;
-  await cli.runPool([1, 2, 3, 4, 5, 6], 3, async () => {
-    active += 1;
-    maxActive = Math.max(maxActive, active);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    active -= 1;
-  });
-
-  assert.equal(maxActive, 3);
 });
 
 test("interactive task hints show only numbered task IDs", () => {
@@ -271,12 +258,11 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(workflowMatch[0], /Download literature/);
   assert.match(workflowMatch[0], /1\.1", "UUID - TXT format/);
   assert.match(workflowMatch[0], /1\.2", "UUID - BIB format/);
-  assert.match(workflowMatch[0], /2\.1", "Author & address/);
-  assert.match(workflowMatch[0], /2\.2", "Article full record/);
+  assert.match(workflowMatch[0], /2\.1", "WOS data/);
   assert.match(workflowMatch[0], /3\.1", "New/);
   assert.match(workflowMatch[0], /3\.2", "Switch/);
   assert.match(workflowMatch[0], /3\.3", "Clear/);
-  assert.match(workflowMatch[0], /choose 0\.1, 1\.1, 1\.2, 2\.1, 2\.2, 3\.1, 3\.2, 3\.3/);
+  assert.match(workflowMatch[0], /choose 0\.1, 1\.1, 1\.2, 2\.1, 3\.1, 3\.2, 3\.3/);
   assert.doesNotMatch(workflowMatch[0], /Download WOS IDs/);
   assert.match(argsMatch[0], /choice === "0\.1"/);
   assert.match(argsMatch[0], /return \["check", "--tasks-root", activeWorkspace\.tasksRoot\]/);
@@ -284,8 +270,7 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(argsMatch[0], /mode: "new"/);
   assert.match(argsMatch[0], /choice === "3\.2"/);
   assert.match(argsMatch[0], /choice === "3\.3"/);
-  assert.match(argsMatch[0], /choice === "2\.1" \? "pipeline"/);
-  assert.match(argsMatch[0], /choice === "2\.2" \? "records-pipeline"/);
+  assert.match(argsMatch[0], /choice === "2\.1" \? "parse-pipeline"/);
   assert.match(argsMatch[0], /choice === "1\.2" \? "bib"/);
 });
 
@@ -308,31 +293,23 @@ test("interactive downloads use the current task selection", () => {
   assert.equal(selection.task.taskId, "selected");
 });
 
-test("interactive author options can stay default or become command args", () => {
+test("interactive parse options can stay default or become command args", () => {
   assert.equal(
-    formatAuthorOptions(),
-    "concurrency=1 | timeout=20000ms | cooldown=250ms | failCool=20/60000ms | from=1 | limit=all | retryFailed=no | failedOnly=no"
+    formatParseOptions(),
+    "concurrency=1 | timeout=20000ms | cooldown=250ms | from=1 | limit=all"
   );
-  assert.deepEqual(authorOptionsToArgs({
+  assert.deepEqual(parseOptionsToArgs({
     concurrency: 4,
-    authorTimeoutMs: 15000,
+    recordTimeoutMs: 15000,
     cooldownMs: 800,
-    failureCooldownThreshold: 7,
-    failureCooldownMs: 120000,
     fromIndex: 11,
     limit: 50,
-    retryFailed: true,
-    failedOnly: true,
   }), [
     "--concurrency", "4",
-    "--author-timeout-ms", "15000",
+    "--record-timeout-ms", "15000",
     "--cooldown-ms", "800",
-    "--failure-cooldown-threshold", "7",
-    "--failure-cooldown-ms", "120000",
     "--from-index", "11",
     "--limit", "50",
-    "--retry-failed",
-    "--failed-only",
   ]);
 });
 
@@ -373,15 +350,15 @@ test("interactive header shows WOS browser mode and profile name", () => {
   assert.doesNotMatch(output, /Origin\s+https:\/\/www\.webofscience\.com/);
   const titleLine = output.split(/\r?\n/).find((line) => line.includes("iiaide-wos CLI") && line.trim().startsWith("|"));
   const originLine = output.split(/\r?\n/).find((line) => line.includes("https://www.webofscience.com"));
-  const authorLine = output.split(/\r?\n/).find((line) => line.includes("lyj"));
+  const creditLine = output.split(/\r?\n/).find((line) => line.includes("lyj"));
   const dateLine = output.split(/\r?\n/).find((line) => line.includes("2026-06-10"));
   assert.ok(titleLine);
   assert.ok(originLine);
-  assert.ok(authorLine);
+  assert.ok(creditLine);
   assert.ok(dateLine);
   assert.ok(titleLine.indexOf("iiaide-wos CLI") > 8);
   assert.ok(originLine.indexOf("https://www.webofscience.com") > 8);
-  assert.ok(authorLine.indexOf("lyj") > 8);
+  assert.ok(creditLine.indexOf("lyj") > 8);
   assert.ok(dateLine.indexOf("2026-06-10") > 8);
   assert.doesNotMatch(output, /\+----------\+|<\/>/);
   assert.doesNotMatch(output, /___\/\)|\(___\//);
@@ -558,56 +535,80 @@ test("detects WOS full-record redirects back to the WOS root", () => {
   assert.equal(cli.isWosRootRecordRedirect("https://other.example/wos/", "https://www.webofscience.com"), false);
 });
 
-test("author extraction does not wait for networkidle before no-data detection", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/async function extractOneFullRecordInfo[\s\S]*?\n}\n\nasync function extractOneAuthorRecord/);
-  assert.ok(match, "extractOneFullRecordInfo source should be present");
-  assert.match(match[0], /waitUntil: "commit"/);
-  assert.match(match[0], /pathname === "\/wos"/);
-  assert.doesNotMatch(match[0], /networkidle/);
-});
-
-test("author extraction stores generic full-record fields", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/const EXTRACT_AUTHOR_INFO = async \(\) => \{[\s\S]*?\n};\n\nfunction normalizeAuthorRecord/);
-  assert.ok(match, "EXTRACT_AUTHOR_INFO source should be present");
-  assert.match(match[0], /recordFields: extractRecordFields\(\)/);
-  assert.match(match[0], /recordTables: extractRecordTables\(\)/);
-  assert.match(match[0], /recordSections: extractRecordSections\(\)/);
-  assert.match(match[0], /Show details\|Show All Details\|View funding text\|See more data fields/);
-});
-
 test("record extraction uses injected wos.js page parser", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/async function extractOneRecordInfo[\s\S]*?\n}\n\nasync function runAuthors/);
+  const match = source.match(/async function extractOneRecordInfo[\s\S]*?\n}\n\nasync function runParse/);
   assert.ok(match, "extractOneRecordInfo source should be present");
   assert.match(match[0], /viewFullRecordByWosId/);
   assert.match(match[0], /parseCurrentFullRecordPage/);
-  assert.doesNotMatch(match[0], /EXTRACT_AUTHOR_INFO/);
+  assert.doesNotMatch(source, /EXTRACT_AUTHOR_INFO/);
 });
 
-test("record aggregate rows flatten structured wos.js full-record JSON", () => {
-  const rows = cli.recordFieldRowsFromRaw({
+test("parse command reuses task-level WOS data JSON cache", async () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const csvPath = path.join(root, "input.csv");
+  fs.writeFileSync(csvPath, "wosid\nWOS:ABC\n");
+  const importArgs = cli.parseArgs([
+    "node", "cli", "import", "--csv", csvPath, "--task", "parse-task", "--tasks-root", tasksRoot,
+  ]);
+  cli.importWosIds(importArgs);
+  const paths = cli.withRawSource(cli.getRunPaths(importArgs.outDir), "parse-task");
+  writeJson(cli.wosDataJsonPath(paths, "WOS:ABC"), {
     wosid: "WOS:ABC",
-    title: "Demo record",
-    source: {
-      doi: "10.123/demo",
-      documentTypes: ["Article", "Early Access"],
-    },
-    identifiers: {
-      accessionNumber: "WOS:ABC",
-    },
+    identifiers: { accessionNumber: "WOS:ABC" },
   });
-  assert.ok(rows.some((row) =>
-    row.wosid === "WOS:ABC" &&
-    row.section === "source" &&
-    row.field === "source.doi" &&
-    row.value === "10.123/demo"
-  ));
-  assert.ok(rows.some((row) =>
-    row.field === "source.documentTypes" &&
-    row.value === "Article | Early Access"
-  ));
+
+  const result = await cli.runParse(cli.parseArgs([
+    "node", "cli", "parse", "--task", "parse-task", "--tasks-root", tasksRoot,
+  ]));
+
+  assert.equal(result.selected, 0);
+  assert.equal(result.completed, 1);
+  assert.equal(result.wosDataDir, path.join(tasksRoot, "parse-task", "raw", "wosdata"));
+  assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "parse-completed");
+});
+
+test("parse command accepts a local WOSID CSV directly", async () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const csvPath = path.join(root, "input.csv");
+  fs.writeFileSync(csvPath, "UT\nWOS:CSV001\n");
+  const args = cli.parseArgs([
+    "node", "cli", "parse", "--csv", csvPath, "--task", "csv-parse", "--tasks-root", tasksRoot,
+  ]);
+  const paths = cli.withRawSource(cli.getRunPaths(args.outDir), "csv-parse");
+  writeJson(paths.manifest, { command: "iiaide-wos" });
+  writeJson(cli.wosDataJsonPath(paths, "WOS:CSV001"), {
+    wosid: "WOS:CSV001",
+    identifiers: { accessionNumber: "WOS:CSV001" },
+  });
+
+  const originalLog = console.log;
+  const originalError = console.error;
+  let output = "";
+  const errors = [];
+  console.log = (value = "") => {
+    output += `${value}\n`;
+  };
+  console.error = (message = "") => {
+    errors.push(String(message));
+  };
+  try {
+    const exitCode = await cli.executeCommand(args);
+    assert.equal(exitCode, 0);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+
+  assert.equal(output.trim(), path.join(tasksRoot, "csv-parse", "raw", "wosdata"));
+  assert.equal(
+    fs.readFileSync(path.join(tasksRoot, "csv-parse", "raw", "csv-parse", "full-record", "csv-parse_wosid.csv"), "utf8").trim(),
+    "wosid\nWOS:CSV001"
+  );
+  assert.ok(errors.some((line) => /skipped=1/.test(line)));
+  assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "parse-completed");
 });
 
 test("counts BibTeX entries without treating metadata directives as records", () => {
@@ -662,35 +663,11 @@ test("BibTeX export path uses injected wos.js export API while reading summary c
   assert.doesNotMatch(source, /action:\s*["']saveTo(?:Bibtex|FieldTagged)["']/);
 });
 
-test("WOS downloads use the shared persistent Playwright session helper", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const exportMatch = source.match(/async function exportFromWos[\s\S]*?\n}\n\nasync function exportBibFromWos/);
-  const bibMatch = source.match(/async function exportBibFromWos[\s\S]*?\n}\n\nfunction combineBibFiles/);
-  const authorsMatch = source.match(/async function runAuthors[\s\S]*?\n}\n\nfunction validateTask/);
-  assert.ok(exportMatch, "exportFromWos source should be present");
-  assert.ok(bibMatch, "exportBibFromWos source should be present");
-  assert.ok(authorsMatch, "runAuthors source should be present");
-
-  assert.match(exportMatch[0], /prepareWosSession/);
-  assert.match(bibMatch[0], /prepareWosSession/);
-  assert.match(authorsMatch[0], /prepareWosSession/);
-  assert.match(source, /launchPersistentContext/);
-  assert.match(source, /addInitScript/);
-  assert.match(source, /addScriptTag/);
-  assert.match(source, /window\.asy_uuid\.fetchCurrentPageInfo/);
-  assert.match(exportMatch[0], /exportTxtBatchesViaWosJs/);
-  assert.match(exportMatch[0], /confirmDownloadPlan/);
-  assert.match(exportMatch[0], /batchSize = DEFAULT_BATCH_SIZE/);
-  assert.match(bibMatch[0], /exportBibBatchesViaWosJs/);
-  assert.doesNotMatch(source, /chromium\.launch\(/);
-  assert.doesNotMatch(source, /\.newContext\(/);
-  assert.match(source, /--window-position=/);
-});
-
 test("generates alphanumeric TID timestamp task IDs", () => {
   const taskId = cli.makeTaskId(new Date(2026, 5, 9, 20, 30, 40));
   assert.equal(taskId, "TID20260609203040");
   assert.match(cli.parseArgs(["node", "cli", "run", "--uuid", "abc"]).taskId, /^TID\d{14}$/);
+  assert.match(cli.parseArgs(["node", "cli", "parse", "--csv", "wosids.csv"]).taskId, /^TID\d{14}$/);
 });
 
 test("initializes and reports a cwd-scoped workspace", () => {
@@ -1010,83 +987,6 @@ test("imports an external WOS ID CSV as a complete task", () => {
   assert.deepEqual(cli.readWosIdsCsv(summary.files.wosidsCsv), ["WOS:ABC", "WOS:DEF"]);
 });
 
-test("expands author address and affiliation hierarchy", () => {
-  const rows = cli.flattenAuthorRows([{
-    wosid: "WOS:ABC",
-    authors: [{
-      authorIndex: 1,
-      displayName: "Author",
-      addressDetails: [{
-        addressNumber: "1",
-        address: "Address",
-        affiliations: [
-          { affiliation: "One", rorId: "https://ror.org/1" },
-          { affiliation: "Two", rorId: "https://ror.org/2" },
-        ],
-      }],
-    }],
-  }]);
-  assert.equal(rows.length, 2);
-  assert.deepEqual(rows.map((row) => row.affiliation), ["One", "Two"]);
-});
-
-test("builds deduplicated simple author rows with address details only", () => {
-  const rows = cli.simpleAuthorRows([
-    {
-      wosid: "WOS:ABC",
-      authorIndex: 1,
-      address: "Address",
-      affiliation: "Affiliation",
-      rorId: "https://ror.org/1",
-      correspondingAddress: "",
-      fullName: "Ignored",
-    },
-    {
-      wosid: "WOS:ABC",
-      authorIndex: 1,
-      address: "Address",
-      affiliation: "Affiliation",
-      rorId: "https://ror.org/1",
-      correspondingAddress: "",
-    },
-    {
-      wosid: "WOS:DEF",
-      authorIndex: 2,
-      address: "",
-      affiliation: "",
-      rorId: "",
-      correspondingAddress: "",
-    },
-    {
-      wosid: "WOS:GHI",
-      authorIndex: 3,
-      address: "",
-      affiliation: "",
-      rorId: "",
-      correspondingAddress: "Corresponding Address",
-    },
-  ]);
-
-  assert.deepEqual(rows, [
-    {
-      wosid: "WOS:ABC",
-      authorIndex: 1,
-      address: "Address",
-      affiliation: "Affiliation",
-      rorId: "https://ror.org/1",
-      correspondingAddress: "",
-    },
-    {
-      wosid: "WOS:GHI",
-      authorIndex: 3,
-      address: "",
-      affiliation: "",
-      rorId: "",
-      correspondingAddress: "Corresponding Address",
-    },
-  ]);
-});
-
 test("reports corrupt JSON instead of silently replacing it", () => {
   const root = temporaryDirectory();
   const filePath = path.join(root, "broken.json");
@@ -1118,17 +1018,6 @@ test("filters raw batches by UUID and rejects overlaps", () => {
 
   fs.writeFileSync(path.join(firstRawDir, "first_2_3.txt"), "UT WOS:C\n");
   assert.throws(() => cli.parseExistingRawBatches(paths, "first"), /Non-contiguous raw batches/);
-});
-
-test("reads legacy raw batch directories for existing tasks", () => {
-  const root = temporaryDirectory();
-  const paths = cli.getRunPaths(root);
-  const legacyRawDir = path.join(paths.legacyFullRecordDir, "legacy");
-  fs.mkdirSync(legacyRawDir, { recursive: true });
-  fs.writeFileSync(path.join(legacyRawDir, "legacy_1_1.txt"), "UT WOS:OLD\n");
-
-  assert.deepEqual(cli.rawBatchFiles(paths, "legacy"), ["legacy_1_1.txt"]);
-  assert.deepEqual(cli.parseExistingRawBatches(paths, "legacy").map((row) => row.wosid), ["WOS:OLD"]);
 });
 
 test("validate does not create a missing task directory", () => {
@@ -1189,7 +1078,7 @@ test("artifact commands print final artifact paths instead of JSON", async () =>
     console.log = originalLog;
   }
 
-  assert.equal(output.trim(), path.join(tasksRoot, "imported", "export", "imported", "wosid", "imported_wosid.csv"));
+  assert.equal(output.trim(), path.join(tasksRoot, "imported", "raw", "imported", "full-record", "imported_wosid.csv"));
   assert.doesNotMatch(output, /"ok"|"wosidsCsv"/);
 });
 
@@ -1289,38 +1178,6 @@ test("clear rejects unmanaged task directories", () => {
   assert.deepEqual(cli.readTaskIndex(tasksRoot).tasks.map((task) => task.taskId), ["unmanaged"]);
 });
 
-test("validate resolves portable relative author checkpoint paths", () => {
-  const root = temporaryDirectory();
-  const tasksRoot = path.join(root, "tasks");
-  const taskDir = path.join(tasksRoot, "portable");
-  const paths = cli.withRawSource(cli.getRunPaths(taskDir), "portable");
-  fs.mkdirSync(paths.dataDir, { recursive: true });
-  writeJson(path.join(tasksRoot, "index.json"), {
-    version: 1,
-    tasks: [{ taskId: "portable", taskDir: "portable" }],
-  });
-  writeJson(paths.manifest, { command: "iiaide-wos" });
-  writeJson(paths.summary, { method: "imported-wosid-csv", taskId: "portable", expectedCount: 1, uniqueCount: 1 });
-  fs.writeFileSync(path.join(paths.dataDir, "portable_wosid.csv"), "wosid\nWOS:ABC\n");
-  const portableAuthorRawDir = path.join(paths.rawRoot, "portable", "author");
-  fs.mkdirSync(portableAuthorRawDir, { recursive: true });
-  fs.writeFileSync(path.join(portableAuthorRawDir, "WOS_ABC.json"), JSON.stringify({ wosid: "WOS:ABC", authors: [] }));
-  writeJson(paths.authorCheckpoint, {
-    records: {
-      "WOS:ABC": {
-        status: "completed",
-        wosid: "WOS:ABC",
-        rawJsonPath: "raw/portable/author/WOS_ABC.json",
-      },
-    },
-  });
-
-  const result = cli.validateTask(cli.parseArgs([
-    "node", "cli", "validate", "--task", "portable", "--tasks-root", tasksRoot,
-  ]));
-  assert.equal(result.ok, true);
-});
-
 test("validate accepts BibTeX batch tasks", () => {
   const root = temporaryDirectory();
   const tasksRoot = path.join(root, "tasks");
@@ -1352,140 +1209,6 @@ test("validate accepts BibTeX batch tasks", () => {
   assert.equal(result.bibBatches, 1);
   assert.equal(result.bibFile, path.join(paths.bibExportDir, "query.bib"));
   assert.equal(result.wosids, 0);
-});
-
-test("completed author tasks finish locally without a SID", async () => {
-  const root = temporaryDirectory();
-  const tasksRoot = path.join(root, "tasks");
-  const csvPath = path.join(root, "input.csv");
-  fs.writeFileSync(csvPath, "wosid\nWOS:ABC\n");
-  const importArgs = cli.parseArgs([
-    "node", "cli", "import", "--csv", csvPath, "--task", "complete", "--tasks-root", tasksRoot,
-  ]);
-  cli.importWosIds(importArgs);
-  const paths = cli.withRawSource(cli.getRunPaths(importArgs.outDir), "complete");
-  const completeAuthorRawDir = path.join(paths.rawRoot, "complete", "author");
-  writeJson(path.join(completeAuthorRawDir, "WOS_ABC.json"), { wosid: "WOS:ABC", authors: [] });
-  writeJson(paths.authorCheckpoint, {
-    total: 1,
-    records: {
-      "WOS:ABC": {
-        status: "completed",
-        wosid: "WOS:ABC",
-        rawJsonPath: "raw/complete/author/WOS_ABC.json",
-      },
-    },
-  });
-
-  const result = await cli.runAuthors(cli.parseArgs([
-    "node", "cli", "authors", "--task", "complete", "--tasks-root", tasksRoot,
-  ]));
-
-  assert.equal(result.selected, 0);
-  assert.equal(result.completed, 1);
-  assert.equal(fs.existsSync(path.join(paths.authorsDir, "normalized-json")), false);
-  assert.equal(fs.existsSync(paths.authorsCsv), true);
-  assert.equal(fs.existsSync(paths.authorsSimpleCsv), true);
-  assert.equal(path.basename(result.authorsCsv), "complete_authors.csv");
-  assert.equal(path.basename(result.authorsSimpleCsv), "complete_authors_simple.csv");
-  assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "authors-completed");
-});
-
-test("missing author checkpoint is repaired from existing raw JSON", async () => {
-  const root = temporaryDirectory();
-  const tasksRoot = path.join(root, "tasks");
-  const csvPath = path.join(root, "input.csv");
-  fs.writeFileSync(csvPath, "wosid\nWOS:ABC\n");
-  const importArgs = cli.parseArgs([
-    "node", "cli", "import", "--csv", csvPath, "--task", "repair-authors", "--tasks-root", tasksRoot,
-  ]);
-  cli.importWosIds(importArgs);
-  const paths = cli.withRawSource(cli.getRunPaths(importArgs.outDir), "repair-authors");
-  const currentWosIdsCsv = path.join(paths.wosIdsExportDir, "repair-authors_wosid.csv");
-  const legacyWosIdsCsv = path.join(paths.legacyDataDir, "repair-authors_wosid.csv");
-  fs.mkdirSync(paths.legacyDataDir, { recursive: true });
-  fs.copyFileSync(currentWosIdsCsv, legacyWosIdsCsv);
-  fs.rmSync(currentWosIdsCsv);
-  writeJson(path.join(paths.legacySourceAuthorRawJsonDir, "WOS_ABC.json"), {
-    wosid: "WOS:ABC",
-    authors: [{ index: 1, displayName: "Ada Example" }],
-  });
-
-  const result = await cli.runAuthors(cli.parseArgs([
-    "node", "cli", "authors", "--task", "repair-authors", "--tasks-root", tasksRoot,
-  ]));
-
-  const checkpoint = readJson(paths.authorCheckpoint);
-  assert.equal(result.selected, 0);
-  assert.equal(result.completed, 1);
-  assert.equal(checkpoint.records["WOS:ABC"].status, "completed");
-  assert.equal(checkpoint.records["WOS:ABC"].rawJsonPath, "raw/repair-authors/authors/WOS_ABC.json");
-  assert.equal(fs.existsSync(paths.authorsCsv), true);
-  assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "authors-completed");
-});
-
-test("authors reads legacy full-record WOSID export directory", async () => {
-  const root = temporaryDirectory();
-  const tasksRoot = path.join(root, "tasks");
-  const csvPath = path.join(root, "input.csv");
-  fs.writeFileSync(csvPath, "wosid\nWOS:ABC\n");
-  const importArgs = cli.parseArgs([
-    "node", "cli", "import", "--csv", csvPath, "--task", "legacy-full-record-wosid", "--tasks-root", tasksRoot,
-  ]);
-  cli.importWosIds(importArgs);
-  const paths = cli.withRawSource(cli.getRunPaths(importArgs.outDir), "legacy-full-record-wosid");
-  const currentWosIdsCsv = path.join(paths.wosIdsExportDir, "legacy-full-record-wosid_wosid.csv");
-  const legacyWosIdsCsv = path.join(paths.legacyFullRecordExportDir, "legacy-full-record-wosid_wosid.csv");
-  fs.mkdirSync(paths.legacyFullRecordExportDir, { recursive: true });
-  fs.copyFileSync(currentWosIdsCsv, legacyWosIdsCsv);
-  fs.rmSync(currentWosIdsCsv);
-  writeJson(path.join(paths.authorRawJsonDir, "WOS_ABC.json"), {
-    wosid: "WOS:ABC",
-    authors: [{ index: 1, displayName: "Ada Example" }],
-  });
-
-  const result = await cli.runAuthors(cli.parseArgs([
-    "node", "cli", "authors", "--task", "legacy-full-record-wosid", "--tasks-root", tasksRoot,
-  ]));
-
-  assert.equal(result.selected, 0);
-  assert.equal(result.completed, 1);
-  assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "authors-completed");
-});
-
-test("record exports rebuild from existing raw JSON", async () => {
-  const root = temporaryDirectory();
-  const tasksRoot = path.join(root, "tasks");
-  const csvPath = path.join(root, "input.csv");
-  fs.writeFileSync(csvPath, "wosid\nWOS:ABC\n");
-  const importArgs = cli.parseArgs([
-    "node", "cli", "import", "--csv", csvPath, "--task", "record-task", "--tasks-root", tasksRoot,
-  ]);
-  cli.importWosIds(importArgs);
-  const paths = cli.withRawSource(cli.getRunPaths(importArgs.outDir), "record-task");
-  writeJson(path.join(paths.recordRawJsonDir, "WOS_ABC.json"), {
-    wosid: "WOS:ABC",
-    title: "Demo record",
-    source: {
-      doi: "10.123/demo",
-    },
-    identifiers: {
-      accessionNumber: "WOS:ABC",
-    },
-  });
-
-  const result = await cli.runRecords(cli.parseArgs([
-    "node", "cli", "records", "--task", "record-task", "--tasks-root", tasksRoot,
-  ]));
-
-  const checkpoint = readJson(paths.recordCheckpoint);
-  assert.equal(result.selected, 0);
-  assert.equal(result.completed, 1);
-  assert.equal(result.fieldRows, 3);
-  assert.equal(checkpoint.records["WOS:ABC"].status, "completed");
-  assert.equal(path.basename(result.recordFieldsCsv), "record-task_record_fields.csv");
-  assert.match(fs.readFileSync(result.recordFieldsCsv, "utf8"), /source,source\.doi,10\.123\/demo/);
-  assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "records-completed");
 });
 
 test("force cleanup preserves unrelated files in a managed output directory", () => {
@@ -1584,11 +1307,11 @@ test("reuse-raw preserves expected count and stores a relative task path", async
   assert.equal(result.ok, true);
   assert.equal(result.expectedCount, 2);
   assert.equal(result.uniqueCount, 2);
-  assert.equal(result.files.wosidsCsv, path.join(queryPaths.wosIdsExportDir, "query_wosid.csv"));
+  assert.equal(result.files.wosidsCsv, path.join(queryPaths.wosIdsDir, "query_wosid.csv"));
   assert.deepEqual(cli.readWosIdsCsv(result.files.wosidsCsv), ["WOS:A", "WOS:B"]);
-  assert.equal(fs.existsSync(path.join(queryPaths.wosIdsExportDir, "wosids_detailed.csv")), false);
-  assert.equal(fs.existsSync(path.join(queryPaths.wosIdsExportDir, "wosids.json")), false);
-  assert.equal(fs.existsSync(path.join(queryPaths.wosIdsExportDir, "full_records.txt")), false);
+  assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "wosids_detailed.csv")), false);
+  assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "wosids.json")), false);
+  assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "full_records.txt")), false);
   assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].taskDir, "reuse");
 });
 
@@ -1615,7 +1338,7 @@ test("tasks can append a different UUID without force", async () => {
     expectedCount: 999,
     uniqueCount: 999,
     summaryHref: "https://example.test/wos/woscc/summary/old-query/relevance/1",
-    files: { wosidsCsv: path.join(oldPaths.wosIdsExportDir, "old-query_wosid.csv") },
+    files: { wosidsCsv: path.join(oldPaths.wosIdsDir, "old-query_wosid.csv") },
   });
   fs.writeFileSync(path.join(oldRawDir, "old-query_1_1.txt"), "UT WOS:OLD\n");
   fs.writeFileSync(path.join(newRawDir, "new-query_1_1.txt"), "UT WOS:NEW\n");
@@ -1626,7 +1349,7 @@ test("tasks can append a different UUID without force", async () => {
   assert.equal(result.expectedCount, 1);
   assert.equal(result.uniqueCount, 1);
   assert.deepEqual(cli.readWosIdsCsv(result.files.wosidsCsv), ["WOS:NEW"]);
-  assert.equal(result.files.wosidsCsv, path.join(newPaths.wosIdsExportDir, "new-query_wosid.csv"));
+  assert.equal(result.files.wosidsCsv, path.join(newPaths.wosIdsDir, "new-query_wosid.csv"));
   assert.equal(fs.existsSync(path.join(oldRawDir, "old-query_1_1.txt")), true);
   assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].uuid, "new-query");
 });
@@ -1651,14 +1374,14 @@ test("missing WOS ID export is rebuilt from existing raw batches", async () => {
     expectedCount: 2,
     uniqueCount: 2,
     summaryHref: args.url,
-    files: { wosidsCsv: path.join(queryPaths.wosIdsExportDir, "query_wosid.csv") },
+    files: { wosidsCsv: path.join(queryPaths.wosIdsDir, "query_wosid.csv") },
   });
   fs.writeFileSync(path.join(queryRawDir, "query_1_2.txt"), "UT WOS:A\nUT WOS:B\n");
 
   const result = await cli.run(args);
 
   assert.equal(result.ok, true);
-  assert.equal(result.files.wosidsCsv, path.join(queryPaths.wosIdsExportDir, "query_wosid.csv"));
+  assert.equal(result.files.wosidsCsv, path.join(queryPaths.wosIdsDir, "query_wosid.csv"));
   assert.deepEqual(cli.readWosIdsCsv(result.files.wosidsCsv), ["WOS:A", "WOS:B"]);
 });
 
@@ -1864,7 +1587,7 @@ test("managed current task placeholder can be reused without force", async () =>
   const result = await cli.run(args);
 
   assert.equal(result.ok, true);
-  assert.equal(result.files.wosidsCsv, path.join(queryPaths.wosIdsExportDir, "query_wosid.csv"));
+  assert.equal(result.files.wosidsCsv, path.join(queryPaths.wosIdsDir, "query_wosid.csv"));
 });
 
 test("reuse-raw refuses partial batches without marking complete", async () => {
@@ -1886,7 +1609,7 @@ test("reuse-raw refuses partial batches without marking complete", async () => {
     () => cli.run(args),
     /Incomplete raw batches/
   );
-  assert.equal(fs.existsSync(path.join(queryPaths.wosIdsExportDir, "query_wosid.csv")), false);
+  assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "query_wosid.csv")), false);
 });
 
 test("BibTeX export refuses incomplete downloaded record counts", () => {
@@ -1896,109 +1619,6 @@ test("BibTeX export refuses incomplete downloaded record counts", () => {
   assert.match(match[0], /downloadedEntries < selectedCount/);
   assert.match(match[0], /Incomplete BibTeX export/);
   assert.match(match[0], /throw new Error/);
-});
-
-test("pipeline resumes from raw batches and completed author checkpoint", async () => {
-  const tasksRoot = temporaryDirectory();
-  const args = cli.parseArgs([
-    "node", "cli", "pipeline", "--uuid", "query", "--task", "pipe",
-    "--tasks-root", tasksRoot, "--reuse-raw", "--force",
-  ]);
-  const paths = cli.getRunPaths(args.outDir);
-  const queryPaths = cli.withRawSource(paths, "query");
-  const queryRawDir = path.join(paths.rawRoot, "query", "full-record");
-  fs.mkdirSync(queryRawDir, { recursive: true });
-  const queryAuthorRawDir = path.join(paths.rawRoot, "query", "author");
-  fs.mkdirSync(queryAuthorRawDir, { recursive: true });
-  fs.writeFileSync(path.join(queryRawDir, "query_1_1.txt"), "UT WOS:A\n");
-  fs.writeFileSync(path.join(queryAuthorRawDir, "WOS_A.json"), JSON.stringify({ wosid: "WOS:A", authors: [] }));
-  cli.writeJson(queryPaths.authorCheckpoint, {
-    total: 1,
-    records: {
-      "WOS:A": {
-        status: "completed",
-        wosid: "WOS:A",
-        rawJsonPath: "raw/query/author/WOS_A.json",
-      },
-    },
-  });
-  cli.writeJson(paths.summary, { expectedCount: 1, rowText: "1 result", summaryHref: args.url });
-
-  const result = await cli.runPipeline(args);
-  assert.equal(result.ok, true);
-  assert.equal(result.run.uniqueCount, 1);
-  assert.equal(result.authors.completed, 1);
-  assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "authors-completed");
-});
-
-test("pipeline authors use completed run CSV instead of stale task UUID", async () => {
-  const tasksRoot = temporaryDirectory();
-  const uuid = "a6ddba9f-a966-4d12-89c9-df5f365e9f23-01b86b9549";
-  const args = cli.parseArgs([
-    "node", "cli", "pipeline", "--uuid", uuid, "--task", "stale",
-    "--tasks-root", tasksRoot,
-  ]);
-  const paths = cli.getRunPaths(args.outDir);
-  const uuidPaths = cli.withRawSource(paths, uuid);
-  fs.mkdirSync(uuidPaths.dataDir, { recursive: true });
-  const uuidAuthorRawDir = path.join(paths.rawRoot, uuid, "author");
-  fs.mkdirSync(uuidAuthorRawDir, { recursive: true });
-  writeJson(paths.manifest, { command: "iiaide-wos" });
-  const csvPath = path.join(uuidPaths.dataDir, `${uuid}_wosid.csv`);
-  fs.writeFileSync(csvPath, "wosid\nWOS:A\n");
-  writeJson(paths.summary, {
-    ok: true,
-    method: "wos-js-export-fetchTxtBatches",
-    taskId: "stale",
-    uuid,
-    expectedCount: 1,
-    uniqueCount: 1,
-    summaryHref: args.url,
-    files: { wosidsCsv: csvPath },
-  });
-  fs.writeFileSync(path.join(uuidAuthorRawDir, "WOS_A.json"), JSON.stringify({ wosid: "WOS:A", authors: [] }));
-  cli.writeJson(uuidPaths.authorCheckpoint, {
-    total: 1,
-    records: {
-      "WOS:A": {
-        status: "completed",
-        wosid: "WOS:A",
-        rawJsonPath: `raw/${uuid}/author/WOS_A.json`,
-      },
-    },
-  });
-  writeJson(path.join(tasksRoot, "index.json"), {
-    version: 1,
-    tasks: [{
-      taskId: "stale",
-      taskDir: "stale",
-      uuid: "q",
-      url: "q",
-      status: "completed",
-      expectedCount: 1,
-      uniqueCount: 1,
-    }],
-  });
-  fs.writeFileSync(path.join(tasksRoot, "latest"), "stale\n");
-
-  const errors = [];
-  const originalError = console.error;
-  console.error = (message) => errors.push(message);
-  let result;
-  try {
-    result = await cli.runPipeline(args);
-  } finally {
-    console.error = originalError;
-  }
-
-  assert.equal(result.ok, true);
-  assert.equal(result.run.files.wosidsCsv, csvPath);
-  assert.equal(result.authors.totalWosIds, 1);
-  assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].uuid, uuid);
-  assert.deepEqual(errors, [
-    "WOS ID CSV already exists; skipping download.",
-    "Author records: total=1, completed=1, failed=0, selected=0, range=none, concurrency=1",
-  ]);
 });
 
 test("failed runs are recorded as failed", () => {

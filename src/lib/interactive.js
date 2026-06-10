@@ -6,16 +6,12 @@ const { color, isInteractive } = require("./terminal");
 const ORANGE = "33";
 const CLI_AUTHOR = "lyj";
 const CLI_VERSION_UPDATED_AT = "2026-06-10";
-const DEFAULT_AUTHOR_OPTIONS = {
+const DEFAULT_PARSE_OPTIONS = {
   concurrency: 1,
-  authorTimeoutMs: 20000,
+  recordTimeoutMs: 20000,
   cooldownMs: 250,
-  failureCooldownThreshold: 20,
-  failureCooldownMs: 60000,
   fromIndex: 1,
   limit: 0,
-  retryFailed: false,
-  failedOnly: false,
 };
 const CONTROL_BACK = Symbol.for("iiaide-wos.interactive.back");
 const CONTROL_QUIT = Symbol.for("iiaide-wos.interactive.quit");
@@ -243,72 +239,53 @@ async function askOptionalBoolean(rl, message, fallback = false) {
   }
 }
 
-function formatAuthorOptions(options = {}) {
-  const values = { ...DEFAULT_AUTHOR_OPTIONS, ...options };
+function formatParseOptions(options = {}) {
+  const values = { ...DEFAULT_PARSE_OPTIONS, ...options };
   return [
     `concurrency=${values.concurrency}`,
-    `timeout=${values.authorTimeoutMs}ms`,
+    `timeout=${values.recordTimeoutMs}ms`,
     `cooldown=${values.cooldownMs}ms`,
-    `failCool=${values.failureCooldownThreshold}/${values.failureCooldownMs}ms`,
     `from=${values.fromIndex}`,
     `limit=${values.limit || "all"}`,
-    `retryFailed=${values.retryFailed ? "yes" : "no"}`,
-    `failedOnly=${values.failedOnly ? "yes" : "no"}`,
   ].join(" | ");
 }
 
-function authorOptionsToArgs(options = {}) {
-  const values = { ...DEFAULT_AUTHOR_OPTIONS, ...options };
+function parseOptionsToArgs(options = {}) {
+  const values = { ...DEFAULT_PARSE_OPTIONS, ...options };
   const args = [
     "--concurrency", String(values.concurrency),
-    "--author-timeout-ms", String(values.authorTimeoutMs),
+    "--record-timeout-ms", String(values.recordTimeoutMs),
     "--cooldown-ms", String(values.cooldownMs),
-    "--failure-cooldown-threshold", String(values.failureCooldownThreshold),
-    "--failure-cooldown-ms", String(values.failureCooldownMs),
     "--from-index", String(values.fromIndex),
   ];
   if (values.limit) args.push("--limit", String(values.limit));
-  if (values.retryFailed) args.push("--retry-failed");
-  if (values.failedOnly) args.push("--failed-only");
   return args;
 }
 
-async function askAuthorOptions(rl, defaults = DEFAULT_AUTHOR_OPTIONS) {
-  const base = { ...DEFAULT_AUTHOR_OPTIONS, ...defaults };
-  stdout.write(`${color("36", "Author options:", stdout)} ${formatAuthorOptions(base)}\n`);
-  const change = await askOptionalBoolean(rl, "Change author download options? Enter uses defaults", false);
+async function askParseOptions(rl, defaults = DEFAULT_PARSE_OPTIONS) {
+  const base = { ...DEFAULT_PARSE_OPTIONS, ...defaults };
+  stdout.write(`${color("36", "Parse options:", stdout)} ${formatParseOptions(base)}\n`);
+  const change = await askOptionalBoolean(rl, "Change parse options? Enter uses defaults", false);
   if (isBackResult(change) || isQuitResult(change)) return change;
   if (!change) return [];
   const concurrency = await askOptionalInteger(rl, "Concurrency", base.concurrency, 1, 10);
   if (isBackResult(concurrency) || isQuitResult(concurrency)) return concurrency;
-  const authorTimeoutMs = await askOptionalInteger(rl, "Author timeout ms", base.authorTimeoutMs, 5000);
-  if (isBackResult(authorTimeoutMs) || isQuitResult(authorTimeoutMs)) return authorTimeoutMs;
+  const recordTimeoutMs = await askOptionalInteger(rl, "Record timeout ms", base.recordTimeoutMs, 5000);
+  if (isBackResult(recordTimeoutMs) || isQuitResult(recordTimeoutMs)) return recordTimeoutMs;
   const cooldownMs = await askOptionalInteger(rl, "Cooldown ms", base.cooldownMs, 0);
   if (isBackResult(cooldownMs) || isQuitResult(cooldownMs)) return cooldownMs;
-  const failureCooldownThreshold = await askOptionalInteger(rl, "Failure cooldown threshold 0=off", base.failureCooldownThreshold, 0);
-  if (isBackResult(failureCooldownThreshold) || isQuitResult(failureCooldownThreshold)) return failureCooldownThreshold;
-  const failureCooldownMs = await askOptionalInteger(rl, "Failure cooldown ms", base.failureCooldownMs, 0);
-  if (isBackResult(failureCooldownMs) || isQuitResult(failureCooldownMs)) return failureCooldownMs;
   const fromIndex = await askOptionalInteger(rl, "From WOS ID index", base.fromIndex, 1);
   if (isBackResult(fromIndex) || isQuitResult(fromIndex)) return fromIndex;
   const limit = await askOptionalInteger(rl, "Limit 0=all", base.limit, 0);
   if (isBackResult(limit) || isQuitResult(limit)) return limit;
-  const retryFailed = await askOptionalBoolean(rl, "Retry failed records", base.retryFailed);
-  if (isBackResult(retryFailed) || isQuitResult(retryFailed)) return retryFailed;
-  const failedOnly = await askOptionalBoolean(rl, "Only failed records", base.failedOnly);
-  if (isBackResult(failedOnly) || isQuitResult(failedOnly)) return failedOnly;
   const options = {
     concurrency,
-    authorTimeoutMs,
+    recordTimeoutMs,
     cooldownMs,
-    failureCooldownThreshold,
-    failureCooldownMs,
     fromIndex,
     limit,
-    retryFailed,
-    failedOnly,
   };
-  return authorOptionsToArgs(options);
+  return parseOptionsToArgs(options);
 }
 
 function isBackInput(value) {
@@ -524,9 +501,8 @@ async function askWorkflow(rl) {
   workflowGroup("1", "Download literature");
   workflowItem("1.1", "UUID - TXT format", "URL/UUID -> raw/<uuid>/full-record/*.txt and WOS IDs");
   workflowItem("1.2", "UUID - BIB format", "URL/UUID -> raw/<uuid>/bib/*.bib");
-  workflowGroup("2", "Export");
-  workflowItem("2.1", "Author & address", "URL/UUID -> TXT -> WOS IDs -> authors CSV");
-  workflowItem("2.2", "Article full record", "URL/UUID -> TXT -> WOS IDs -> record fields CSV");
+  workflowGroup("2", "Parse");
+  workflowItem("2.1", "WOS data", "URL/UUID -> TXT -> WOS IDs -> raw/wosdata JSON");
   workflowGroup("3", "Task manager");
   workflowItem("3.1", "New", "Create a fresh current task");
   workflowItem("3.2", "Switch", "Select an existing current task");
@@ -539,8 +515,8 @@ async function askWorkflow(rl) {
     const choice = (await ask(rl, "Select workflow")).toLowerCase();
     if (isBackInput(choice)) return CONTROL_BACK;
     if (isQuitInput(choice)) return CONTROL_QUIT;
-    if (["0.1", "1.1", "1.2", "2.1", "2.2", "3.1", "3.2", "3.3"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 0.1, 1.1, 1.2, 2.1, 2.2, 3.1, 3.2, 3.3, c to go back, or q to quit\n`);
+    if (["0.1", "1.1", "1.2", "2.1", "3.1", "3.2", "3.3"].includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose 0.1, 1.1, 1.2, 2.1, 3.1, 3.2, 3.3, c to go back, or q to quit\n`);
   }
 }
 
@@ -781,14 +757,14 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       return { refresh: true };
     }
     const sourceFlag = /^https?:\/\//i.test(source) ? "--url" : "--uuid";
-    const command = choice === "2.1" ? "pipeline" : (choice === "2.2" ? "records-pipeline" : (choice === "1.2" ? "bib" : "run"));
+    const command = choice === "2.1" ? "parse-pipeline" : (choice === "1.2" ? "bib" : "run");
     const result = [command, sourceFlag, source, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot];
     if (command !== "bib") result.push("--reuse-raw");
-    if (choice === "2.1" || choice === "2.2") {
-      const authorArgs = await askAuthorOptions(rl);
-      if (isBackResult(authorArgs)) return { refresh: true };
-      if (isQuitResult(authorArgs)) return null;
-      result.push(...authorArgs);
+    if (choice === "2.1") {
+      const parseArgs = await askParseOptions(rl);
+      if (isBackResult(parseArgs)) return { refresh: true };
+      if (isQuitResult(parseArgs)) return null;
+      result.push(...parseArgs);
     }
     if (sid) result.push("--sid", sid);
     return result;
@@ -803,9 +779,9 @@ module.exports = {
   interactiveArgs,
   isUserAbortError,
   askParameterOrCancel,
-  askAuthorOptions,
-  authorOptionsToArgs,
-  formatAuthorOptions,
+  askParseOptions,
+  parseOptionsToArgs,
+  formatParseOptions,
   formatRuntime,
   currentTaskSelection,
   isWosSourceLike,

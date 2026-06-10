@@ -9,7 +9,7 @@ For request-level equivalents of the WOS methods used by the CLI, see
 A task represents one complete WOS data-processing job:
 
 ```text
-input -> normalized WOS IDs -> author extraction -> validated task package
+input -> UUID WOSID index -> task-level WOS data JSON cache -> validated task package
 ```
 
 Inputs currently supported:
@@ -29,14 +29,12 @@ SID validation.
 All input methods converge on the same normalized file:
 
 ```text
-tasks/<task-id>/export/<uuid-or-task-id>/wosid/<uuid-or-task-id>_wosid.csv
+tasks/<task-id>/raw/<uuid-or-task-id>/full-record/<uuid-or-task-id>_wosid.csv
 ```
 
 This allows later commands to work independently of how the WOS IDs were
 obtained.
-When a repeated `run` finds complete raw full-record batches but the normalized
-CSV is missing, it rebuilds `export/<uuid>/wosid/<uuid>_wosid.csv`
-locally before attempting another WOS download.
+When a repeated `run` finds complete raw full-record batches but the WOSID index is missing, it rebuilds `raw/<uuid>/full-record/<uuid>_wosid.csv` locally before attempting another WOS download.
 
 ## URL And UUID Workflow
 
@@ -55,7 +53,7 @@ The `run` command:
 6. Calls the injected `window.wos.export.fetchTxtBatches` API in batches.
 7. Stores every raw batch under `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
 8. Parses the `UT` field into normalized WOS IDs.
-9. Writes the normalized WOSID CSV under `export/<uuid>/wosid/`,
+9. Writes the normalized WOSID CSV under `raw/<uuid>/full-record/`,
    plus metadata, logs, and a summary.
 
 This is more reliable than scrolling the result list because WOS result pages
@@ -75,7 +73,9 @@ CSV rules:
 - Duplicate WOS IDs are removed while preserving input order.
 - Import fails when no valid `WOS:<id>` values are found.
 
-The imported task can immediately be passed to `authors`.
+The imported task can immediately be passed to `parse`. If the next step is to
+parse WOS data, `parse --csv` can perform this import step and then parse the
+same WOSID list in one command.
 
 ## BibTeX Workflow
 
@@ -111,121 +111,58 @@ tasks/<task-id>/raw/<uuid>/bib/<uuid>_<start>_<end>.bib
 tasks/<task-id>/export/<uuid>/bib/<uuid>.bib
 ```
 
-## Author Workflow
+## WOS Data Parse Workflow
 
-The `authors` command reads the task's
-`export/<uuid-or-task-id>/wosid/<uuid-or-task-id>_wosid.csv` and opens
-each WOS full-record page.
+The `parse` command reads the task's WOSID CSV and opens each WOS full-record page through the injected browser-side `wos.js` parser. Its deliverable is raw structured JSON, not a CSV export.
 
-For every successfully processed WOS ID it writes:
+For every successfully processed WOS ID it writes one shared task-level file:
 
 ```text
-raw/<uuid>/author/<WOSID>.json
+raw/wosdata/<WOSID>.json
 ```
 
-It also maintains:
+The raw JSON mirrors the `wos.record.parseCurrentFullRecordPage()` object and is augmented with `wosid`, `url`, and `fetchedAt`. Because the files are keyed only by WOSID, separate UUID result sets in the same task reuse the same parsed record instead of downloading it repeatedly.
+
+The UUID's WOSID CSV remains the index for that result set:
 
 ```text
-export/<uuid>/author/checkpoint.json
-export/<uuid>/author/failures.json
-export/<uuid>/author/<uuid>_authors.csv
-export/<uuid>/author/<uuid>_authors_simple.csv
-export/<uuid>/author/<uuid>_authors.jsonl
+raw/<uuid>/full-record/<uuid>_wosid.csv
 ```
 
-The raw JSON is the checkpointed page extraction. During aggregation the CLI
-normalizes raw JSON in memory into:
-
-```text
-record -> authors[] -> addressDetails[] -> affiliations[]
-```
-
-The aggregate CSV and JSONL are rebuilt from raw JSON and expand this hierarchy
-into one row per author/address/affiliation relationship. The companion
-`export/<uuid>/author/<uuid>_authors_simple.csv` keeps only `wosid`,
-`authorIndex`, `address`, `affiliation`, `rorId`, and `correspondingAddress`;
-rows are included only when at least one of `address`, `affiliation`, `rorId`,
-or `correspondingAddress` is non-empty, then duplicate six-column rows are
-removed.
-
-Resume behavior:
-
-- Completed records are skipped.
-- Failed records are skipped unless `--retry-failed` or `--failed-only` is used.
-- `--force` refetches completed records.
-- Checkpoint and per-record JSON files are written during processing.
-- Aggregate CSV and JSONL files are regenerated at the end.
-
-`--concurrency` opens and processes multiple full-record pages at the same time.
-The default is `1`, which is steadier for a single WOS SID and browser profile;
-raise it only when you intentionally want multiple tabs.
-Each WOSID author page has a separate default `--author-timeout-ms 20000`
-deadline. A slow record is marked failed and the batch continues; rerun with
-`--failed-only` or `--retry-failed` to revisit failures.
-If a full-record page redirects back to `https://www.webofscience.com/wos/`,
-the CLI treats that WOSID as having no WOS data, marks it failed immediately,
-and does not wait for deeper author-page selectors. Author page extraction does
-not wait for WOS `networkidle`; it waits for the first useful signal: author
-content or a WOS root redirect.
-When 20 author records fail during one run, the CLI pauses for 60 seconds before
-continuing. Tune this with `--failure-cooldown-threshold` and
-`--failure-cooldown-ms`, or set the threshold to `0` to disable failure
-cooldown.
-The progress bar advances when records finish, so the visible completion events
-still appear one by one. `--from-index 1` is the default scan start for selecting
-work; resume still skips checkpointed `completed` records before building the
-work queue.
-
-In the interactive `2.1 Author & address` workflow, the CLI shows the
-default author options before the pipeline starts:
-
-```text
-concurrency=1 | timeout=20000ms | cooldown=250ms | failCool=20/60000ms | from=1 | limit=all | retryFailed=no | failedOnly=no
-```
-
-Press Enter to keep defaults, or choose to edit concurrency, per-author timeout,
-cooldown, failure cooldown, start index, limit, and retry filters for that run.
-
-## Article Full-Record Workflow
-
-The `records` command is parallel to `authors`: it reads the task's WOS ID CSV
-and opens each WOS full-record page, but its primary deliverable is the
-structured full-record JSON returned by the injected browser-side `wos.js`
-parser rather than author/address CSVs.
-
-For every successfully processed WOS ID it writes:
-
-```text
-raw/<uuid>/record/<WOSID>.json
-```
-
-It also maintains:
-
-```text
-export/<uuid>/record/checkpoint.json
-export/<uuid>/record/failures.json
-export/<uuid>/record/<uuid>_record_fields.csv
-export/<uuid>/record/<uuid>_record_fields.jsonl
-```
-
-The raw JSON mirrors the `wos.record.parseCurrentFullRecordPage()` object and is
-augmented with `wosid`, `url`, and `fetchedAt`. The CSV has one row per flattened
-JSON value with `wosid`, `section`, `field`, `value`, `values`, `links`, and
-`sourceId`.
-
-Use `records-pipeline` when starting from a URL or UUID:
+Use `parse-pipeline` when starting from a URL or UUID:
 
 ```bash
-iiaide-wos records-pipeline --uuid "<uuid>" --task "<task-id>"
+iiaide-wos parse-pipeline --uuid "<uuid>" --task "<task-id>"
 ```
 
-Use `records` when the task already has a WOS ID CSV:
+Use `parse` when the task already has a WOSID CSV:
 
 ```bash
-iiaide-wos records --task "<task-id>"
+iiaide-wos parse --task "<task-id>"
 ```
 
-In the interactive menu, use `2.2 Article full record`.
+Use `parse --csv` when starting from a local WOSID CSV:
+
+```bash
+iiaide-wos parse --csv "./input/wosids.csv" --task "<task-id>"
+```
+
+This normalizes the CSV into
+`raw/<task-id>/full-record/<task-id>_wosid.csv` before parsing that index. The
+parsed JSON still goes to the shared `raw/wosdata/<WOSID>.json` cache.
+
+Resume behavior is file-based:
+
+- Existing `raw/wosdata/<WOSID>.json` files are skipped.
+- `--force` refetches existing WOSID JSON files.
+- `--from-index` and `--limit` select a slice of the WOSID index.
+- Failures are recorded at `raw/<uuid>/full-record/<uuid>_parse_failures.json`.
+
+In the interactive menu, use `2.1 WOS data`. The default parse options are:
+
+```text
+concurrency=1 | timeout=20000ms | cooldown=250ms | from=1 | limit=all
+```
 
 ## Task Lifecycle
 
@@ -234,8 +171,8 @@ Typical task states:
 ```text
 created/importing/running
 completed/incomplete/failed
-authors-running
-authors-completed/authors-incomplete
+parse-running
+parse-completed/parse-incomplete
 ```
 
 The task index is stored in:
@@ -279,9 +216,8 @@ actions:
 1 Download literature
   1.1 UUID - TXT format
   1.2 UUID - BIB format
-2 Export
-  2.1 Author & address
-  2.2 Article full record
+2 Parse
+  2.1 WOS data
 3 Task manager
   3.1 New
   3.2 Switch
@@ -299,7 +235,7 @@ Interactive downloads reuse the current task by default. If the task already
 has a completed TXT or BibTeX export for the same UUID, the CLI prints the
 existing artifact path and skips SID validation and WOS download. If the input
 is a different UUID, the CLI appends that source to the same task and writes it
-under separate `raw/<uuid>/` and `export/<uuid>/` directories. Use `--force`
+under separate `raw/<uuid>/` directories, while parsed page JSON is shared under `raw/wosdata/`. Use `--force`
 only when you intentionally want to replace a managed task's existing outputs.
 For download workflows, pressing Enter at the `WOS summary URL or UUID` prompt
 uses the shown saved source when one exists. If no saved source is available,
@@ -316,28 +252,10 @@ workflow.
 For URL/UUID tasks it checks:
 
 - manifest and summary files
-- normalized WOS ID outputs
+- normalized WOS ID index
 - expected and actual WOS ID counts
 - raw WOS export batches
-- completed author checkpoint entries and their JSON files
-- aggregate author row count
-- record checkpoint summary and aggregate full-record field row count
-
-When `authors` starts, it reconciles the checkpoint with existing raw author
-JSON files. If checkpoint entries are missing but `raw/<uuid>/author/*.json` or
-older `raw/<uuid>/authors/*.json` files exist for the current WOS IDs, those
-records are marked completed before any WOS browser work begins. The author
-stage also accepts older `export/<uuid>/full-record/<uuid>_wosid.csv` and
-`data/<uuid>_wosid.csv` inputs when the current `export/<uuid>/wosid/` CSV is
-missing.
-
-During author extraction, the CLI opens visible full-record controls inside
-`snMainArticle` such as author identifiers, affiliation details, funding
-details, and hidden data fields. Each raw author JSON includes:
-
-- `recordFields`: generic section/field/value entries with source ids and links
-- `recordTables`: table headers and rows visible in the full record
-- `recordSections`: section-level text snapshots for audit fallback
+- task-level parsed WOS data JSON coverage
 
 For imported CSV tasks, raw WOS export batches are not required.
 
@@ -384,8 +302,8 @@ environments must use `--sid`, `WOS_SID`, or an existing config.
 
 All Playwright-backed WOS work uses the same workspace profile:
 `<tasksRoot>/.browser-profile` (profile name: `.browser-profile`). Login, SID
-validation, summary-page metadata, request-based export calls, and author page
-extraction should compose through that profile instead of creating isolated
+validation, summary-page metadata, request-based export calls, and page
+parsing should compose through that profile instead of creating isolated
 browser contexts or alternate profiles. Normal WOS work runs in background
 headless mode; only login and `--headed` runs open a visible browser.
 Single-shot CLI commands close the browser process when they finish, but the

@@ -3,6 +3,24 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.3.100 - 2026-06-10
+
+- Add `parse --csv <wosids.csv>` so a local WOSID CSV can be normalized into a
+  task WOSID index and parsed into the shared `raw/wosdata/<WOSID>.json` cache
+  in one command.
+- Make the parse summary explicitly report skipped cached WOS data records.
+
+## 0.3.99 - 2026-06-10
+
+- Move WOSID index CSV files from `export/<uuid>/wosid/` to
+  `raw/<uuid>/full-record/<uuid>_wosid.csv`, keeping the UUID result-set index
+  beside its raw full-record batches.
+- Replace UUID-scoped record JSON and flattened record field exports with a
+  task-level `raw/wosdata/<WOSID>.json` cache so repeated WOSIDs across UUIDs
+  are parsed once and reused.
+- Replace `records`/`records-pipeline` with `parse`/`parse-pipeline`, and remove
+  the author extraction command/workflow and generated author/record CSV exports.
+
 ## 0.3.98 - 2026-06-10
 
 - Route the CLI `records` extraction stage through the injected browser-side
