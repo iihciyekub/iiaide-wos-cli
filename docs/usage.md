@@ -29,7 +29,7 @@ SID validation.
 All input methods converge on the same normalized file:
 
 ```text
-tasks/<task-id>/data/<uuid-or-task-id>_wosid.csv
+tasks/<task-id>/export/<uuid-or-task-id>/full-record/<uuid-or-task-id>_wosid.csv
 ```
 
 This allows later commands to work independently of how the WOS IDs were
@@ -52,7 +52,8 @@ The `run` command:
 6. Calls the injected `window.wos.export.fetchTxtBatches` API in batches.
 7. Stores every raw batch under `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
 8. Parses the `UT` field into normalized WOS IDs.
-9. Writes the normalized WOSID CSV, metadata, logs, and a summary.
+9. Writes the normalized WOSID CSV under `export/<uuid>/full-record/`,
+   plus metadata, logs, and a summary.
 
 This is more reliable than scrolling the result list because WOS result pages
 are virtualized and may not render every card at once.
@@ -85,9 +86,9 @@ buttons or frontend click flows for the main download path. The browser-side
 wos.js helper owns WOS request details such as `saveToBibtex`; the CLI owns task
 file writing, progress logging, and final BibTeX composition.
 Batch files are kept under `raw/<uuid>/bib/`, then combined into one final BibTeX
-file. In the folded interactive menu, use `1.2 UUID - BIB format`; after source
-input it prints the resolved UUID before SID validation and then shows download
-progress for each WOS BibTeX batch.
+file under `export/<uuid>/bib/`. In the folded interactive menu, use
+`1.2 UUID - BIB format`; after source input it prints the resolved UUID before
+SID validation and then shows download progress for each WOS BibTeX batch.
 
 When `--limit` is omitted, `bib` requests records up to the WOS summary count.
 If WOS does not expose a count, the command stops instead of guessing the final
@@ -101,27 +102,29 @@ WOS Core Collection records summary URL/UUID and run the export again.
 
 ```text
 tasks/<task-id>/raw/<uuid>/bib/<uuid>_<start>_<end>.bib
-tasks/<task-id>/data/<uuid>.bib
+tasks/<task-id>/export/<uuid>/bib/<uuid>.bib
 ```
 
 ## Author Workflow
 
-The `authors` command reads the task's `data/<uuid-or-task-id>_wosid.csv` and opens each WOS full-record
-page.
+The `authors` command reads the task's
+`export/<uuid-or-task-id>/full-record/<uuid-or-task-id>_wosid.csv` and opens
+each WOS full-record page.
 
 For every successfully processed WOS ID it writes:
 
 ```text
-raw/<uuid>/authors/<WOSID>.json
+raw/<uuid>/author/<WOSID>.json
 ```
 
 It also maintains:
 
 ```text
-authors/checkpoint.json
-authors/failures.json
-authors/authors.csv
-authors/authors.jsonl
+export/<uuid>/author/checkpoint.json
+export/<uuid>/author/failures.json
+export/<uuid>/author/<uuid>_authors.csv
+export/<uuid>/author/<uuid>_authors_simple.csv
+export/<uuid>/author/<uuid>_authors.jsonl
 ```
 
 The raw JSON is the checkpointed page extraction. During aggregation the CLI
@@ -132,7 +135,12 @@ record -> authors[] -> addressDetails[] -> affiliations[]
 ```
 
 The aggregate CSV and JSONL are rebuilt from raw JSON and expand this hierarchy
-into one row per author/address/affiliation relationship.
+into one row per author/address/affiliation relationship. The companion
+`export/<uuid>/author/<uuid>_authors_simple.csv` keeps only `wosid`,
+`authorIndex`, `address`, `affiliation`, `rorId`, and `correspondingAddress`;
+rows are included only when at least one of `address`, `affiliation`, `rorId`,
+or `correspondingAddress` is non-empty, then duplicate six-column rows are
+removed.
 
 Resume behavior:
 
@@ -208,7 +216,8 @@ iiaide-wos validate --task <task-id>
 iiaide-wos clear --task <task-id>
 ```
 
-`clear` removes the managed task directory, deletes the task entry from
+`clear` prints the resolved task id, asks you to type that exact task id, then
+removes the managed task directory, deletes the task entry from
 `tasks/index.json`, and refreshes `tasks/latest` to the next remaining task. It
 refuses to remove directories that do not contain a `iiaide-wos` manifest.
 In the interactive menu, the `Task id` prompt accepts a numbered task selection
@@ -218,6 +227,8 @@ the folded workflow first, then shows the right task prompt for task-management
 actions:
 
 ```text
+0 Authentication
+  0.1 Check SID
 1 Download literature
   1.1 UUID - TXT format
   1.2 UUID - BIB format
@@ -230,6 +241,9 @@ actions:
 ```
 
 Download workflows run directly in the current task marked with `*`. Use
+`0.1 Check SID` to validate the saved SID from the startup panel and go
+directly into browser login when WOS rejects it.
+Use
 `3.1 New` before downloading when you want a fresh task, `3.2 Switch` to select
 an existing task, and `3.3 Clear` to remove an existing managed task.
 
@@ -286,6 +300,11 @@ Commands that interact with WOS require a current SID:
 explicit --sid -> WOS_SID -> tasks/config.json
 ```
 
+Use `iiaide-wos check` when you want an explicit SID health check. It runs the
+lightweight HTTP probe first, and if the SID is missing, invalid, or still not
+confirmed, it opens a visible WOS browser login, saves the refreshed SID, and
+returns the updated result as JSON.
+
 WOS domain/origin selection is separate from SID selection. Use
 `--wos-domain <domain>` or `WOS_DOMAIN` when only the host changes. Use
 `--base-url <origin>` only when the full origin must be explicit. Validated
@@ -315,11 +334,13 @@ when the helper file is stored somewhere else.
 
 When the interactive CLI starts, it runs a lightweight SID probe against the WOS
 initialization URL. This does not open Chromium and does not save or overwrite
-the SID. It only classifies startup status as `valid`, `invalid`, `unknown`, or
-`missing` for the dashboard. The dashboard shows the WOS origin URL under the
-left-side `iiaide-wos CLI` title, using the detected origin when the probe can
-resolve it. The left dashboard logo is highlighted in color-capable terminals.
-If no origin is confirmed, the CLI prints a hint to reopen WOS with
+the SID. The dashboard shows `Auth yes` only when that probe confirms the SID.
+If the SID is `missing`, `invalid`, or still `unknown`, the dashboard shows
+`Auth no` and the CLI prompts for either manual SID input or a visible WOS
+browser login. The dashboard shows the WOS origin URL under the left-side
+`iiaide-wos CLI` title, using the detected origin when the probe can resolve
+it. The left dashboard logo is highlighted in color-capable terminals. If no
+origin is confirmed, the CLI prints a hint to reopen WOS with
 `https://www.webofscience.com/wos/?Init=Yes&SrcApp=CR&SID=<SID>`. Commands that
 download or extract WOS data still perform strict persistent Playwright
 validation before doing network work.

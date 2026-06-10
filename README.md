@@ -26,13 +26,15 @@ Every workflow is managed as a task under `tasks/<task-id>/`.
 tasks/<task-id>/
   raw/<uuid>/full-record/   # <uuid>_<start>_<end>.txt raw WOS export batches
   raw/<uuid>/bib/           # <uuid>_<start>_<end>.bib BibTeX export batches
-  raw/<uuid>/authors/       # <WOSID>.json raw author page extraction
-  data/
-    <uuid>.bib              # combined BibTeX file
+  raw/<uuid>/author/        # <WOSID>.json raw author page extraction
+  export/<uuid>/full-record/
     <uuid>_wosid.csv        # normalized one-column WOS ID list
-  authors/
-    authors.csv             # expanded author/address/affiliation rows
-    authors.jsonl
+  export/<uuid>/bib/
+    <uuid>.bib              # combined BibTeX file
+  export/<uuid>/author/
+    <uuid>_authors.csv      # expanded author/address/affiliation rows
+    <uuid>_authors_simple.csv
+    <uuid>_authors.jsonl
     checkpoint.json         # resume state
     failures.json
   logs/progress.jsonl
@@ -45,7 +47,7 @@ normalized outputs, progress, failures, and metadata together.
 
 Artifact-producing commands print only the final artifact path on success:
 `bib` prints the combined `.bib`, `run` and `import` print the WOSID CSV, and
-`authors` or `pipeline` print `authors.csv`.
+`authors` or `pipeline` print the UUID-scoped author CSV.
 
 ## Install
 
@@ -62,7 +64,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.3.68
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.3.89
 npx playwright install chromium
 iiaide-wos
 ```
@@ -177,7 +179,13 @@ Console:
 window.sessionData.BasicProperties.SID
 ```
 
-Validate and save the SID:
+Check the saved SID and refresh it in a browser when WOS rejects it:
+
+```bash
+iiaide-wos check
+```
+
+Validate and save the SID directly:
 
 ```bash
 iiaide-wos sid
@@ -196,15 +204,20 @@ Each WOS Playwright context injects the browser-side helper from
 `window.asy_uuid.fetchCurrentPageInfo()` inside WOS pages. Use `--wosjs <file>`
 or `WOSJS_PATH` when that helper lives elsewhere.
 
-When the interactive CLI starts, it also runs a lightweight SID probe with a
-short HTTP timeout. The dashboard reports `SID valid`, `SID invalid`, or
-`SID not confirmed`, and shows the WOS origin URL under the left-side
-`iiaide-wos CLI` title. The left dashboard logo is highlighted in color-capable
-terminals. Export commands still run the stricter persistent Playwright
-validation before downloading. In menu mode, after a SID is entered manually or
-detected from a browser login, the CLI saves it and redraws the workspace
-dashboard so the refreshed authentication state is visible before the next
-workflow prompt.
+When the interactive CLI starts, it runs a lightweight SID probe with a
+short HTTP timeout. The dashboard shows `Auth yes` only when that probe
+confirms the SID. If the saved SID is missing, invalid, or still not
+confirmed, the panel shows `Auth no`, then the CLI lets you choose manual SID
+input or opening a WOS browser login. The left dashboard logo is highlighted in
+color-capable terminals, and the WOS origin URL appears under the left-side
+`iiaide-wos CLI` title. Export commands still run the stricter persistent
+Playwright validation before downloading. In menu mode, after a SID is entered
+manually or detected from a browser login, the CLI saves it and redraws the
+workspace dashboard so the refreshed authentication state is visible before the
+next workflow prompt.
+`iiaide-wos check` first runs the lightweight SID probe; when the SID is
+missing, invalid, or cannot be confirmed, it opens a visible WOS browser login,
+updates the saved SID, and prints the refreshed status as JSON.
 
 For scripts and CI, prompts are disabled. Supply authentication explicitly:
 
@@ -229,7 +242,7 @@ iiaide-wos run \
 ```
 
 The CLI downloads field-tagged full records and generates
-`tasks/demo-search/data/<uuid>_wosid.csv`.
+`tasks/demo-search/export/<uuid>/full-record/<uuid>_wosid.csv`.
 
 ### 2B. Create A Task From A WOS UUID
 
@@ -283,6 +296,12 @@ iiaide-wos authors --task "demo-search"
 
 The author stage is checkpointed. Running the same command again skips
 completed WOS IDs and continues incomplete work.
+It writes the full expanded
+`export/<uuid>/author/<uuid>_authors.csv` plus
+`export/<uuid>/author/<uuid>_authors_simple.csv`, a deduplicated six-column
+table containing only `wosid`, `authorIndex`, `address`, `affiliation`,
+`rorId`, and `correspondingAddress` rows where at least one address-detail
+field is present.
 `--concurrency` controls how many full-record pages are processed at the same
 time. It defaults to `1` because a single WOS SID/profile is usually steadier
 with one author tab; raise it only when you want to test parallel tabs. Each
@@ -338,7 +357,8 @@ iiaide-wos clear --task "demo-search"
 Use a stable `--task` name for work that may be resumed or shared. Use
 `--force` only when intentionally replacing CLI-managed task outputs.
 Use `clear` only when intentionally removing a CLI-managed task directory and
-its workspace index entry.
+its workspace index entry; before deletion the CLI prints the resolved task id
+and requires you to type that exact task id as confirmation.
 The interactive CLI always has a current task. On menu startup, iiaide-wos
 creates one if the workspace has no current task, shows it in the Current
 workspace panel as `Task ID`, and highlights it with a `*` marker in the task
@@ -356,6 +376,8 @@ each workflow prompt.
 The interactive workflow menu is grouped by command family:
 
 ```text
+0 Authentication
+  0.1 Check SID
 1 Download literature
   1.1 UUID - TXT format
   1.2 UUID - BIB format
@@ -368,6 +390,9 @@ The interactive workflow menu is grouped by command family:
 ```
 
 Download workflows run directly in the current task marked with `*`. Use
+`0.1 Check SID` when you want to validate the saved SID from the startup panel
+and jump straight into browser login if WOS rejects it.
+Use
 `3.1 New` before downloading when you want a fresh task, `3.2 Switch` to select
 an existing task, and `3.3 Clear` to remove an existing managed task.
 

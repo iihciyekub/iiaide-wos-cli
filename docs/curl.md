@@ -186,7 +186,8 @@ Batch behavior:
 
 - CLI writes raw batches to `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
 - CLI parses `UT` fields from the response text.
-- CLI writes a single WOSID CSV to `data/<uuid>_wosid.csv`.
+- CLI writes a single WOSID CSV to
+  `export/<uuid>/full-record/<uuid>_wosid.csv`.
 
 ## 4. WOS BibTeX Export
 
@@ -265,7 +266,7 @@ Batch behavior:
 - CLI counts BibTeX entries in each response.
 - Raw batches are named by the actual returned range:
   `raw/<uuid>/bib/<uuid>_<start>_<actual-end>.bib`.
-- CLI combines all batch files into `data/<uuid>.bib`.
+- CLI combines all batch files into `export/<uuid>/bib/<uuid>.bib`.
 
 Explicit range example:
 
@@ -333,7 +334,11 @@ Important distinction:
 - The CLI opens full-record pages with Playwright and reads rendered author,
   address, affiliation, email, ResearcherID, ORCID, and ROR data from the page.
 - CLI writes one raw author extraction JSON per WOS ID to
-  `raw/<uuid>/authors/<WOSID>.json`.
+  `raw/<uuid>/author/<WOSID>.json`.
+- CLI also writes `export/<uuid>/author/<uuid>_authors_simple.csv`, a
+  deduplicated six-column address/affiliation table with `wosid`,
+  `authorIndex`, `address`, `affiliation`, `rorId`, and
+  `correspondingAddress`.
 - If the full-record URL redirects back to `https://www.webofscience.com/wos/`,
   the CLI treats that WOS ID as no-data and stops waiting for author selectors.
 - Author extraction waits for navigation commit and then races author selectors
@@ -362,8 +367,9 @@ tasks/latest
 tasks/config.json
 tasks/<task-id>/manifest.json
 tasks/<task-id>/summary.json
-tasks/<task-id>/data/<uuid-or-task-id>_wosid.csv
-tasks/<task-id>/data/<uuid>.bib
+tasks/<task-id>/export/<uuid-or-task-id>/full-record/<uuid-or-task-id>_wosid.csv
+tasks/<task-id>/export/<uuid>/bib/<uuid>.bib
+tasks/<task-id>/export/<uuid>/author/<uuid>_authors_simple.csv
 ```
 
 ## 7. Debug Checklist

@@ -49,6 +49,13 @@ test("parses BibTeX export tasks", () => {
   assert.equal(args.outDir, path.join(root, "refs"));
 });
 
+test("parses SID check tasks", () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "check", "--tasks-root", root]);
+  assert.equal(args.command, "check");
+  assert.equal(args.tasksRoot, root);
+});
+
 test("supports WOS domain variables for generated URLs", () => {
   const root = temporaryDirectory();
   const args = cli.parseArgs([
@@ -259,6 +266,8 @@ test("interactive workflow menu uses folded command groups", () => {
   const argsMatch = source.match(/const choice = await askWorkflow[\s\S]*?return result;/);
   assert.ok(workflowMatch, "askWorkflow source should be present");
   assert.ok(argsMatch, "interactiveArgs workflow branch should be present");
+  assert.match(workflowMatch[0], /Authentication/);
+  assert.match(workflowMatch[0], /0\.1", "Check SID/);
   assert.match(workflowMatch[0], /Download literature/);
   assert.match(workflowMatch[0], /1\.1", "UUID - TXT format/);
   assert.match(workflowMatch[0], /1\.2", "UUID - BIB format/);
@@ -266,8 +275,10 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(workflowMatch[0], /3\.1", "New/);
   assert.match(workflowMatch[0], /3\.2", "Switch/);
   assert.match(workflowMatch[0], /3\.3", "Clear/);
-  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 2\.1, 3\.1, 3\.2, 3\.3/);
+  assert.match(workflowMatch[0], /choose 0\.1, 1\.1, 1\.2, 2\.1, 3\.1, 3\.2, 3\.3/);
   assert.doesNotMatch(workflowMatch[0], /Download WOS IDs/);
+  assert.match(argsMatch[0], /choice === "0\.1"/);
+  assert.match(argsMatch[0], /return \["check", "--tasks-root", activeWorkspace\.tasksRoot\]/);
   assert.match(argsMatch[0], /choice === "3\.1"/);
   assert.match(argsMatch[0], /mode: "new"/);
   assert.match(argsMatch[0], /choice === "3\.2"/);
@@ -832,6 +843,59 @@ test("quick SID validation treats login pages as unknown without HTTP rejection"
   assert.match(result.message, /login page/);
 });
 
+test("checkSid returns immediately when the lightweight SID probe is valid", async () => {
+  const args = cli.parseArgs(["node", "cli", "check", "--tasks-root", temporaryDirectory()]);
+  const result = await cli.checkSid(args, {
+    async quickValidateSid() {
+      return {
+        status: "valid",
+        sidSource: "config",
+        href: "https://www.webofscience.com/wos/",
+        message: "SID accepted by WOS",
+      };
+    },
+    async validateAndSaveSid() {
+      assert.fail("valid SID should not trigger browser validation");
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "valid");
+  assert.equal(result.checkedWith, "http-probe");
+  assert.equal(result.sidSource, "config");
+});
+
+test("checkSid refreshes an invalid SID through the browser validation flow", async () => {
+  const args = cli.parseArgs(["node", "cli", "check", "--tasks-root", temporaryDirectory()]);
+  const messages = [];
+  const result = await cli.checkSid(args, {
+    async quickValidateSid() {
+      return {
+        status: "invalid",
+        message: "SID was rejected by WOS",
+      };
+    },
+    async validateAndSaveSid() {
+      return {
+        ok: true,
+        sidSource: "browser",
+        config: "/tmp/config.json",
+        href: "https://www.webofscience.com/wos/",
+        sid: "[saved]",
+      };
+    },
+    report(message) {
+      messages.push(message);
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "refreshed");
+  assert.equal(result.checkedWith, "browser-validation");
+  assert.equal(result.initialStatus, "invalid");
+  assert.match(messages.join("\n"), /Opening a WOS browser login/);
+});
+
 test("masks SID values for dashboard display", () => {
   assert.equal(cli.maskSid("saved-sid"), "save...-sid");
   assert.equal(cli.maskSid("abc"), "a***c");
@@ -919,6 +983,63 @@ test("expands author address and affiliation hierarchy", () => {
   }]);
   assert.equal(rows.length, 2);
   assert.deepEqual(rows.map((row) => row.affiliation), ["One", "Two"]);
+});
+
+test("builds deduplicated simple author rows with address details only", () => {
+  const rows = cli.simpleAuthorRows([
+    {
+      wosid: "WOS:ABC",
+      authorIndex: 1,
+      address: "Address",
+      affiliation: "Affiliation",
+      rorId: "https://ror.org/1",
+      correspondingAddress: "",
+      fullName: "Ignored",
+    },
+    {
+      wosid: "WOS:ABC",
+      authorIndex: 1,
+      address: "Address",
+      affiliation: "Affiliation",
+      rorId: "https://ror.org/1",
+      correspondingAddress: "",
+    },
+    {
+      wosid: "WOS:DEF",
+      authorIndex: 2,
+      address: "",
+      affiliation: "",
+      rorId: "",
+      correspondingAddress: "",
+    },
+    {
+      wosid: "WOS:GHI",
+      authorIndex: 3,
+      address: "",
+      affiliation: "",
+      rorId: "",
+      correspondingAddress: "Corresponding Address",
+    },
+  ]);
+
+  assert.deepEqual(rows, [
+    {
+      wosid: "WOS:ABC",
+      authorIndex: 1,
+      address: "Address",
+      affiliation: "Affiliation",
+      rorId: "https://ror.org/1",
+      correspondingAddress: "",
+    },
+    {
+      wosid: "WOS:GHI",
+      authorIndex: 3,
+      address: "",
+      affiliation: "",
+      rorId: "",
+      correspondingAddress: "Corresponding Address",
+    },
+  ]);
 });
 
 test("reports corrupt JSON instead of silently replacing it", () => {
@@ -1023,7 +1144,7 @@ test("artifact commands print final artifact paths instead of JSON", async () =>
     console.log = originalLog;
   }
 
-  assert.equal(output.trim(), path.join(tasksRoot, "imported", "data", "imported_wosid.csv"));
+  assert.equal(output.trim(), path.join(tasksRoot, "imported", "export", "imported", "full-record", "imported_wosid.csv"));
   assert.doesNotMatch(output, /"ok"|"wosidsCsv"/);
 });
 
@@ -1045,20 +1166,13 @@ test("clear removes a managed task directory and refreshes latest", async () => 
   });
   fs.writeFileSync(path.join(tasksRoot, "latest"), "old-task\n");
 
-  const args = cli.parseArgs(["node", "cli", "clear", "--task", "old-task", "--tasks-root", tasksRoot]);
-  const originalLog = console.log;
-  let output = "";
-  console.log = (value = "") => {
-    output += `${value}\n`;
-  };
-  try {
-    const exitCode = await cli.executeCommand(args);
-    assert.equal(exitCode, 0);
-  } finally {
-    console.log = originalLog;
-  }
+  const result = await cli.confirmAndClearTask(
+    cli.parseArgs(["node", "cli", "clear", "--task", "old-task", "--tasks-root", tasksRoot]),
+    async () => "old-task",
+    () => {}
+  );
 
-  assert.equal(output.trim(), oldDir);
+  assert.equal(result.taskDir, oldDir);
   assert.equal(fs.existsSync(oldDir), false);
   assert.equal(fs.existsSync(nextDir), true);
   assert.deepEqual(cli.readTaskIndex(tasksRoot).tasks.map((task) => task.taskId), ["next-task"]);
@@ -1084,6 +1198,35 @@ test("clear removes latest when the final managed task is cleared", () => {
   assert.deepEqual(cli.readTaskIndex(tasksRoot).tasks, []);
 });
 
+test("clear requires typing the resolved task id before removal", async () => {
+  const tasksRoot = temporaryDirectory();
+  const taskDir = path.join(tasksRoot, "confirm-task");
+  fs.mkdirSync(taskDir, { recursive: true });
+  writeJson(path.join(taskDir, "manifest.json"), { command: "iiaide-wos" });
+  writeJson(path.join(tasksRoot, "index.json"), {
+    version: 1,
+    tasks: [{ taskId: "confirm-task", taskDir: "confirm-task" }],
+  });
+
+  await assert.rejects(
+    () => cli.confirmAndClearTask(
+      cli.parseArgs(["node", "cli", "clear", "--task", "confirm-task", "--tasks-root", tasksRoot]),
+      async () => "wrong-task",
+      () => {}
+    ),
+    /Task clear cancelled/
+  );
+  assert.equal(fs.existsSync(taskDir), true);
+
+  const result = await cli.confirmAndClearTask(
+    cli.parseArgs(["node", "cli", "clear", "--task", "confirm-task", "--tasks-root", tasksRoot]),
+    async () => "confirm-task",
+    () => {}
+  );
+  assert.equal(result.taskId, "confirm-task");
+  assert.equal(fs.existsSync(taskDir), false);
+});
+
 test("clear rejects unmanaged task directories", () => {
   const tasksRoot = temporaryDirectory();
   const taskDir = path.join(tasksRoot, "unmanaged");
@@ -1105,7 +1248,7 @@ test("validate resolves portable relative author checkpoint paths", () => {
   const root = temporaryDirectory();
   const tasksRoot = path.join(root, "tasks");
   const taskDir = path.join(tasksRoot, "portable");
-  const paths = cli.getRunPaths(taskDir);
+  const paths = cli.withRawSource(cli.getRunPaths(taskDir), "portable");
   fs.mkdirSync(paths.dataDir, { recursive: true });
   writeJson(path.join(tasksRoot, "index.json"), {
     version: 1,
@@ -1114,7 +1257,7 @@ test("validate resolves portable relative author checkpoint paths", () => {
   writeJson(paths.manifest, { command: "iiaide-wos" });
   writeJson(paths.summary, { method: "imported-wosid-csv", taskId: "portable", expectedCount: 1, uniqueCount: 1 });
   fs.writeFileSync(path.join(paths.dataDir, "portable_wosid.csv"), "wosid\nWOS:ABC\n");
-  const portableAuthorRawDir = path.join(paths.rawRoot, "portable", "authors");
+  const portableAuthorRawDir = path.join(paths.rawRoot, "portable", "author");
   fs.mkdirSync(portableAuthorRawDir, { recursive: true });
   fs.writeFileSync(path.join(portableAuthorRawDir, "WOS_ABC.json"), JSON.stringify({ wosid: "WOS:ABC", authors: [] }));
   writeJson(paths.authorCheckpoint, {
@@ -1122,7 +1265,7 @@ test("validate resolves portable relative author checkpoint paths", () => {
       "WOS:ABC": {
         status: "completed",
         wosid: "WOS:ABC",
-        rawJsonPath: "raw/portable/authors/WOS_ABC.json",
+        rawJsonPath: "raw/portable/author/WOS_ABC.json",
       },
     },
   });
@@ -1137,10 +1280,10 @@ test("validate accepts BibTeX batch tasks", () => {
   const root = temporaryDirectory();
   const tasksRoot = path.join(root, "tasks");
   const taskDir = path.join(tasksRoot, "bib-task");
-  const paths = cli.getRunPaths(taskDir);
+  const paths = cli.withRawSource(cli.getRunPaths(taskDir), "query");
   const queryBibDir = path.join(paths.rawRoot, "query", "bib");
   fs.mkdirSync(queryBibDir, { recursive: true });
-  fs.mkdirSync(paths.dataDir, { recursive: true });
+  fs.mkdirSync(paths.bibExportDir, { recursive: true });
   writeJson(path.join(tasksRoot, "index.json"), {
     version: 1,
     tasks: [{ taskId: "bib-task", taskDir: "bib-task", uuid: "query" }],
@@ -1154,7 +1297,7 @@ test("validate accepts BibTeX batch tasks", () => {
     batchCount: 1,
   });
   fs.writeFileSync(path.join(queryBibDir, "query_1_2.bib"), "@article{demo}\n");
-  fs.writeFileSync(path.join(paths.dataDir, "query.bib"), "@article{demo}\n");
+  fs.writeFileSync(path.join(paths.bibExportDir, "query.bib"), "@article{demo}\n");
 
   const result = cli.validateTask(cli.parseArgs([
     "node", "cli", "validate", "--task", "bib-task", "--tasks-root", tasksRoot,
@@ -1162,7 +1305,7 @@ test("validate accepts BibTeX batch tasks", () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.bibBatches, 1);
-  assert.equal(result.bibFile, path.join(paths.dataDir, "query.bib"));
+  assert.equal(result.bibFile, path.join(paths.bibExportDir, "query.bib"));
   assert.equal(result.wosids, 0);
 });
 
@@ -1175,8 +1318,8 @@ test("completed author tasks finish locally without a SID", async () => {
     "node", "cli", "import", "--csv", csvPath, "--task", "complete", "--tasks-root", tasksRoot,
   ]);
   cli.importWosIds(importArgs);
-  const paths = cli.getRunPaths(importArgs.outDir);
-  const completeAuthorRawDir = path.join(paths.rawRoot, "complete", "authors");
+  const paths = cli.withRawSource(cli.getRunPaths(importArgs.outDir), "complete");
+  const completeAuthorRawDir = path.join(paths.rawRoot, "complete", "author");
   writeJson(path.join(completeAuthorRawDir, "WOS_ABC.json"), { wosid: "WOS:ABC", authors: [] });
   writeJson(paths.authorCheckpoint, {
     total: 1,
@@ -1184,7 +1327,7 @@ test("completed author tasks finish locally without a SID", async () => {
       "WOS:ABC": {
         status: "completed",
         wosid: "WOS:ABC",
-        rawJsonPath: "raw/complete/authors/WOS_ABC.json",
+        rawJsonPath: "raw/complete/author/WOS_ABC.json",
       },
     },
   });
@@ -1197,6 +1340,9 @@ test("completed author tasks finish locally without a SID", async () => {
   assert.equal(result.completed, 1);
   assert.equal(fs.existsSync(path.join(paths.authorsDir, "normalized-json")), false);
   assert.equal(fs.existsSync(paths.authorsCsv), true);
+  assert.equal(fs.existsSync(paths.authorsSimpleCsv), true);
+  assert.equal(path.basename(result.authorsCsv), "complete_authors.csv");
+  assert.equal(path.basename(result.authorsSimpleCsv), "complete_authors_simple.csv");
   assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "authors-completed");
 });
 
@@ -1204,7 +1350,7 @@ test("force cleanup preserves unrelated files in a managed output directory", ()
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
   fs.mkdirSync(paths.rawDir, { recursive: true });
-  fs.mkdirSync(paths.authorsDir, { recursive: true });
+  fs.mkdirSync(paths.exportRoot, { recursive: true });
   fs.writeFileSync(path.join(paths.rawDir, "batch.txt"), "data");
   fs.writeFileSync(path.join(root, "keep-me.txt"), "user data");
   writeJson(paths.summary, { ok: true });
@@ -1212,7 +1358,7 @@ test("force cleanup preserves unrelated files in a managed output directory", ()
 
   cli.cleanRunLayout(paths);
   assert.equal(fs.existsSync(paths.rawDir), false);
-  assert.equal(fs.existsSync(paths.authorsDir), false);
+  assert.equal(fs.existsSync(paths.exportRoot), false);
   assert.equal(fs.existsSync(paths.summary), false);
   assert.equal(fs.readFileSync(path.join(root, "keep-me.txt"), "utf8"), "user data");
 });
@@ -1286,9 +1432,9 @@ test("reuse-raw preserves expected count and stores a relative task path", async
     "--tasks-root", tasksRoot, "--reuse-raw", "--force",
   ]);
   const paths = cli.getRunPaths(args.outDir);
+  const queryPaths = cli.withRawSource(paths, "query");
   const queryRawDir = path.join(paths.rawRoot, "query", "full-record");
   fs.mkdirSync(queryRawDir, { recursive: true });
-  fs.mkdirSync(paths.dataDir, { recursive: true });
   writeJson(paths.summary, { expectedCount: 2, rowText: "2 results", summaryHref: args.url });
   fs.writeFileSync(path.join(queryRawDir, "query_1_2.txt"), "UT WOS:A\nUT WOS:B\n");
 
@@ -1296,11 +1442,11 @@ test("reuse-raw preserves expected count and stores a relative task path", async
   assert.equal(result.ok, true);
   assert.equal(result.expectedCount, 2);
   assert.equal(result.uniqueCount, 2);
-  assert.equal(result.files.wosidsCsv, path.join(args.outDir, "data", "query_wosid.csv"));
+  assert.equal(result.files.wosidsCsv, path.join(queryPaths.fullRecordExportDir, "query_wosid.csv"));
   assert.deepEqual(cli.readWosIdsCsv(result.files.wosidsCsv), ["WOS:A", "WOS:B"]);
-  assert.equal(fs.existsSync(path.join(args.outDir, "data", "wosids_detailed.csv")), false);
-  assert.equal(fs.existsSync(path.join(args.outDir, "data", "wosids.json")), false);
-  assert.equal(fs.existsSync(path.join(args.outDir, "data", "full_records.txt")), false);
+  assert.equal(fs.existsSync(path.join(queryPaths.fullRecordExportDir, "wosids_detailed.csv")), false);
+  assert.equal(fs.existsSync(path.join(queryPaths.fullRecordExportDir, "wosids.json")), false);
+  assert.equal(fs.existsSync(path.join(queryPaths.fullRecordExportDir, "full_records.txt")), false);
   assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].taskDir, "reuse");
 });
 
@@ -1310,7 +1456,7 @@ test("completed WOS ID task is reused without refetching", async () => {
     "node", "cli", "run", "--uuid", "query", "--task", "complete-run",
     "--tasks-root", tasksRoot,
   ]);
-  const paths = cli.getRunPaths(args.outDir);
+  const paths = cli.withRawSource(cli.getRunPaths(args.outDir), "query");
   fs.mkdirSync(paths.dataDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
   writeJson(paths.manifest, { command: "iiaide-wos" });
@@ -1347,7 +1493,7 @@ test("completed WOS ID command returns before SID preparation", async () => {
     "node", "cli", "run", "--uuid", "query", "--task", "complete-command",
     "--tasks-root", tasksRoot,
   ]);
-  const paths = cli.getRunPaths(args.outDir);
+  const paths = cli.withRawSource(cli.getRunPaths(args.outDir), "query");
   fs.mkdirSync(paths.dataDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
   writeJson(paths.manifest, { command: "iiaide-wos" });
@@ -1389,11 +1535,11 @@ test("completed BibTeX task is reused without refetching", async () => {
     "node", "cli", "bib", "--uuid", "query", "--task", "complete-bib",
     "--tasks-root", tasksRoot,
   ]);
-  const paths = cli.getRunPaths(args.outDir);
-  fs.mkdirSync(paths.dataDir, { recursive: true });
+  const paths = cli.withRawSource(cli.getRunPaths(args.outDir), "query");
+  fs.mkdirSync(paths.bibExportDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
   writeJson(paths.manifest, { command: "iiaide-wos", operation: "bib" });
-  const bibPath = path.join(paths.dataDir, "query.bib");
+  const bibPath = path.join(paths.bibExportDir, "query.bib");
   fs.writeFileSync(bibPath, "@article{demo}\n");
   writeJson(paths.summary, {
     ok: true,
@@ -1425,11 +1571,11 @@ test("completed BibTeX command returns before SID preparation", async () => {
     "node", "cli", "bib", "--uuid", "query", "--task", "complete-bib-command",
     "--tasks-root", tasksRoot,
   ]);
-  const paths = cli.getRunPaths(args.outDir);
-  fs.mkdirSync(paths.dataDir, { recursive: true });
+  const paths = cli.withRawSource(cli.getRunPaths(args.outDir), "query");
+  fs.mkdirSync(paths.bibExportDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
   writeJson(paths.manifest, { command: "iiaide-wos", operation: "bib" });
-  const bibPath = path.join(paths.dataDir, "query.bib");
+  const bibPath = path.join(paths.bibExportDir, "query.bib");
   fs.writeFileSync(bibPath, "@article{demo}\n");
   writeJson(paths.summary, {
     ok: true,
@@ -1467,6 +1613,7 @@ test("managed current task placeholder can be reused without force", async () =>
     "--tasks-root", tasksRoot, "--reuse-raw",
   ]);
   const paths = cli.getRunPaths(args.outDir);
+  const queryPaths = cli.withRawSource(paths, "query");
   const queryRawDir = path.join(paths.rawRoot, "query", "full-record");
   fs.mkdirSync(queryRawDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
@@ -1477,7 +1624,7 @@ test("managed current task placeholder can be reused without force", async () =>
   const result = await cli.run(args);
 
   assert.equal(result.ok, true);
-  assert.equal(result.files.wosidsCsv, path.join(paths.dataDir, "query_wosid.csv"));
+  assert.equal(result.files.wosidsCsv, path.join(queryPaths.fullRecordExportDir, "query_wosid.csv"));
 });
 
 test("reuse-raw refuses partial batches without marking complete", async () => {
@@ -1487,6 +1634,7 @@ test("reuse-raw refuses partial batches without marking complete", async () => {
     "--tasks-root", tasksRoot, "--reuse-raw",
   ]);
   const paths = cli.getRunPaths(args.outDir);
+  const queryPaths = cli.withRawSource(paths, "query");
   const queryRawDir = path.join(paths.rawRoot, "query", "full-record");
   fs.mkdirSync(queryRawDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
@@ -1498,7 +1646,7 @@ test("reuse-raw refuses partial batches without marking complete", async () => {
     () => cli.run(args),
     /Incomplete raw batches/
   );
-  assert.equal(fs.existsSync(path.join(paths.dataDir, "query_wosid.csv")), false);
+  assert.equal(fs.existsSync(path.join(queryPaths.fullRecordExportDir, "query_wosid.csv")), false);
 });
 
 test("BibTeX export refuses incomplete downloaded record counts", () => {
@@ -1517,19 +1665,20 @@ test("pipeline resumes from raw batches and completed author checkpoint", async 
     "--tasks-root", tasksRoot, "--reuse-raw", "--force",
   ]);
   const paths = cli.getRunPaths(args.outDir);
+  const queryPaths = cli.withRawSource(paths, "query");
   const queryRawDir = path.join(paths.rawRoot, "query", "full-record");
   fs.mkdirSync(queryRawDir, { recursive: true });
-  const queryAuthorRawDir = path.join(paths.rawRoot, "query", "authors");
+  const queryAuthorRawDir = path.join(paths.rawRoot, "query", "author");
   fs.mkdirSync(queryAuthorRawDir, { recursive: true });
   fs.writeFileSync(path.join(queryRawDir, "query_1_1.txt"), "UT WOS:A\n");
   fs.writeFileSync(path.join(queryAuthorRawDir, "WOS_A.json"), JSON.stringify({ wosid: "WOS:A", authors: [] }));
-  cli.writeJson(paths.authorCheckpoint, {
+  cli.writeJson(queryPaths.authorCheckpoint, {
     total: 1,
     records: {
       "WOS:A": {
         status: "completed",
         wosid: "WOS:A",
-        rawJsonPath: "raw/query/authors/WOS_A.json",
+        rawJsonPath: "raw/query/author/WOS_A.json",
       },
     },
   });
@@ -1550,11 +1699,12 @@ test("pipeline authors use completed run CSV instead of stale task UUID", async 
     "--tasks-root", tasksRoot,
   ]);
   const paths = cli.getRunPaths(args.outDir);
-  fs.mkdirSync(paths.dataDir, { recursive: true });
-  const uuidAuthorRawDir = path.join(paths.rawRoot, uuid, "authors");
+  const uuidPaths = cli.withRawSource(paths, uuid);
+  fs.mkdirSync(uuidPaths.dataDir, { recursive: true });
+  const uuidAuthorRawDir = path.join(paths.rawRoot, uuid, "author");
   fs.mkdirSync(uuidAuthorRawDir, { recursive: true });
   writeJson(paths.manifest, { command: "iiaide-wos" });
-  const csvPath = path.join(paths.dataDir, `${uuid}_wosid.csv`);
+  const csvPath = path.join(uuidPaths.dataDir, `${uuid}_wosid.csv`);
   fs.writeFileSync(csvPath, "wosid\nWOS:A\n");
   writeJson(paths.summary, {
     ok: true,
@@ -1567,13 +1717,13 @@ test("pipeline authors use completed run CSV instead of stale task UUID", async 
     files: { wosidsCsv: csvPath },
   });
   fs.writeFileSync(path.join(uuidAuthorRawDir, "WOS_A.json"), JSON.stringify({ wosid: "WOS:A", authors: [] }));
-  cli.writeJson(paths.authorCheckpoint, {
+  cli.writeJson(uuidPaths.authorCheckpoint, {
     total: 1,
     records: {
       "WOS:A": {
         status: "completed",
         wosid: "WOS:A",
-        rawJsonPath: `raw/${uuid}/authors/WOS_A.json`,
+        rawJsonPath: `raw/${uuid}/author/WOS_A.json`,
       },
     },
   });
@@ -1691,22 +1841,31 @@ test("interactive URL or UUID prompt supports saved source fallback", () => {
 test("interactive workflow does not print saved SID noise", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
   assert.doesNotMatch(source, /saved SID will be used/);
-  assert.match(source, /workspace\.hasSavedSid/);
+  assert.match(source, /workspaceSidStatus/);
 });
 
 test("interactive SID setup saves and refreshes the workspace panel", () => {
   const interactiveSource = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
   const menuSource = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const sidBranch = interactiveSource.match(/if \(!workspace\.hasSavedSid\)[\s\S]*?const sourceFallback/);
+  const sidBranch = interactiveSource.match(/const sidStatus = workspaceSidStatus\(activeWorkspace\)[\s\S]*?const choice = await askWorkflow/);
   const helperBranch = menuSource.match(/async saveSid\(sid\)[\s\S]*?setCurrentTask/);
-  assert.ok(sidBranch, "interactive missing-SID branch should be present");
+  assert.ok(sidBranch, "interactive SID validation branch should be present");
   assert.ok(helperBranch, "interactive saveSid helper should be present");
   assert.match(sidBranch[0], /helpers\.saveSid/);
+  assert.match(sidBranch[0], /sidStatus !== "valid"/);
   assert.match(sidBranch[0], /saved\. Refreshing workspace panel/);
   assert.match(sidBranch[0], /return \{ refresh: true \}/);
   assert.match(helperBranch[0], /saveSidConfig\(menuArgs, sid\)/);
   assert.match(helperBranch[0], /quickValidateSid\(menuArgs\)/);
   assert.match(helperBranch[0], /workspaceStatus\(menuArgs, refreshedSidCheck\)/);
+});
+
+test("interactive startup no longer auto-opens a browser when SID is invalid", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const match = source.match(/async function runInteractiveMenu[\s\S]*?\n}\n\nasync function main/);
+  assert.ok(match, "runInteractiveMenu source should be present");
+  assert.match(match[0], /const sidCheck = await quickValidateSid\(menuArgs\)/);
+  assert.doesNotMatch(match[0], /prepareWosSession\(menuArgs, \{ keepAlive: true, visible: true \}\)/);
 });
 
 test("terminal status helpers use plain text outside a TTY", async () => {

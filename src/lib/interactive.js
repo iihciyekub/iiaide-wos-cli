@@ -83,13 +83,17 @@ function kvLine(label, value, labelWidth = 10) {
 
 function sidOkLabel(status) {
   if (status === "valid") return "yes";
-  if (status === "invalid" || status === "missing") return "no";
-  if (status === "unknown") return "unknown";
+  if (status === "invalid" || status === "missing" || status === "unknown") return "no";
   return "no";
 }
 
 function sidCheckLine(status, sidMasked) {
   return `SID check: Auth ${sidOkLabel(status)} | SID ${sidMasked || "none"}`;
+}
+
+function workspaceSidStatus(workspace = {}) {
+  const sidCheck = workspace.sidCheck || {};
+  return sidCheck.status || (workspace.hasSavedSid ? "unknown" : "missing");
 }
 
 function formatRuntime(value = 0) {
@@ -121,7 +125,7 @@ function printHeader(version, workspace = {}) {
   const workspacePath = workspace.tasksRoot || `${process.cwd()}/tasks`;
   const currentTask = workspace.currentTask || workspace.latestTask || "";
   const sidCheck = workspace.sidCheck || {};
-  const sidStatus = sidCheck.status || (workspace.hasSavedSid ? "unknown" : "missing");
+  const sidStatus = workspaceSidStatus(workspace);
   const sidMasked = sidCheck.sidMasked || workspace.sidMasked || "";
   const sidOrigin = sidCheck.origin || workspace.wosOrigin || "";
   const originUrl = sidOrigin || workspace.baseUrl || "https://www.webofscience.com";
@@ -515,6 +519,8 @@ function workflowItem(value, label, description) {
 }
 
 async function askWorkflow(rl) {
+  workflowGroup("0", "Authentication");
+  workflowItem("0.1", "Check SID", "Probe the saved SID and refresh it through browser login when needed");
   workflowGroup("1", "Download literature");
   workflowItem("1.1", "UUID - TXT format", "URL/UUID -> raw/<uuid>/full-record/*.txt and WOS IDs");
   workflowItem("1.2", "UUID - BIB format", "URL/UUID -> raw/<uuid>/bib/*.bib");
@@ -532,8 +538,8 @@ async function askWorkflow(rl) {
     const choice = (await ask(rl, "Select workflow")).toLowerCase();
     if (isBackInput(choice)) return CONTROL_BACK;
     if (isQuitInput(choice)) return CONTROL_QUIT;
-    if (["1.1", "1.2", "2.1", "3.1", "3.2", "3.3"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2.1, 3.1, 3.2, 3.3, c to go back, or q to quit\n`);
+    if (["0.1", "1.1", "1.2", "2.1", "3.1", "3.2", "3.3"].includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose 0.1, 1.1, 1.2, 2.1, 3.1, 3.2, 3.3, c to go back, or q to quit\n`);
   }
 }
 
@@ -572,6 +578,19 @@ async function confirmAction(message, defaultYes = true) {
       if (isQuitInput(answer)) return CONTROL_QUIT;
       stdout.write(`${color("33", "Required:", stdout)} enter y, n, c to go back, or q to quit\n`);
     }
+  } finally {
+    rl.close();
+  }
+}
+
+async function promptConfirmationText(message) {
+  if (!isInteractive(stdout) || !stdin.isTTY) return "";
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+  try {
+    const answer = (await rl.question(`${message}: `)).trim();
+    if (isBackInput(answer)) return CONTROL_BACK;
+    if (isQuitInput(answer)) return CONTROL_QUIT;
+    return answer;
   } finally {
     rl.close();
   }
@@ -670,9 +689,23 @@ async function interactiveArgs(version, workspace, helpers = {}) {
 
   try {
     const generatedTaskId = helpers.makeTaskId?.() || defaultTaskId();
+    const sidStatus = workspaceSidStatus(activeWorkspace);
+    if (sidStatus !== "valid") {
+      const sid = await askSidFromBrowserOrManual(() => rl, helpers.readBrowserSid, promptManualSid);
+      if (isQuitResult(sid)) return null;
+      if (sid && typeof helpers.saveSid === "function") {
+        activeWorkspace = await helpers.saveSid(sid);
+        stdout.write(`${color("32", "SID:", stdout)} saved. Refreshing workspace panel.\n\n`);
+        return { refresh: true };
+      }
+    }
     const choice = await askWorkflow(rl);
     if (isBackResult(choice)) return { refresh: true };
     if (isQuitResult(choice)) return null;
+
+    if (choice === "0.1") {
+      return ["check", "--tasks-root", activeWorkspace.tasksRoot];
+    }
 
     if (choice === "3.1") {
       const selection = await askTaskSelection(rl, activeWorkspace, { mode: "new", generatedTaskId });
@@ -718,7 +751,7 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     stdout.write(`${color("32", "Using task:", stdout)} ${taskId}\n\n`);
 
     let sid = "";
-    if (!workspace.hasSavedSid) {
+    if (workspaceSidStatus(activeWorkspace) !== "valid") {
       sid = await askSidFromBrowserOrManual(() => rl, helpers.readBrowserSid, promptManualSid);
       if (isBackResult(sid)) return { refresh: true };
       if (isQuitResult(sid)) return null;
@@ -765,6 +798,7 @@ async function interactiveArgs(version, workspace, helpers = {}) {
 
 module.exports = {
   confirmAction,
+  promptConfirmationText,
   interactiveArgs,
   isUserAbortError,
   askParameterOrCancel,

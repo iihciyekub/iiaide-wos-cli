@@ -3,6 +3,44 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.3.89 - 2026-06-10
+
+- Move formatted deliverables from top-level `data/` and `authors/` folders into
+  source-scoped `export/<uuid-or-task-id>/...` folders that mirror `raw/`.
+- Write WOS ID CSVs to `export/<uuid>/full-record/<uuid>_wosid.csv`, combined
+  BibTeX to `export/<uuid>/bib/<uuid>.bib`, and author exports to
+  `export/<uuid>/author/<uuid>_authors.csv` plus
+  `<uuid>_authors_simple.csv`.
+- Store raw author page JSON under `raw/<uuid>/author/` so raw and export author
+  folders use the same singular stage name.
+
+## 0.3.88 - 2026-06-10
+
+- Add `authors/authors-simple.csv` beside `authors.csv`; it keeps only
+  `wosid`, `authorIndex`, `address`, `affiliation`, `rorId`, and
+  `correspondingAddress`, drops rows where all four address-detail fields are
+  empty, and removes duplicate rows.
+- Require `iiaide-wos clear` to show the resolved task id and accept that exact
+  task id as confirmation before deleting a managed task directory.
+
+## 0.3.87 - 2026-06-10
+
+- Make interactive startup show `Auth yes` only after a successful SID probe.
+- Stop auto-opening a WOS browser on startup when the saved SID is invalid; the
+  startup flow now shows `Auth no` and lets the user choose manual SID input or
+  browser login.
+
+## 0.3.86 - 2026-06-10
+
+- Add `Check SID` to the interactive startup workflow menu so the saved SID can
+  be validated and refreshed through browser login directly from the panel.
+
+## 0.3.85 - 2026-06-10
+
+- Add `iiaide-wos check` to probe the saved WOS SID and open a browser login to
+  refresh it automatically when the SID is missing, invalid, or still not
+  confirmed.
+
 ## 0.3.84 - 2026-06-10
 
 - Speed up author no-data detection by waiting only for navigation commit and
