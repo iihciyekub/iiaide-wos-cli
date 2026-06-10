@@ -3,6 +3,21 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.3.91 - 2026-06-10
+
+- Repair missing author checkpoints from existing raw author JSON files before
+  selecting WOS IDs for download, including older `raw/<uuid>/authors/`
+  directories.
+- Let `authors` read older `data/<uuid>_wosid.csv` files when the current
+  `export/<uuid>/full-record/` CSV is missing.
+
+## 0.3.90 - 2026-06-10
+
+- Rebuild missing WOS ID export CSVs from existing complete
+  `raw/<uuid>/full-record/` batches before attempting a new WOS download.
+- Rebuild missing combined BibTeX files from existing `raw/<uuid>/bib/` batches
+  before attempting a new WOS BibTeX export.
+
 ## 0.3.89 - 2026-06-10
 
 - Move formatted deliverables from top-level `data/` and `authors/` folders into

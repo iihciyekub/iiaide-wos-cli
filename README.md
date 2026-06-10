@@ -44,6 +44,8 @@ tasks/<task-id>/
 
 The task directory is the deliverable data package. It keeps raw inputs,
 normalized outputs, progress, failures, and metadata together.
+If a repeat run finds raw batches but the formatted export file is missing, the
+CLI rebuilds the missing export locally before attempting another WOS download.
 
 Artifact-producing commands print only the final artifact path on success:
 `bib` prints the combined `.bib`, `run` and `import` print the WOSID CSV, and
@@ -64,7 +66,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.3.89
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.3.91
 npx playwright install chromium
 iiaide-wos
 ```
@@ -296,6 +298,10 @@ iiaide-wos authors --task "demo-search"
 
 The author stage is checkpointed. Running the same command again skips
 completed WOS IDs and continues incomplete work.
+If the checkpoint is missing but matching raw author JSON files already exist,
+the CLI repairs the checkpoint from those files before deciding what to fetch.
+Older task layouts with `data/<uuid>_wosid.csv` and
+`raw/<uuid>/authors/*.json` are reconciled during this local resume step.
 It writes the full expanded
 `export/<uuid>/author/<uuid>_authors.csv` plus
 `export/<uuid>/author/<uuid>_authors_simple.csv`, a deduplicated six-column

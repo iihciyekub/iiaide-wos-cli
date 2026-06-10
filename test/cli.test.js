@@ -1346,6 +1346,39 @@ test("completed author tasks finish locally without a SID", async () => {
   assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "authors-completed");
 });
 
+test("missing author checkpoint is repaired from existing raw JSON", async () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const csvPath = path.join(root, "input.csv");
+  fs.writeFileSync(csvPath, "wosid\nWOS:ABC\n");
+  const importArgs = cli.parseArgs([
+    "node", "cli", "import", "--csv", csvPath, "--task", "repair-authors", "--tasks-root", tasksRoot,
+  ]);
+  cli.importWosIds(importArgs);
+  const paths = cli.withRawSource(cli.getRunPaths(importArgs.outDir), "repair-authors");
+  const currentWosIdsCsv = path.join(paths.fullRecordExportDir, "repair-authors_wosid.csv");
+  const legacyWosIdsCsv = path.join(paths.legacyDataDir, "repair-authors_wosid.csv");
+  fs.mkdirSync(paths.legacyDataDir, { recursive: true });
+  fs.copyFileSync(currentWosIdsCsv, legacyWosIdsCsv);
+  fs.rmSync(currentWosIdsCsv);
+  writeJson(path.join(paths.legacySourceAuthorRawJsonDir, "WOS_ABC.json"), {
+    wosid: "WOS:ABC",
+    authors: [{ index: 1, displayName: "Ada Example" }],
+  });
+
+  const result = await cli.runAuthors(cli.parseArgs([
+    "node", "cli", "authors", "--task", "repair-authors", "--tasks-root", tasksRoot,
+  ]));
+
+  const checkpoint = readJson(paths.authorCheckpoint);
+  assert.equal(result.selected, 0);
+  assert.equal(result.completed, 1);
+  assert.equal(checkpoint.records["WOS:ABC"].status, "completed");
+  assert.equal(checkpoint.records["WOS:ABC"].rawJsonPath, "raw/repair-authors/authors/WOS_ABC.json");
+  assert.equal(fs.existsSync(paths.authorsCsv), true);
+  assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "authors-completed");
+});
+
 test("force cleanup preserves unrelated files in a managed output directory", () => {
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
@@ -1448,6 +1481,37 @@ test("reuse-raw preserves expected count and stores a relative task path", async
   assert.equal(fs.existsSync(path.join(queryPaths.fullRecordExportDir, "wosids.json")), false);
   assert.equal(fs.existsSync(path.join(queryPaths.fullRecordExportDir, "full_records.txt")), false);
   assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].taskDir, "reuse");
+});
+
+test("missing WOS ID export is rebuilt from existing raw batches", async () => {
+  const tasksRoot = temporaryDirectory();
+  const args = cli.parseArgs([
+    "node", "cli", "run", "--uuid", "query", "--task", "repair-run",
+    "--tasks-root", tasksRoot,
+  ]);
+  const paths = cli.getRunPaths(args.outDir);
+  const queryPaths = cli.withRawSource(paths, "query");
+  const queryRawDir = path.join(paths.rawRoot, "query", "full-record");
+  fs.mkdirSync(queryRawDir, { recursive: true });
+  fs.mkdirSync(args.outDir, { recursive: true });
+  writeJson(paths.manifest, { command: "iiaide-wos" });
+  writeJson(paths.summary, {
+    ok: true,
+    method: "wos-js-export-fetchTxtBatches",
+    taskId: "repair-run",
+    uuid: "query",
+    expectedCount: 2,
+    uniqueCount: 2,
+    summaryHref: args.url,
+    files: { wosidsCsv: path.join(queryPaths.fullRecordExportDir, "query_wosid.csv") },
+  });
+  fs.writeFileSync(path.join(queryRawDir, "query_1_2.txt"), "UT WOS:A\nUT WOS:B\n");
+
+  const result = await cli.run(args);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.files.wosidsCsv, path.join(queryPaths.fullRecordExportDir, "query_wosid.csv"));
+  assert.deepEqual(cli.readWosIdsCsv(result.files.wosidsCsv), ["WOS:A", "WOS:B"]);
 });
 
 test("completed WOS ID task is reused without refetching", async () => {
@@ -1563,6 +1627,34 @@ test("completed BibTeX task is reused without refetching", async () => {
   assert.equal(result.files.bibFile, bibPath);
   assert.equal(result.uuid, "query");
   assert.deepEqual(errors, ["BibTeX already exists; skipping download."]);
+});
+
+test("missing combined BibTeX export is rebuilt from existing raw batches", async () => {
+  const tasksRoot = temporaryDirectory();
+  const args = cli.parseArgs([
+    "node", "cli", "bib", "--uuid", "query", "--task", "repair-bib",
+    "--tasks-root", tasksRoot,
+  ]);
+  const paths = cli.getRunPaths(args.outDir);
+  const queryPaths = cli.withRawSource(paths, "query");
+  const queryBibDir = path.join(paths.rawRoot, "query", "bib");
+  fs.mkdirSync(queryBibDir, { recursive: true });
+  fs.mkdirSync(args.outDir, { recursive: true });
+  writeJson(paths.manifest, { command: "iiaide-wos", operation: "bib" });
+  writeJson(paths.summary, {
+    ok: true,
+    method: "wos-js-export-fetchBibBatches",
+    taskId: "repair-bib",
+    uuid: "query",
+    expectedCount: 1,
+    files: { bibFile: path.join(queryPaths.bibExportDir, "query.bib") },
+  });
+  fs.writeFileSync(path.join(queryBibDir, "query_1_1.bib"), "@article{demo,\n  title={Demo}\n}\n");
+
+  const result = await cli.runBib(args);
+
+  assert.equal(result.files.bibFile, path.join(queryPaths.bibExportDir, "query.bib"));
+  assert.equal(fs.readFileSync(result.files.bibFile, "utf8"), "@article{demo,\n  title={Demo}\n}\n");
 });
 
 test("completed BibTeX command returns before SID preparation", async () => {

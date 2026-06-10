@@ -935,6 +935,7 @@ function withRawSource(paths, sourceId) {
     rawDir: path.join(rawSourceDir, "full-record"),
     bibDir: path.join(rawSourceDir, "bib"),
     authorRawJsonDir: path.join(rawSourceDir, "author"),
+    legacySourceAuthorRawJsonDir: path.join(rawSourceDir, "authors"),
     dataDir: fullRecordExportDir,
     authorsDir,
     authorsCsv: path.join(authorsDir, `${source}_authors.csv`),
@@ -1044,6 +1045,15 @@ function wosIdsCsvPath(paths, identifier) {
   return path.join(paths.fullRecordExportDir || paths.dataDir, `${safeFilePart(identifier)}_wosid.csv`);
 }
 
+function resolveWosIdsCsvPath(paths, identifier, explicitPath = "") {
+  if (explicitPath) return explicitPath;
+  const candidates = [
+    wosIdsCsvPath(paths, identifier),
+    paths.legacyDataDir ? path.join(paths.legacyDataDir, `${safeFilePart(identifier)}_wosid.csv`) : "",
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
+}
+
 function bibFilePath(paths, uuid) {
   if (!uuid) throw new Error("Missing BibTeX UUID");
   return path.join(paths.bibExportDir || paths.dataDir, `${safeFilePart(uuid)}.bib`);
@@ -1124,6 +1134,11 @@ function safeWosIdFileName(wosid) {
   return safeFilePart(String(wosid || "").replace(/^WOS:/i, "WOS_")) + ".json";
 }
 
+function normalizeWosId(value) {
+  const match = String(value || "").match(/WOS:[A-Z0-9]+/i);
+  return match ? match[0].toUpperCase() : "";
+}
+
 function readWosIdsCsv(filePath) {
   const rows = parseCsv(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
   if (!rows.length) return [];
@@ -1132,8 +1147,7 @@ function readWosIdsCsv(filePath) {
   const columnIndex = headerIndex >= 0 ? headerIndex : 0;
   const seen = new Set();
   return rows.slice(start).map((row) => {
-    const match = String(row[columnIndex] || "").match(/WOS:[A-Z0-9]+/i);
-    return match ? match[0].toUpperCase() : "";
+    return normalizeWosId(row[columnIndex]);
   }).filter((wosid) => {
     if (!wosid || seen.has(wosid)) return false;
     seen.add(wosid);
@@ -1208,8 +1222,48 @@ function rawAuthorJsonPath(paths, wosid) {
   return path.join(paths.authorRawJsonDir, safeWosIdFileName(wosid));
 }
 
+function findExistingRawAuthorJson(paths, wosid) {
+  const expectedWosId = normalizeWosId(wosid);
+  if (!expectedWosId) return null;
+  const fileName = safeWosIdFileName(expectedWosId);
+  for (const directory of authorRawJsonDirs(paths)) {
+    const rawPath = path.join(directory, fileName);
+    if (!fs.existsSync(rawPath)) continue;
+    const raw = readJson(rawPath, null);
+    if (!raw) continue;
+    const rawWosId = normalizeWosId(raw.wosid) || normalizeWosId(raw.url) || expectedWosId;
+    if (rawWosId !== expectedWosId) continue;
+    return { rawPath, raw };
+  }
+  return null;
+}
+
+function reconcileAuthorCheckpointFromRaw(paths, wosids, checkpoint) {
+  let repaired = 0;
+  for (const [index, wosid] of wosids.entries()) {
+    const existing = findExistingRawAuthorJson(paths, wosid);
+    if (!existing) continue;
+    const prior = checkpoint.records[wosid] || {};
+    const rawJsonPath = storedArtifactPath(paths, existing.rawPath);
+    if (prior.status === "completed" && prior.rawJsonPath === rawJsonPath) continue;
+    const normalized = normalizeAuthorRecord(wosid, existing.raw);
+    checkpoint.records[wosid] = {
+      ...prior,
+      wosid,
+      index: prior.index || index + 1,
+      status: "completed",
+      authorCount: normalized.authors.length,
+      rawJsonPath,
+      error: "",
+      updatedAt: prior.updatedAt || new Date().toISOString(),
+    };
+    repaired += 1;
+  }
+  return repaired;
+}
+
 function authorRawJsonDirs(paths) {
-  const directories = [paths.authorRawJsonDir, paths.legacyAuthorRawJsonDir]
+  const directories = [paths.authorRawJsonDir, paths.legacySourceAuthorRawJsonDir, paths.legacyAuthorRawJsonDir]
     .filter(Boolean)
     .map((directory) => path.resolve(directory));
   return [...new Set(directories)];
@@ -1371,6 +1425,7 @@ function simpleAuthorRows(rows) {
 }
 
 function writeAuthorAggregates(paths) {
+  const seenWosIds = new Set();
   const records = authorRawJsonDirs(paths)
     .filter((directory) => fs.existsSync(directory))
     .flatMap((directory) => fs.readdirSync(directory)
@@ -1380,8 +1435,10 @@ function writeAuthorAggregates(paths) {
     .map(({ directory, name }) => {
       const raw = readJson(path.join(directory, name), null);
       if (!raw) return null;
-      const wosid = raw.wosid || raw.url?.match(/full-record\/(WOS:[^/?#]+)/i)?.[1] || "";
-      return wosid ? normalizeAuthorRecord(wosid, raw) : null;
+      const wosid = normalizeWosId(raw.wosid) || normalizeWosId(raw.url);
+      if (!wosid || seenWosIds.has(wosid)) return null;
+      seenWosIds.add(wosid);
+      return normalizeAuthorRecord(wosid, raw);
     })
     .filter(Boolean);
   const rows = flattenAuthorRows(records);
@@ -1415,6 +1472,7 @@ function writeAuthorAggregates(paths) {
 }
 
 function rebuildAuthorsFromRaw(paths) {
+  const seenWosIds = new Set();
   const rawFiles = authorRawJsonDirs(paths)
     .filter((directory) => fs.existsSync(directory))
     .flatMap((directory) => fs.readdirSync(directory)
@@ -1426,8 +1484,9 @@ function rebuildAuthorsFromRaw(paths) {
     const rawPath = path.join(directory, name);
     const raw = readJson(rawPath, null);
     if (!raw) continue;
-    const wosid = raw.wosid || raw.url?.match(/full-record\/(WOS:[^/?#]+)/i)?.[1] || "";
-    if (!wosid) continue;
+    const wosid = normalizeWosId(raw.wosid) || normalizeWosId(raw.url);
+    if (!wosid || seenWosIds.has(wosid)) continue;
+    seenWosIds.add(wosid);
     normalizeAuthorRecord(wosid, raw);
     normalizedRecords += 1;
   }
@@ -1478,6 +1537,10 @@ function bibBatchPath(paths, uuid, markFrom, markTo) {
   return path.join(bibBatchDir(paths, uuid), batchFileName(uuid, markFrom, markTo, "bib"));
 }
 
+function batchFileStart(fileName) {
+  return Number(String(fileName || "").match(/_(\d+)_(\d+)\.[^.]+$/)?.[1] || 0);
+}
+
 function rawBatchFiles(paths, uuid) {
   if (!uuid) throw new Error("Missing raw batch UUID");
   const directory = rawBatchDir(paths, uuid);
@@ -1486,7 +1549,18 @@ function rawBatchFiles(paths, uuid) {
   return fs
     .readdirSync(directory)
     .filter((name) => name.startsWith(prefix) && /_(\d+)_(\d+)\.txt$/.test(name))
-    .sort((a, b) => Number(a.match(/_(\d+)_(\d+)\.txt$/)[1]) - Number(b.match(/_(\d+)_(\d+)\.txt$/)[1]));
+    .sort((a, b) => batchFileStart(a) - batchFileStart(b));
+}
+
+function bibBatchFiles(paths, uuid) {
+  if (!uuid) throw new Error("Missing BibTeX batch UUID");
+  const directory = bibBatchDir(paths, uuid);
+  if (!fs.existsSync(directory)) return [];
+  const prefix = `${safeFilePart(uuid)}_`;
+  return fs
+    .readdirSync(directory)
+    .filter((name) => name.startsWith(prefix) && /_(\d+)_(\d+)\.bib$/.test(name))
+    .sort((a, b) => batchFileStart(a) - batchFileStart(b));
 }
 
 function rawBatchCoverage(paths, uuid) {
@@ -1520,6 +1594,22 @@ function parseExistingRawBatches(paths, uuid) {
     rows.push(...parseExportText(text, batchStart, batchEnd));
   }
   return rows;
+}
+
+function canRepairWosIdsFromRaw(paths, uuid, expectedCount) {
+  if (!uuid || !rawBatchFiles(paths, uuid).length || !expectedCount) return false;
+  const coverage = rawBatchCoverage(paths, uuid);
+  return Boolean(coverage.files.length && coverage.firstStart === 1 && coverage.lastEnd >= expectedCount);
+}
+
+function finalWosIdsCsvExists(paths, identifier) {
+  if (!identifier) return false;
+  return fs.existsSync(wosIdsCsvPath(withRawSource(paths, identifier), identifier));
+}
+
+function finalBibExists(paths, uuid) {
+  if (!uuid) return false;
+  return fs.existsSync(bibFilePath(withRawSource(paths, uuid), uuid));
 }
 
 function writeOutputs(paths, rows, meta) {
@@ -2340,7 +2430,7 @@ async function runAuthors(args) {
     };
   }
 
-  const wosidsPath = args.wosidsCsv || wosIdsCsvPath(paths, args.uuid || task.uuid || task.taskId);
+  const wosidsPath = resolveWosIdsCsvPath(paths, args.uuid || task.uuid || task.taskId, args.wosidsCsv);
   if (!fs.existsSync(wosidsPath)) throw new Error(`Missing WOSID CSV: ${wosidsPath}`);
   const wosids = readWosIdsCsv(wosidsPath);
   if (!wosids.length) throw new Error(`No WOS IDs found in ${wosidsPath}`);
@@ -2348,6 +2438,14 @@ async function runAuthors(args) {
   const checkpoint = readAuthorCheckpoint(paths);
   if (!checkpoint.startedAt) checkpoint.startedAt = new Date().toISOString();
   checkpoint.total = wosids.length;
+  const repairedFromRaw = !args.force ? reconcileAuthorCheckpointFromRaw(paths, wosids, checkpoint) : 0;
+  if (repairedFromRaw) {
+    appendProgress(paths, { phase: "authors-checkpoint-repair", repaired: repairedFromRaw });
+    writeAuthorCheckpoint(paths, checkpoint);
+    if (!isInteractive()) {
+      console.error(`Existing author JSON found; repaired ${repairedFromRaw} checkpoint record${repairedFromRaw === 1 ? "" : "s"}.`);
+    }
+  }
   const work = selectAuthorWork(wosids, checkpoint, args);
   if (!work.length) {
     printAuthorWorkSummary(authorWorkSummary(wosids, checkpoint, work, args));
@@ -2660,20 +2758,33 @@ async function run(args) {
     href: priorSummary.summaryHref || args.url,
     rowText: priorSummary.rowText || "",
   };
+  const rawUuid = args.uuid || priorSummary.uuid || "";
+  const canRepairFromRaw = !args.force &&
+    rawUuid &&
+    !finalWosIdsCsvExists(paths, rawUuid) &&
+    canRepairWosIdsFromRaw(paths, rawUuid, info.expectedCount);
 
-  if (args.reuseRaw && args.uuid && rawBatchFiles(paths, args.uuid).length) {
+  if ((args.reuseRaw || canRepairFromRaw) && rawUuid && rawBatchFiles(paths, rawUuid).length) {
+    info.uuid = rawUuid;
     if (!info.expectedCount) {
       throw new Error("Cannot reuse raw batches without a known WOS record count. Re-run without --reuse-raw to refresh from WOS.");
     }
-    const coverage = rawBatchCoverage(paths, args.uuid);
-    if (!coverage.files.length) throw new Error(`No raw batches found for UUID: ${args.uuid}`);
+    const coverage = rawBatchCoverage(paths, rawUuid);
+    if (!coverage.files.length) throw new Error(`No raw batches found for UUID: ${rawUuid}`);
     if (coverage.firstStart !== 1 || coverage.lastEnd < info.expectedCount) {
       throw new Error(
-        `Incomplete raw batches for UUID ${args.uuid}: have ${coverage.firstStart || 0}-${coverage.lastEnd || 0}, expected 1-${info.expectedCount}. Re-run without --reuse-raw to refresh from WOS.`
+        `Incomplete raw batches for UUID ${rawUuid}: have ${coverage.firstStart || 0}-${coverage.lastEnd || 0}, expected 1-${info.expectedCount}. Re-run without --reuse-raw to refresh from WOS.`
       );
     }
-    rows = parseExistingRawBatches(paths, args.uuid);
-    appendProgress(paths, { phase: "reuse-raw", parsed: rows.length });
+    rows = parseExistingRawBatches(paths, rawUuid);
+    appendProgress(paths, {
+      phase: canRepairFromRaw && !args.reuseRaw ? "repair-export-from-raw" : "reuse-raw",
+      uuid: rawUuid,
+      parsed: rows.length,
+    });
+    if (canRepairFromRaw && !args.reuseRaw && !isInteractive()) {
+      console.error("WOS raw batches already exist; rebuilding missing WOS ID CSV.");
+    }
   } else {
     await prepareWosExport(args);
     const result = await exportFromWos(args, paths);
@@ -2719,6 +2830,7 @@ async function runBib(args) {
   }
   const paths = createRunLayout(args);
   upsertTaskIndex(args, { status: "bib-running", lastError: "" });
+  const priorSummary = readJson(paths.summary, {});
   writeJson(paths.manifest, {
     command: "iiaide-wos",
     operation: "bib",
@@ -2731,6 +2843,50 @@ async function runBib(args) {
     },
     createdAt: new Date().toISOString(),
   });
+  const rawUuid = args.uuid || priorSummary.uuid || "";
+  const rawBibFiles = rawUuid
+    ? bibBatchFiles(paths, rawUuid).map((fileName) => path.join(bibBatchDir(paths, rawUuid), fileName))
+    : [];
+  if (!args.force && rawUuid && rawBibFiles.length && !finalBibExists(paths, rawUuid)) {
+    const combinedBib = combineBibFiles(paths, rawUuid, rawBibFiles);
+    const outputPaths = withRawSource(paths, rawUuid);
+    const entryCount = rawBibFiles.reduce((sum, filePath) => sum + parseBibEntryCount(fs.readFileSync(filePath, "utf8")), 0);
+    const summary = {
+      ok: true,
+      method: "wos-js-export-fetchBibBatches",
+      taskId: args.taskId,
+      taskLabel: args.taskLabel,
+      inputUrl: args.url,
+      inputUuid: args.uuid,
+      uuid: rawUuid,
+      sortBy: args.sortBy,
+      expectedCount: priorSummary.expectedCount || entryCount,
+      batchCount: rawBibFiles.length,
+      rowText: priorSummary.rowText || "",
+      summaryHref: priorSummary.summaryHref || args.url,
+      runDir: paths.runDir,
+      files: {
+        bibFile: combinedBib,
+        bibFiles: rawBibFiles,
+        bibDir: bibBatchDir(paths, rawUuid),
+        exportDir: outputPaths.bibExportDir,
+        progressLog: paths.progressLog,
+      },
+      finishedAt: new Date().toISOString(),
+    };
+    appendProgress(paths, { phase: "repair-bib-export-from-raw", uuid: rawUuid, batches: rawBibFiles.length, entries: entryCount });
+    writeJson(paths.summary, summary);
+    upsertTaskIndex(args, {
+      status: "bib-completed",
+      lastError: "",
+      uuid: summary.uuid,
+      url: summary.inputUrl,
+      expectedCount: summary.expectedCount,
+      uniqueCount: 0,
+    });
+    if (!isInteractive()) console.error("BibTeX raw batches already exist; rebuilding missing combined BibTeX.");
+    return summary;
+  }
   await prepareWosExport(args);
   const result = await exportBibFromWos(args, paths);
   const uuid = result.info.uuid || args.uuid;
@@ -3189,6 +3345,7 @@ module.exports = {
   withRawSource,
   cleanRunLayout,
   rawBatchFiles,
+  bibBatchFiles,
   parseExistingRawBatches,
   readJson,
   writeJson,

@@ -34,6 +34,9 @@ tasks/<task-id>/export/<uuid-or-task-id>/full-record/<uuid-or-task-id>_wosid.csv
 
 This allows later commands to work independently of how the WOS IDs were
 obtained.
+When a repeated `run` finds complete raw full-record batches but the normalized
+CSV is missing, it rebuilds `export/<uuid>/full-record/<uuid>_wosid.csv`
+locally before attempting another WOS download.
 
 ## URL And UUID Workflow
 
@@ -89,6 +92,9 @@ Batch files are kept under `raw/<uuid>/bib/`, then combined into one final BibTe
 file under `export/<uuid>/bib/`. In the folded interactive menu, use
 `1.2 UUID - BIB format`; after source input it prints the resolved UUID before
 SID validation and then shows download progress for each WOS BibTeX batch.
+When a repeated `bib` finds raw BibTeX batches but the combined `.bib` file is
+missing, it rebuilds `export/<uuid>/bib/<uuid>.bib` locally before attempting
+another WOS BibTeX export.
 
 When `--limit` is omitted, `bib` requests records up to the WOS summary count.
 If WOS does not expose a count, the command stops instead of guessing the final
@@ -271,6 +277,13 @@ For URL/UUID tasks it checks:
 - raw WOS export batches
 - completed author checkpoint entries and their JSON files
 - aggregate author row count
+
+When `authors` starts, it reconciles the checkpoint with existing raw author
+JSON files. If checkpoint entries are missing but `raw/<uuid>/author/*.json` or
+older `raw/<uuid>/authors/*.json` files exist for the current WOS IDs, those
+records are marked completed before any WOS browser work begins. The author
+stage also accepts older `data/<uuid>_wosid.csv` inputs when the current
+`export/<uuid>/full-record/` CSV is missing.
 
 For imported CSV tasks, raw WOS export batches are not required.
 
