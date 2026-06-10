@@ -55,7 +55,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.13
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.14
 npx playwright install chromium
 iiaide-wos
 ```
@@ -332,7 +332,7 @@ Useful options:
 
 In the interactive menu, use `2 WOS IDs to SQL`. Paste either a WOS summary
 URL/result-set UUID or a local `.csv` file path; the CLI chooses the matching
-parse pipeline automatically.
+parse pipeline automatically and runs with the default parse options.
 
 ## Task Management
 
@@ -360,7 +360,10 @@ the available inputs are visible before the cursor waits for input.
 Interactive downloads reuse the current task by default. If the same UUID is
 already completed, iiaide-wos skips SID validation and WOS download, then prints
 the existing final artifact path. A different UUID can be appended to the same
-task; its raw batches are kept under separate `raw/<uuid>/` directories, while parsed page data is shared through the global SQLite database.
+task; its raw batches are kept under separate `raw/<uuid>/` directories, while
+parsed page data is shared through the global SQLite database.
+After showing the available record count and planned batch count, interactive
+TXT and BibTeX downloads start directly.
 At the `WOS summary URL or UUID` prompt, pressing Enter uses the shown saved
 source when one exists. Without a saved source, enter a source, press `B` to
 return to the menu, or press `q` to exit the CLI.

@@ -279,7 +279,7 @@ Download workflows run directly in the current task marked with `*`. Use
 directly into browser login when WOS rejects it.
 Use `2 WOS IDs to SQL` to parse from either a local WOSID CSV or a WOS summary
 URL/UUID; `.csv` input runs the CSV path and URL/UUID input runs the WOS export
-path first.
+path first. Interactive parsing uses the default parse options directly.
 Use `4.1 Status` to inspect the global SQLite database, `4.2 Merge database`
 to merge another WOS SQLite database, and `4.3 Query WOSID` to enter one WOSID
 and print its SQLite record. Merge asks whether existing SQL rows should be
@@ -294,9 +294,10 @@ has a completed TXT or BibTeX export for the same UUID, the CLI prints the
 existing artifact path and skips SID validation and WOS download. If the input
 is a different UUID, the CLI appends that source to the same task and writes it
 under separate `raw/<uuid>/` directories, while parsed page data is shared in
-the global SQLite database. Use `--force` only when you intentionally want to
-replace a managed task's existing outputs or overwrite existing WOSID database
-rows.
+the global SQLite database. After printing the available record count and batch
+plan, interactive TXT and BibTeX downloads start directly. Use `--force` only
+when you intentionally want to replace a managed task's existing outputs or
+overwrite existing WOSID database rows.
 For download workflows, pressing Enter at the `WOS summary URL or UUID` prompt
 uses the shown saved source when one exists. If no saved source is available,
 enter a source, press `B` to return to the menu, or press `q` to exit the CLI.

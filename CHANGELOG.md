@@ -3,6 +3,14 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.14 - 2026-06-10
+
+- Start interactive TXT and BibTeX downloads immediately after printing the
+  record and batch plan; the `Continue ... download?` confirmation prompt has
+  been removed.
+- Run interactive `WOS IDs to SQL` with default parse options directly, removing
+  the `Change parse options?` prompt and its unused interactive option editor.
+
 ## 0.4.13 - 2026-06-10
 
 - Remove the obsolete `wosdata --json-dir` and managed-task JSON import paths;

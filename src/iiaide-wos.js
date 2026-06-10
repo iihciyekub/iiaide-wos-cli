@@ -3,7 +3,7 @@ const path = require("path");
 const { spawn } = require("node:child_process");
 const { chromium } = require("playwright");
 const { readJson, writeFileAtomic, writeJson } = require("./lib/io");
-const { confirmAction, interactiveArgs, isBackResult, isQuitResult, isUserAbortError, promptConfirmationText, promptSid } = require("./lib/interactive");
+const { interactiveArgs, isBackResult, isQuitResult, isUserAbortError, promptConfirmationText, promptSid } = require("./lib/interactive");
 const { createProgress, createSpinner, isInteractive } = require("./lib/terminal");
 const { updateCli } = require("./lib/update");
 const { exportBibBatchesViaWosJs, exportTxtBatchesViaWosJs } = require("./lib/wos-browser-export");
@@ -1088,14 +1088,11 @@ function boundedRecordCount(totalRecords, startIndex = 1, limit = 0) {
   return Math.max(0, end - start + 1);
 }
 
-async function confirmDownloadPlan(label, availableCount, selectedCount, batchSize = DEFAULT_BATCH_SIZE) {
+function reportDownloadPlan(label, availableCount, selectedCount, batchSize = DEFAULT_BATCH_SIZE) {
   const batches = downloadBatchCount(selectedCount, batchSize);
   console.error(`${label} available: ${availableCount}`);
   console.error(`${label} to download: ${selectedCount}`);
   console.error(`${label} batches: ${batches} x ${batchSize} records`);
-  const confirmed = await confirmAction(`Continue ${label.toLowerCase()} download?`);
-  if (isQuitResult(confirmed)) throw new UserQuitError(`${label} download quit by user`);
-  if (!confirmed) throw new UserCancelledError(`${label} download cancelled by user`);
   return { batches };
 }
 
@@ -1604,14 +1601,14 @@ async function exportFromWos(args, paths) {
     summarySpinner.succeed(`Found ${info.expectedCount} records`);
     appendProgress(paths, { phase: "summary-info", ...info });
     const batchSize = DEFAULT_BATCH_SIZE;
-    const { batches: batchCount } = await confirmDownloadPlan(
+    const { batches: batchCount } = reportDownloadPlan(
       "WOS records",
       info.expectedCount,
       info.expectedCount,
       batchSize
     );
     appendProgress(paths, {
-      phase: "download-confirmed",
+      phase: "download-plan",
       label: "WOS records",
       availableCount: info.expectedCount,
       selectedCount: info.expectedCount,
@@ -1716,14 +1713,14 @@ async function exportBibFromWos(args, paths) {
       batchSize: DEFAULT_BATCH_SIZE,
     });
     const batchSize = DEFAULT_BATCH_SIZE;
-    const { batches: totalBatches } = await confirmDownloadPlan(
+    const { batches: totalBatches } = reportDownloadPlan(
       "WOS BibTeX records",
       expectedCount,
       selectedCount,
       batchSize
     );
     appendProgress(paths, {
-      phase: "download-confirmed",
+      phase: "download-plan",
       label: "WOS BibTeX records",
       availableCount: expectedCount,
       selectedCount,
@@ -2760,7 +2757,7 @@ module.exports = {
   parseWosCount,
   downloadBatchCount,
   boundedRecordCount,
-  confirmDownloadPlan,
+  reportDownloadPlan,
   isUserCancelledError,
   isUserQuitError,
   isUserAbortError,

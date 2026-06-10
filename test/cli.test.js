@@ -9,7 +9,7 @@ const Database = require("better-sqlite3");
 
 const cli = require("../src/iiaide-wos");
 const { readJson, writeJson } = require("../src/lib/io");
-const { classifyWosIdsToSqlInput, currentTaskSelection, formatBytes, formatParseOptions, formatRuntime, isWosSourceLike, listTaskHints, parseOptionsToArgs, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
+const { classifyWosIdsToSqlInput, currentTaskSelection, formatBytes, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
 const { createProgress, createSpinner } = require("../src/lib/terminal");
 const { normalizeBatchResult } = require("../src/lib/wos-browser-export");
 
@@ -129,7 +129,7 @@ test("calculates WOS download batches in 200-record chunks", () => {
   assert.equal(cli.downloadBatchCount(401), 3);
 });
 
-test("calculates bounded WOS record ranges before download confirmation", () => {
+test("calculates bounded WOS record ranges before download planning", () => {
   assert.equal(cli.boundedRecordCount(800, 1, 0), 800);
   assert.equal(cli.boundedRecordCount(800, 1, 200), 200);
   assert.equal(cli.boundedRecordCount(800, 201, 200), 200);
@@ -344,6 +344,8 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(argsMatch[0], /classifyWosIdsToSqlInput\(input\)/);
   assert.match(argsMatch[0], /\["parse", "--csv", parsed\.value, "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot\]/);
   assert.match(argsMatch[0], /"parse-pipeline"/);
+  assert.doesNotMatch(argsMatch[0], /askParseOptions/);
+  assert.doesNotMatch(argsMatch[0], /Change parse options/);
   assert.match(argsMatch[0], /choice === "1\.2" \? "bib"/);
 });
 
@@ -379,26 +381,6 @@ test("interactive downloads use the current task selection", () => {
   const selection = currentTaskSelection(workspace);
   assert.equal(selection.taskId, "selected");
   assert.equal(selection.task.taskId, "selected");
-});
-
-test("interactive parse options can stay default or become command args", () => {
-  assert.equal(
-    formatParseOptions(),
-    "concurrency=1 | timeout=20000ms | cooldown=250ms | from=1 | limit=all"
-  );
-  assert.deepEqual(parseOptionsToArgs({
-    concurrency: 4,
-    recordTimeoutMs: 15000,
-    cooldownMs: 800,
-    fromIndex: 11,
-    limit: 50,
-  }), [
-    "--concurrency", "4",
-    "--record-timeout-ms", "15000",
-    "--cooldown-ms", "800",
-    "--from-index", "11",
-    "--limit", "50",
-  ]);
 });
 
 test("interactive header shows WOS browser mode and profile name", () => {
@@ -936,7 +918,7 @@ test("BibTeX export path uses injected wos.js export API while reading summary c
   assert.match(match[0], /prepareWosRequestContext/);
   assert.match(match[0], /expectedCount/);
   assert.match(match[0], /totalBatches/);
-  assert.match(match[0], /confirmDownloadPlan/);
+  assert.match(match[0], /reportDownloadPlan/);
   assert.match(match[0], /batchSize = DEFAULT_BATCH_SIZE/);
   assert.match(match[0], /exportBibBatchesViaWosJs/);
   assert.doesNotMatch(source, /api\/wosnx\/indic\/export\/saveToFile/);

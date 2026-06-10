@@ -6,13 +6,6 @@ const { color, isInteractive } = require("./terminal");
 const ORANGE = "33";
 const CLI_AUTHOR = "lyj";
 const CLI_VERSION_UPDATED_AT = "2026-06-10";
-const DEFAULT_PARSE_OPTIONS = {
-  concurrency: 1,
-  recordTimeoutMs: 20000,
-  cooldownMs: 250,
-  fromIndex: 1,
-  limit: 0,
-};
 const CONTROL_BACK = Symbol.for("iiaide-wos.interactive.back");
 const CONTROL_QUIT = Symbol.for("iiaide-wos.interactive.quit");
 
@@ -223,25 +216,6 @@ async function askParameterOrCancel(rl, message, help, fallback = "") {
   }
 }
 
-async function askOptionalInteger(rl, message, fallback, minimum = 0, maximum = Infinity) {
-  for (;;) {
-    const answer = await ask(rl, message, String(fallback));
-    if (isBackInput(answer)) return CONTROL_BACK;
-    if (isQuitInput(answer)) return CONTROL_QUIT;
-    if (!/^\d+$/.test(answer)) {
-      stdout.write(`${color("33", "Required:", stdout)} enter an integer, B to go back, or q to quit\n`);
-      continue;
-    }
-    const value = Number(answer);
-    if (value < minimum || value > maximum) {
-      const range = Number.isFinite(maximum) ? `${minimum}-${maximum}` : `>= ${minimum}`;
-      stdout.write(`${color("33", "Required:", stdout)} enter ${range}\n`);
-      continue;
-    }
-    return value;
-  }
-}
-
 async function askOptionalBoolean(rl, message, fallback = false) {
   const fallbackText = fallback ? "y" : "n";
   for (;;) {
@@ -252,55 +226,6 @@ async function askOptionalBoolean(rl, message, fallback = false) {
     if (answer === "n" || answer === "no") return false;
     stdout.write(`${color("33", "Required:", stdout)} enter y, n, B to go back, or q to quit\n`);
   }
-}
-
-function formatParseOptions(options = {}) {
-  const values = { ...DEFAULT_PARSE_OPTIONS, ...options };
-  return [
-    `concurrency=${values.concurrency}`,
-    `timeout=${values.recordTimeoutMs}ms`,
-    `cooldown=${values.cooldownMs}ms`,
-    `from=${values.fromIndex}`,
-    `limit=${values.limit || "all"}`,
-  ].join(" | ");
-}
-
-function parseOptionsToArgs(options = {}) {
-  const values = { ...DEFAULT_PARSE_OPTIONS, ...options };
-  const args = [
-    "--concurrency", String(values.concurrency),
-    "--record-timeout-ms", String(values.recordTimeoutMs),
-    "--cooldown-ms", String(values.cooldownMs),
-    "--from-index", String(values.fromIndex),
-  ];
-  if (values.limit) args.push("--limit", String(values.limit));
-  return args;
-}
-
-async function askParseOptions(rl, defaults = DEFAULT_PARSE_OPTIONS) {
-  const base = { ...DEFAULT_PARSE_OPTIONS, ...defaults };
-  stdout.write(`${color("36", "Parse options:", stdout)} ${formatParseOptions(base)}\n`);
-  const change = await askOptionalBoolean(rl, "Change parse options? Enter uses defaults", false);
-  if (isBackResult(change) || isQuitResult(change)) return change;
-  if (!change) return [];
-  const concurrency = await askOptionalInteger(rl, "Concurrency", base.concurrency, 1, 10);
-  if (isBackResult(concurrency) || isQuitResult(concurrency)) return concurrency;
-  const recordTimeoutMs = await askOptionalInteger(rl, "Record timeout ms", base.recordTimeoutMs, 5000);
-  if (isBackResult(recordTimeoutMs) || isQuitResult(recordTimeoutMs)) return recordTimeoutMs;
-  const cooldownMs = await askOptionalInteger(rl, "Cooldown ms", base.cooldownMs, 0);
-  if (isBackResult(cooldownMs) || isQuitResult(cooldownMs)) return cooldownMs;
-  const fromIndex = await askOptionalInteger(rl, "From WOS ID index", base.fromIndex, 1);
-  if (isBackResult(fromIndex) || isQuitResult(fromIndex)) return fromIndex;
-  const limit = await askOptionalInteger(rl, "Limit 0=all", base.limit, 0);
-  if (isBackResult(limit) || isQuitResult(limit)) return limit;
-  const options = {
-    concurrency,
-    recordTimeoutMs,
-    cooldownMs,
-    fromIndex,
-    limit,
-  };
-  return parseOptionsToArgs(options);
 }
 
 function isBackInput(value) {
@@ -594,24 +519,6 @@ async function promptSid(message = "Enter a current WOS SID") {
   }
 }
 
-async function confirmAction(message, defaultYes = true) {
-  if (!isInteractive(stdout) || !stdin.isTTY) return defaultYes;
-  const rl = readline.createInterface({ input: stdin, output: stdout });
-  const suffix = defaultYes ? " [Y/n]" : " [y/N]";
-  try {
-    for (;;) {
-      const answer = (await rl.question(`${message}${suffix}: `)).trim().toLowerCase();
-      if (!answer) return defaultYes;
-      if (answer === "y" || answer === "yes") return true;
-      if (answer === "n" || answer === "no" || isBackInput(answer)) return false;
-      if (isQuitInput(answer)) return CONTROL_QUIT;
-      stdout.write(`${color("33", "Required:", stdout)} enter y, n, B to go back, or q to quit\n`);
-    }
-  } finally {
-    rl.close();
-  }
-}
-
 async function promptConfirmationText(message) {
   if (!isInteractive(stdout) || !stdin.isTTY) return "";
   const rl = readline.createInterface({ input: stdin, output: stdout });
@@ -855,10 +762,6 @@ async function interactiveArgs(version, workspace, helpers = {}) {
           ["parse", "--csv", parsed.value, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot],
           activeWorkspace
         );
-        const parseArgs = await askParseOptions(rl);
-        if (isBackResult(parseArgs)) return { refresh: true };
-        if (isQuitResult(parseArgs)) return null;
-        result.push(...parseArgs);
         if (sid) result.push("--sid", sid);
         return result;
       }
@@ -877,10 +780,6 @@ async function interactiveArgs(version, workspace, helpers = {}) {
         activeWorkspace.tasksRoot,
         "--reuse-raw",
       ];
-      const parseArgs = await askParseOptions(rl);
-      if (isBackResult(parseArgs)) return { refresh: true };
-      if (isQuitResult(parseArgs)) return null;
-      result.push(...parseArgs);
       appendWosDataDbArg(result, activeWorkspace);
       if (sid) result.push("--sid", sid);
       return result;
@@ -910,14 +809,10 @@ async function interactiveArgs(version, workspace, helpers = {}) {
 }
 
 module.exports = {
-  confirmAction,
   promptConfirmationText,
   interactiveArgs,
   isUserAbortError,
   askParameterOrCancel,
-  askParseOptions,
-  parseOptionsToArgs,
-  formatParseOptions,
   formatBytes,
   formatRuntime,
   currentTaskSelection,
