@@ -38,7 +38,17 @@ tasks/<task-id>/
 
 The task directory is the deliverable data package. It keeps raw inputs, normalized WOSID indexes, progress, failures, and metadata together. Parsed WOS data is stored in the global SQLite database. If a repeat run finds raw batches but the WOSID index is missing, the CLI rebuilds the missing index locally before attempting another WOS download.
 
-The CLI also keeps a user-level global SQLite aggregation database at `~/.iiaide-wos/wosdata.sqlite`. It is built from parsed WOS page data only; raw full-record `.txt` batches and BibTeX `.bib` files are not imported into SQLite.
+The CLI also keeps user-level global SQLite files outside task directories:
+
+```text
+~/.iiaide-wos/wosdata.sqlite          # parsed WOS page records
+~/.iiaide-wos/wos-blacklist.sqlite    # WOSIDs skipped after parse FAIL
+```
+
+The WOS data database is built from parsed WOS page data only; raw full-record
+`.txt` batches and BibTeX `.bib` files are not imported into SQLite. The parse
+blacklist is stored separately so it can be inspected, cleared, or replaced
+without touching saved WOS records.
 
 Artifact-producing commands print only the final artifact path on success: `run` and `import` print the WOSID CSV, `bib` prints the combined `.bib`, and `parse`, `parse-pipeline`, or `wosdata` print the SQLite database path.
 
@@ -57,7 +67,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.14
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.47
 npx playwright install chromium
 iiaide-wos
 # or
@@ -377,39 +387,77 @@ consecutive parse-failure counter resets and the parse continues without
 changing SID.
 
 Individual WOSID page failures are recorded once with the real extraction or
-SQLite import error. They are not requeued for retry; 12 consecutive final
+SQLite import error. They are not requeued for retry; 20 consecutive final
 parse failures still trigger the WOS `buildQuery` recovery diagnostic described
 above.
+
+When a WOSID parse attempt is finally reported as `parse FAIL`, the CLI stores
+that WOSID in the separate global SQLite parse blacklist database and skips it
+by default on future parse runs. These blacklisted failures still contribute to
+the 20-failure SID recovery diagnostic counter. Use
+`iiaide-wos wosdata --blacklist` to inspect the list, `iiaide-wos wosdata
+--unblacklist <WOSID>` to remove one entry, or `iiaide-wos wosdata
+--clear-blacklist` to remove all entries. Add `--retry-blacklist` to a parse
+command when you want to deliberately try those WOSIDs again. A successful retry
+removes the WOSID from the blacklist.
+
+If WOS opens a full-record page but the DOM structure cannot be parsed, the CLI
+falls back to the browser-side single-record export API before marking the WOSID
+as failed.
 
 For long parse runs, fixed browser restarts are disabled by default so reusable
 tabs can keep collecting WOSID pages. Use `--browser-restart-every <n>` only
 when you explicitly want periodic Playwright context restarts.
 
-Before parsing, the CLI checks the global SQLite database and skips WOSIDs that are already present. New full-record page data is validated and written directly to `~/.iiaide-wos/wosdata.sqlite`; no local WOSID JSON files are written. To merge records collected in another WOS SQLite database, run:
+Before parsing, the CLI checks the global SQLite database and skips WOSIDs that
+are already present. The work summary prints aligned multi-line fields for
+`dbRecords`, `dbBlacklist`, `db`, and `blacklistDb` before browser work starts,
+with highlighted left-hand labels in color terminals, so a wrong database
+selection or failed blacklist write is visible before page visits begin. New
+full-record page data is validated and
+written directly to `~/.iiaide-wos/wosdata.sqlite`; no local WOSID JSON files are
+written. To merge records collected in another WOS SQLite database, run:
 
 ```bash
 iiaide-wos wosdata --merge-db "./shared/other-wosdata.sqlite"
 ```
 
-Use `--db ./shared/wosdata.sqlite` to choose the target database file. Database merge reads only SQLite WOS record rows; it does not require raw `.txt` or `.bib` files and does not store WOS usernames, passwords, or SID values. Existing database records are skipped by default; add `--force` to overwrite them after validation. For quick inspection, query one WOSID:
+Use `--db ./shared/wosdata.sqlite` to choose the target database file. Use `--blacklist-db ./shared/wos-blacklist.sqlite` to choose the parse blacklist database. Database merge reads only SQLite WOS record rows; it does not require raw `.txt` or `.bib` files and does not store WOS usernames, passwords, or SID values. Existing database records are skipped by default; add `--force` to `wosdata --merge-db` to overwrite them after validation. For quick inspection, query one WOSID:
 
 ```bash
 iiaide-wos wosdata --wosid "WOS:000000000000001"
 ```
 
+List WOSIDs that parse will skip by default because a prior full-record page
+could not yield a usable record:
+
+```bash
+iiaide-wos wosdata --blacklist
+iiaide-wos wosdata --unblacklist "WOS:000000000000001"
+iiaide-wos wosdata --clear-blacklist
+```
+
+Blacklist list/remove/clear results include database stats such as
+`stats.recordCount` and `stats.blacklistCount`, so clearing the blacklist should
+immediately change `stats.blacklistCount` to `0`.
+
 Advanced users can still run read-only `SELECT` statements with `wosdata --query`.
 
-The interactive dashboard shows the active database path, WOSID count, and database size at startup.
+The interactive dashboard shows the active database path, WOSID count,
+blacklist database path, blacklist count, and database size at startup.
 
 Useful options:
 
 ```text
 --limit 20              Process only the first 20 selected WOS IDs
 --from-index 101        Start from the 101st WOS ID
---force                 Refetch and overwrite records that already exist in SQLite
+--force                 Replace managed task outputs when needed
+--reparse-existing      Refetch and overwrite records that already exist in SQLite
+--blacklist-db <file>   Use a custom SQLite parse blacklist database
 --record-timeout-ms 30000
 --cooldown-ms 500       Delay between records
 --concurrency 3         Use up to 3 reusable WOS tabs for this parse run
+--retry-blacklist       Retry WOSIDs previously skipped after parse failures
 ```
 
 In the interactive menu, use `2 WOS IDs to SQL`. Paste either a WOS summary
@@ -429,7 +477,9 @@ iiaide-wos clear --task "demo-search"
 ```
 
 Use a stable `--task` name for work that may be resumed or shared. Use
-`--force` only when intentionally replacing CLI-managed task outputs.
+`--force` only when intentionally replacing CLI-managed task outputs; use
+`--reparse-existing` only when intentionally revisiting WOSIDs already saved in
+SQLite.
 Use `clear` only when intentionally removing a CLI-managed task directory and
 its workspace index entry; before deletion the CLI prints the resolved task id
 and requires you to type that exact task id as confirmation.

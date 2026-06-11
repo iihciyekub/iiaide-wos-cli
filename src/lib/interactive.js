@@ -138,6 +138,8 @@ function printHeader(version, workspace = {}) {
     "",
     kvLine("WOS DB", wosDataDb.dbPath || "none"),
     kvLine("WOS IDs", String(wosDataDb.recordCount || 0)),
+    kvLine("Blacklist DB", wosDataDb.blacklistDbPath || "none"),
+    kvLine("Blacklist", String(wosDataDb.blacklistCount || 0)),
     kvLine("DB Size", formatBytes(wosDataDb.sizeBytes || 0)),
     "",
     kvLine("Auth", sidOkLabel(sidStatus)),
@@ -479,12 +481,17 @@ function printWosDataDbStatus(workspace) {
   stdout.write(`${color("32", "WOS data SQLite:", stdout)} ${db.dbPath || "none"}\n`);
   stdout.write(`  WOS IDs ${Number(db.recordCount || 0)}\n`);
   stdout.write(`  Sources ${Number(db.sourceCount || 0)}\n`);
+  stdout.write(`  Blacklist DB ${db.blacklistDbPath || "none"}\n`);
+  stdout.write(`  Blacklist ${Number(db.blacklistCount || 0)}\n`);
+  stdout.write(`  Blacklist Size ${formatBytes(db.blacklistSizeBytes || 0)}\n`);
   stdout.write(`  Size    ${formatBytes(db.sizeBytes || 0)}\n\n`);
 }
 
 function appendWosDataDbArg(result, workspace) {
   const dbPath = workspace?.wosDataDb?.dbPath;
+  const blacklistDbPath = workspace?.wosDataDb?.blacklistDbPath;
   if (dbPath) result.push("--db", dbPath);
+  if (blacklistDbPath) result.push("--blacklist-db", blacklistDbPath);
   return result;
 }
 

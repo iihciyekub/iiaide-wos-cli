@@ -363,7 +363,7 @@ Important distinction:
 - Fixed parse browser restarts are disabled by default so reusable WOS pages can
   keep collecting WOSID pages. Use `--browser-restart-every <n>` only when you
   explicitly want periodic Playwright context restarts.
-- If 12 full-record page parses fail consecutively, the CLI closes Playwright
+- If 20 full-record page parses fail consecutively, the CLI closes Playwright
   and reconnects with the current SID, then runs
   `window.wos.query.buildQuery("AB=<random 4 letters>")`. If that WOS query
   returns an explicit SID/session `error_code`, the CLI force-closes Playwright
@@ -376,13 +376,31 @@ Important distinction:
 - For `parse --csv`, the local CSV is normalized into
   `raw/<task-id>/full-record/<task-id>_wosid.csv` before the same parse stage
   runs.
-- If a WOSID already exists in SQLite, `parse` skips it unless `--force` is set.
+- If a WOSID already exists in SQLite, `parse` skips it before page navigation.
+  Use `parse --reparse-existing` only when those saved rows should be revisited
+  and overwritten after validation.
+- The parse summary prints aligned multi-line fields with the active SQLite
+  `db` path, `dbRecords` count, `dbBlacklist` count, and `blacklistDb` path so a
+  wrong database path or missing blacklist write is visible before WOS page
+  visits start. Color terminals highlight the left-hand field labels.
+- If DOM parsing of an opened full-record page produces no usable record, parse
+  falls back to the WOS single-record export API before marking the WOSID failed.
+- Every WOSID finally reported as `parse FAIL` is written to the separate global
+  SQLite blacklist database `~/.iiaide-wos/wos-blacklist.sqlite` and skipped by
+  default on future runs. Use `parse --retry-blacklist` to deliberately retry
+  those WOSIDs, or `wosdata --unblacklist <WOSID>` / `wosdata
+  --clear-blacklist` to remove saved blacklist entries. Use `--blacklist-db
+  <file>` to choose another blacklist database. 20 consecutive final parse
+  failures trigger the WOS `buildQuery` SID recovery diagnostic; blacklist
+  writes do not reset this counter.
 - SQLite aggregation is local-only and global to the user by default at
   `~/.iiaide-wos/wosdata.sqlite`. `iiaide-wos wosdata --merge-db` can merge
   another WOS SQLite database, `wosdata --wosid` can look up one saved WOSID,
-  and `wosdata --query` can run read-only `SELECT` queries; parse itself writes
-  directly to SQLite. These local SQLite paths do not call WOS request APIs or
-  import raw `.txt`/`.bib` files.
+  `wosdata --blacklist` can inspect failed WOSIDs skipped by parse, and
+  `wosdata --query` can run read-only `SELECT` queries; blacklist
+  list/remove/clear results include `blacklistDbPath`, `stats.recordCount`, and
+  `stats.blacklistCount`. Parse itself writes directly to SQLite. These local
+  SQLite paths do not call WOS request APIs or import raw `.txt`/`.bib` files.
 
 ## 6. Local-Only Methods
 

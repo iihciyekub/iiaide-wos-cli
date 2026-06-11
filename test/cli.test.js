@@ -13,6 +13,7 @@ const { classifyWosIdsToSqlInput, currentTaskSelection, formatBytes, formatRunti
 const { createProgress, createSpinner } = require("../src/lib/terminal");
 const { normalizeBatchResult } = require("../src/lib/wos-browser-export");
 const { wosIdsEquivalent } = require("../src/lib/wos-ids");
+const { existingWosDataBlacklistedIds } = require("../src/lib/wos-sqlite");
 
 function temporaryDirectory() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "iiaide-wos-test-"));
@@ -72,16 +73,22 @@ test("parses WOS data SQLite management tasks", () => {
   const root = temporaryDirectory();
   const sourceDb = path.join(root, "source.sqlite");
   const dbPath = path.join(root, "custom.sqlite");
+  const blacklistDbPath = path.join(root, "blacklist.sqlite");
   const args = cli.parseArgs([
-    "node", "cli", "wosdata", "--merge-db", sourceDb, "--db", dbPath, "--tasks-root", root,
+    "node", "cli", "wosdata", "--merge-db", sourceDb, "--db", dbPath, "--blacklist-db", blacklistDbPath, "--tasks-root", root,
   ]);
 
   assert.equal(args.command, "wosdata");
   assert.equal(args.mergeDbPath, sourceDb);
   assert.equal(args.dbPath, dbPath);
+  assert.equal(args.blacklistDbPath, blacklistDbPath);
   assert.equal(
     cli.parseArgs(["node", "cli", "wosdata", "--query", "SELECT wosid FROM wos_records", "--tasks-root", root]).dbPath,
     path.join(os.homedir(), ".iiaide-wos", "wosdata.sqlite")
+  );
+  assert.equal(
+    cli.parseArgs(["node", "cli", "wosdata", "--blacklist", "--tasks-root", root]).blacklistDbPath,
+    path.join(os.homedir(), ".iiaide-wos", "wos-blacklist.sqlite")
   );
   assert.equal(
     cli.parseArgs(["node", "cli", "wosdata", "--wosid", "WOS:ABC", "--tasks-root", root]).queryWosId,
@@ -90,6 +97,26 @@ test("parses WOS data SQLite management tasks", () => {
   assert.equal(
     cli.parseArgs(["node", "cli", "wosdata", "--query", "SELECT wosid FROM wos_records", "--tasks-root", root]).sqlQuery,
     "SELECT wosid FROM wos_records"
+  );
+  assert.equal(
+    cli.parseArgs(["node", "cli", "wosdata", "--blacklist", "--tasks-root", root]).blacklistQuery,
+    true
+  );
+  assert.equal(
+    cli.parseArgs(["node", "cli", "wosdata", "--unblacklist", "WOS:BAD", "--tasks-root", root]).unblacklistWosId,
+    "WOS:BAD"
+  );
+  assert.equal(
+    cli.parseArgs(["node", "cli", "wosdata", "--clear-blacklist", "--tasks-root", root]).clearBlacklist,
+    true
+  );
+  assert.equal(
+    cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--retry-blacklist", "--tasks-root", root]).retryBlacklist,
+    true
+  );
+  assert.equal(
+    cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--reparse-existing", "--tasks-root", root]).reparseExisting,
+    true
   );
 });
 
@@ -204,8 +231,9 @@ test("parse failures are recorded once without retrying individual WOSIDs", () =
   assert.doesNotMatch(source, /parseMaxAttempts/);
   assert.doesNotMatch(source, /willRetry/);
   assert.doesNotMatch(source, /chunk\.push\(\{ \.\.\.item/);
-  assert.match(source, /const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 12/);
+  assert.match(source, /const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 20/);
   assert.match(match[0], /const sessionRecoveryError = isSessionRecoveryError\(error\)/);
+  assert.match(match[0], /const blacklisted = true/);
   assert.match(match[0], /recordProgressStatus = "failed"/);
   assert.match(match[0], /consecutiveParseFailures \+= 1/);
   assert.match(match[0], /consecutiveParseFailures >= PARSE_RECOVERY_CONSECUTIVE_FAILURES/);
@@ -220,6 +248,19 @@ test("SID recovery classifies parse errors for diagnostics only", () => {
   assert.equal(cli.isSessionRecoveryError(new Error("You’ve reached the query limit for your session.")), true);
   assert.equal(cli.isSessionRecoveryError(new Error("WOS returned a login page")), true);
   assert.equal(cli.isSessionRecoveryError(new Error("Target page, context or browser has been closed")), true);
+});
+
+test("WOSID parse failures are blacklistable without error-type filtering", () => {
+  assert.equal(cli.isWosIdNoResultError(new Error("No full-record JSON parsed for WOS:BAD")), true);
+  assert.equal(cli.isWosIdNoResultError(new Error("[WOS] Failed to open full record for WOS:BAD; current route=unknown, page=unknown")), true);
+  assert.equal(cli.isWosIdNoResultError(new Error("Full record timeout after 20000ms: WOS:BAD")), true);
+  assert.equal(cli.isWosIdNoResultError(new Error("You’ve reached the query limit for your session.")), false);
+  assert.equal(cli.isWosIdNoResultError(new Error("WOS data record mismatch: expected=WOS:A actual=WOS:B")), false);
+  assert.equal(cli.isWosIdBlacklistableError(new Error("No full-record JSON parsed for WOS:BAD")), true);
+  assert.equal(cli.isWosIdBlacklistableError(new Error("Full record timeout after 20000ms: WOS:BAD")), true);
+  assert.equal(cli.isWosIdBlacklistableError(new Error("Cannot read properties of undefined while parsing WOS:BAD")), true);
+  assert.equal(cli.isWosIdBlacklistableError(new Error("WOS data record mismatch: expected=WOS:A actual=WOS:B")), true);
+  assert.equal(cli.isWosIdBlacklistableError(new Error("SQLite database is locked")), true);
 });
 
 test("SID recovery invalidates only explicit WOS session error codes", () => {
@@ -687,6 +728,8 @@ test("interactive header shows WOS browser mode and profile name", () => {
   assert.match(output, /Task ID\s+TID20260610120000/);
   assert.match(output, /WOS DB\s+none/);
   assert.match(output, /WOS IDs\s+0/);
+  assert.match(output, /Blacklist DB\s+none/);
+  assert.match(output, /Blacklist\s+0/);
   assert.match(output, /DB Size\s+0 B/);
   assert.doesNotMatch(output, /Tasks\s+\d+ tasks/);
   assert.match(output, /Runtime\s+1m 05s/);
@@ -714,7 +757,7 @@ test("interactive header shows WOS browser mode and profile name", () => {
   const panelRows = output
     .split(/\r?\n/)
     .filter((line) => /\|.*\|\s+\|.*\|/.test(line));
-  assert.equal(panelRows.length, 15);
+  assert.equal(panelRows.length, 17);
   assert.match(panelRows[0], /^\| {50}\|/);
   const logoRowIndex = panelRows.findIndex((line) => line.includes("[ W O S - C L I ]"));
   assert.ok(logoRowIndex > 0);
@@ -774,7 +817,9 @@ test("formats runtime for the interactive dashboard", () => {
 test("uses one workspace-scoped WOS Playwright profile", () => {
   const root = temporaryDirectory();
   const dbPath = path.join(root, "global.sqlite");
-  const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root, "--db", dbPath]);
+  const blacklistDbPath = path.join(root, "blacklist.sqlite");
+  cli.recordWosDataBlacklist({ dbPath, blacklistDbPath, wosid: "WOS:BAD", error: "No full-record JSON parsed" });
+  const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root, "--db", dbPath, "--blacklist-db", blacklistDbPath]);
   assert.equal(cli.wosUserDataDir(args), path.join(root, ".browser-profile"));
   assert.equal(cli.wosProfileName(args), ".browser-profile");
   assert.equal(cli.wosBrowserMode(args), "background");
@@ -786,7 +831,9 @@ test("uses one workspace-scoped WOS Playwright profile", () => {
   assert.equal(typeof status.runtimeMs, "number");
   assert.ok(status.runtimeMs >= 0);
   assert.equal(status.wosDataDb.dbPath, dbPath);
+  assert.equal(status.wosDataDb.blacklistDbPath, blacklistDbPath);
   assert.equal(status.wosDataDb.recordCount, 0);
+  assert.equal(status.wosDataDb.blacklistCount, 1);
 });
 
 test("persists visible Playwright mode in workspace config", () => {
@@ -940,7 +987,9 @@ test("record extraction uses injected wos.js page parser", () => {
   assert.ok(match, "extractOneRecordInfo source should be present");
   assert.match(match[0], /window\.wos\.record\.viewFullRecordByWosId\(targetWosId\)/);
   assert.match(match[0], /parseCurrentFullRecordPage\(targetWosId\)/);
-  assert.match(match[0], /parsedRecords = Object\.values\(parsed \|\| \{\}\)\.filter/);
+  assert.match(match[0], /fetchFullRecordJsonByWosId\(targetWosId\)/);
+  assert.match(match[0], /_parseMethod: parseMethod/);
+  assert.match(match[0], /diagnostics\.join/);
   assert.doesNotMatch(match[0], /context\.newPage/);
   assert.match(source, /runPoolWithReusableRecordPages\(chunk, args\.concurrency/);
   assert.doesNotMatch(source, /EXTRACT_AUTHOR_INFO/);
@@ -1072,6 +1121,62 @@ test("WOS data validation compares accession IDs without punctuation-only differ
 
   assert.equal(result.imported, 1);
   assert.equal(wosIdsEquivalent("ALT:123-45", "ALT12345"), true);
+});
+
+test("WOS data blacklist records parse-failed WOSIDs and can clear them", () => {
+  const root = temporaryDirectory();
+  const dbPath = path.join(root, "global.sqlite");
+  const blacklistDbPath = path.join(root, "blacklist.sqlite");
+  seedWosDataRecord(dbPath, "saved-record", {
+    wosid: "WOS:OK",
+    title: "Saved",
+  });
+  const first = cli.recordWosDataBlacklist({
+    dbPath,
+    blacklistDbPath,
+    wosid: "WOS:BAD",
+    taskId: "blacklist-task",
+    source: "parse:blacklist-task",
+    error: "No full-record JSON parsed for WOS:BAD",
+  });
+  assert.equal(first.wosid, "WOS:BAD");
+  assert.equal(first.blacklistDbPath, blacklistDbPath);
+  cli.recordWosDataBlacklist({
+    dbPath,
+    blacklistDbPath,
+    wosid: "WOS:BAD",
+    taskId: "blacklist-task",
+    error: "No full-record JSON parsed for WOS:BAD",
+  });
+
+  assert.equal(fs.existsSync(dbPath), true);
+  assert.equal(fs.existsSync(blacklistDbPath), true);
+  assert.deepEqual([...existingWosDataBlacklistedIds({ blacklistDbPath }, ["WOS:BAD", "WOS:OK"])], ["WOS:BAD"]);
+  const listed = cli.queryWosDataBlacklist({ dbPath, blacklistDbPath });
+  assert.equal(listed.total, 1);
+  assert.equal(listed.blacklistDbPath, blacklistDbPath);
+  assert.equal(listed.stats.recordCount, 1);
+  assert.equal(listed.stats.blacklistCount, 1);
+  assert.equal(listed.rows[0].wosid, "WOS:BAD");
+  assert.equal(listed.rows[0].failedCount, 2);
+
+  const removed = cli.removeWosDataBlacklist({ dbPath, blacklistDbPath, wosid: "WOS:BAD" });
+  assert.equal(removed.removed, 1);
+  assert.equal(removed.stats.blacklistCount, 0);
+  assert.equal(cli.queryWosDataBlacklist({ dbPath, blacklistDbPath }).total, 0);
+
+  cli.recordWosDataBlacklist({
+    dbPath,
+    blacklistDbPath,
+    wosid: "WOS:BAD",
+    taskId: "blacklist-task",
+    reason: "parse-failed",
+    error: "Full record timeout after 20000ms: WOS:BAD",
+  });
+  const cleared = cli.clearWosDataBlacklist({ dbPath, blacklistDbPath });
+  assert.equal(cleared.removed, 1);
+  assert.equal(cleared.stats.blacklistCount, 0);
+  assert.equal(cli.queryWosDataBlacklist({ dbPath, blacklistDbPath }).total, 0);
 });
 
 test("wosdata skips existing records by default and force overwrites them", () => {
@@ -1253,6 +1358,45 @@ test("parse command skips WOS IDs already present in the global SQLite database"
   } finally {
     db.close();
   }
+
+  const forcedTaskResult = await cli.runParse(cli.parseArgs([
+    "node", "cli", "parse", "--task", "global-skip", "--tasks-root", tasksRoot, "--db", dbPath, "--force",
+  ]));
+  assert.equal(forcedTaskResult.selected, 0);
+  assert.equal(forcedTaskResult.completed, 1);
+  assert.equal(forcedTaskResult.failed, 0);
+});
+
+test("parse command skips blacklisted WOS IDs unless retry is requested", async () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const dbPath = path.join(root, "global.sqlite");
+  const blacklistDbPath = path.join(root, "blacklist.sqlite");
+  const csvPath = path.join(root, "input.csv");
+  fs.writeFileSync(csvPath, "wosid\nWOS:BAD\n");
+  cli.recordWosDataBlacklist({
+    dbPath,
+    blacklistDbPath,
+    wosid: "WOS:BAD",
+    taskId: "prior-task",
+    error: "No full-record JSON parsed for WOS:BAD",
+  });
+  cli.importWosIds(cli.parseArgs([
+    "node", "cli", "import", "--csv", csvPath, "--task", "blacklist-skip", "--tasks-root", tasksRoot, "--db", dbPath, "--blacklist-db", blacklistDbPath,
+  ]));
+
+  const result = await cli.runParse(cli.parseArgs([
+    "node", "cli", "parse", "--task", "blacklist-skip", "--tasks-root", tasksRoot, "--db", dbPath, "--blacklist-db", blacklistDbPath,
+  ]));
+
+  assert.equal(result.selected, 0);
+  assert.equal(result.completed, 0);
+  assert.equal(result.skippedBlacklist, 1);
+  assert.equal(result.blacklisted, 1);
+  assert.equal(result.failed, 0);
+  assert.equal(cli.parseArgs([
+    "node", "cli", "parse", "--task", "blacklist-skip", "--retry-blacklist", "--tasks-root", tasksRoot, "--db", dbPath, "--blacklist-db", blacklistDbPath,
+  ]).retryBlacklist, true);
 });
 
 test("parse command accepts a local WOSID CSV directly", async () => {
@@ -1292,7 +1436,8 @@ test("parse command accepts a local WOSID CSV directly", async () => {
     fs.readFileSync(path.join(tasksRoot, "csv-parse", "raw", "csv-parse", "full-record", "csv-parse_wosid.csv"), "utf8").trim(),
     "wosid\nWOS:CSV001"
   );
-  assert.ok(errors.some((line) => /skipped=1/.test(line)));
+  assert.ok(errors.join("\n").includes("  skipped             1"));
+  assert.ok(errors.join("\n").includes("  dbBlacklist         "));
   assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "parse-completed");
   assert.equal(fs.existsSync(path.join(tasksRoot, "csv-parse", "raw", "wosdata")), false);
 });

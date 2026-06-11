@@ -49,6 +49,15 @@ does not store raw full-record `.txt` batches, BibTeX `.bib` files, WOS
 usernames, passwords, or SID values. All task workspaces use this same database
 unless `--db <file>` is supplied.
 
+The parse blacklist is isolated in a separate SQLite database:
+
+```text
+~/.iiaide-wos/wos-blacklist.sqlite
+```
+
+These databases are user-level files, not task artifacts. Use `--db <file>` or
+`--blacklist-db <file>` when you need custom database paths.
+
 ## URL And UUID Workflow
 
 The `run` command:
@@ -191,14 +200,31 @@ parsed data goes directly to SQLite.
 Resume behavior is database-based:
 
 - Existing SQLite WOSID records are skipped by default.
-- `--force` refetches existing WOSID records and overwrites the SQLite row after validation.
+- `--force` can replace managed task outputs, but parse still skips existing
+  SQLite rows before page visits.
+- `--reparse-existing` refetches existing WOSID records and overwrites the
+  SQLite row after validation.
+- The parse work summary prints aligned multi-line fields for `dbRecords`,
+  `dbBlacklist`, `db`, and `blacklistDb` so wrong database selection or a failed
+  blacklist write is visible before browser work starts. Color terminals
+  highlight the left-hand field labels.
 - `--from-index` and `--limit` select a slice of the WOSID index.
 - WOSID page failures are recorded once with the real extraction or SQLite
   import error. They are not requeued for retry.
+- If a full-record page opens but DOM extraction returns no usable record, parse
+  falls back to the WOS single-record export API before counting the WOSID as
+  failed.
+- Every WOSID finally reported as `parse FAIL` is written to the separate global
+  SQLite blacklist database and skipped by default on future parse runs. Use
+  `--retry-blacklist` to include them in a deliberate retry run.
+- 20 consecutive final parse failures trigger the WOS `buildQuery` SID recovery
+  diagnostic. Blacklist writes do not reset this counter.
+- Use `wosdata --unblacklist <WOSID>` to remove one blacklist entry or
+  `wosdata --clear-blacklist` to remove all blacklist entries.
 - Final failures are recorded at `raw/<uuid>/full-record/<uuid>_parse_failures.json`.
 - `--browser-restart-every <n>` can explicitly restart Playwright between parse
   batches, but the default is `0` so reusable tabs keep collecting WOSID pages.
-- Parse failures do not directly invalidate the current SID. 12 consecutive
+- Parse failures do not directly invalidate the current SID. 20 consecutive
   WOSID page parse failures close the entire Playwright context and reconnect
   with the current SID, then run
   `window.wos.query.buildQuery("AB=<random 4 letters>")`. If that WOS query
@@ -231,9 +257,24 @@ Query one WOSID in the active database:
 iiaide-wos wosdata --wosid "WOS:000000000000001"
 ```
 
+List WOSIDs that parse skips by default because their full-record pages could
+not yield usable records:
+
+```bash
+iiaide-wos wosdata --blacklist
+iiaide-wos wosdata --unblacklist "WOS:000000000000001"
+iiaide-wos wosdata --clear-blacklist
+```
+
+Blacklist list/remove/clear results include `blacklistDbPath`,
+`stats.recordCount`, and `stats.blacklistCount`. After
+`wosdata --clear-blacklist`, `stats.blacklistCount` should be `0`.
+
 The default database is `~/.iiaide-wos/wosdata.sqlite`; override it with
-`--db <file>`. Database merge validates each record's stored JSON before
-writing. By default, existing WOSID rows are skipped; `--force` overwrites them.
+`--db <file>`. The default blacklist database is
+`~/.iiaide-wos/wos-blacklist.sqlite`; override it with `--blacklist-db <file>`.
+Database merge validates each record's stored JSON before writing. By default,
+existing WOSID rows are skipped; `wosdata --merge-db --force` overwrites them.
 Advanced queries are available with `wosdata --query "<SELECT ...>"` and are
 restricted to read-only `SELECT` statements. The database stores one
 primary row per WOSID in `wos_records`
@@ -246,7 +287,7 @@ URL/result-set UUID or a local `.csv` file path; the CLI chooses the matching
 parse pipeline automatically. The default parse options are:
 
 ```text
-concurrency=saved parse tabs, default 1 | timeout=20000ms | cooldown=250ms | restart=off | recovery=buildQuery AB=<random> | from=1 | limit=all
+concurrency=saved parse tabs, default 1 | timeout=20000ms | cooldown=250ms | restart=off | blacklist=skip | recovery=20x buildQuery AB=<random> | from=1 | limit=all
 ```
 
 ## Task Lifecycle
@@ -275,7 +316,7 @@ highlights it with `*`. Before any task prompt, the menu prints a
 input switches tasks, or `new` creates a fresh task.
 
 The same startup panel shows the active global WOS data database path, WOSID
-record count, and database size.
+record count, blacklist database path, blacklist count, and database size.
 
 Task commands:
 
@@ -344,8 +385,9 @@ is a different UUID, the CLI appends that source to the same task and writes it
 under separate `raw/<uuid>/` directories, while parsed page data is shared in
 the global SQLite database. After printing the available record count and batch
 plan, interactive TXT and BibTeX downloads start directly. Use `--force` only
-when you intentionally want to replace a managed task's existing outputs or
-overwrite existing WOSID database rows.
+when you intentionally want to replace a managed task's existing outputs. Use
+`--reparse-existing` only when you intentionally want `parse` to revisit WOSIDs
+that are already present in SQLite.
 For download workflows, pressing Enter at the `WOS summary URL or UUID` prompt
 uses the shown saved source when one exists. If no saved source is available,
 enter a source, press `B` to return to the menu, or press `q` to exit the CLI.
@@ -381,6 +423,8 @@ Normal work should use the default `./tasks` directory.
 - Without `--task`, a timestamp-based task ID is generated.
 - `--out-dir` overrides the task directory.
 - `--force` permits replacement of CLI-managed task outputs.
+- `--reparse-existing` permits parse to revisit WOSIDs already present in the
+  SQLite database.
 - The CLI refuses to clean any directory without a `iiaide-wos` manifest.
 - `run --reuse-raw --force` preserves raw WOS batches and rebuilds derived
   files only when the raw batch range is contiguous and covers the known WOS

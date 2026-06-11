@@ -3,6 +3,85 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.47 - 2026-06-11
+
+- Sync README and usage docs with the current CLI defaults for global SQLite
+  data and blacklist database locations.
+- Update the request-level parse recovery docs to the current 20-consecutive
+  failure threshold.
+- Refresh the install example tag to the current documented CLI version.
+
+## 0.4.46 - 2026-06-11
+
+- Highlight the left-hand labels in the multi-line parse work summary when the
+  terminal supports color.
+
+## 0.4.45 - 2026-06-11
+
+- Write every final `parse FAIL` WOSID directly to the parse blacklist database,
+  without filtering by error category.
+- Keep counting blacklisted parse failures toward SID recovery diagnostics, and
+  run the recovery query only after 20 consecutive failed WOSID page parses.
+- Print the parse work summary as aligned multi-line fields instead of one long
+  comma-separated line.
+
+## 0.4.44 - 2026-06-11
+
+- Store parse blacklist entries in a dedicated SQLite database at
+  `~/.iiaide-wos/wos-blacklist.sqlite` instead of mixing them into the WOS data
+  record database.
+- Add `--blacklist-db <file>` for commands that need an explicit parse
+  blacklist database path.
+- Show `blacklistDb` in parse summaries and dashboard/status panels so blacklist
+  writes can be verified independently from WOS record inserts.
+- Treat non-session, non-SQLite, non-validation final WOSID parse failures as
+  blacklistable, and report blacklist write failures explicitly.
+
+## 0.4.43 - 2026-06-11
+
+- Show the persisted SQLite blacklist count in workspace and WOS data status
+  panels.
+- Include SQLite record and blacklist counts in blacklist list/remove/clear
+  command results so users can confirm whether blacklist writes and clears took
+  effect.
+- Add `dbBlacklist` to parse work summaries alongside `dbRecords` and `db`.
+
+## 0.4.42 - 2026-06-11
+
+- Treat WOSID record-level parse failures as persistent blacklist entries so
+  future parse runs skip them by default instead of repeatedly visiting the same
+  inaccessible pages.
+- Add `wosdata --unblacklist <WOSID>` and `wosdata --clear-blacklist` to remove
+  one or all parse blacklist entries.
+- Keep SID/session, SQLite, and record-mismatch errors out of the WOSID
+  blacklist so session recovery and data validation remain separate.
+
+## 0.4.41 - 2026-06-11
+
+- Add a WOS full-record export API fallback when DOM page parsing returns no
+  usable record, so opened full-record pages are not marked failed solely
+  because the WOS page structure changed.
+- Print the active WOS SQLite database path and record count in parse work
+  summaries to make wrong `--db` selection visible before browser work starts.
+
+## 0.4.40 - 2026-06-11
+
+- Keep `parse --force` scoped to task replacement; existing SQLite WOSID records
+  are still skipped before WOS page visits.
+- Add `parse --reparse-existing` for the explicit case where existing SQLite
+  WOSID rows should be visited again and overwritten after validation.
+- Add a worker-side SQLite existence guard so WOSIDs written by another running
+  command are skipped before page navigation.
+
+## 0.4.39 - 2026-06-11
+
+- Add a global SQLite WOSID blacklist for no-result full-record page failures.
+  Blacklisted WOSIDs are skipped by default on future parse runs and no longer
+  contribute to the consecutive-failure SID recovery counter.
+- Add `parse --retry-blacklist` to explicitly retry blacklisted WOSIDs. A
+  successful retry removes the WOSID from the blacklist.
+- Add `wosdata --blacklist` to inspect the persisted blacklist entries.
+
 ## 0.4.38 - 2026-06-11
 
 - Add `iiw` as a short command alias for the existing `iiaide-wos` CLI entry

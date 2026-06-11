@@ -8,6 +8,10 @@ function defaultWosDataDbPath() {
   return path.join(os.homedir(), ".iiaide-wos", "wosdata.sqlite");
 }
 
+function defaultWosBlacklistDbPath() {
+  return path.join(os.homedir(), ".iiaide-wos", "wos-blacklist.sqlite");
+}
+
 function scalar(value) {
   if (value === null || value === undefined) return "";
   if (Array.isArray(value)) return value.map(scalar).filter(Boolean).join("; ");
@@ -104,6 +108,29 @@ function openWosDataDatabase(dbPath) {
   return db;
 }
 
+function openWosBlacklistDatabase(dbPath) {
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wos_blacklist (
+      wosid TEXT PRIMARY KEY,
+      reason TEXT NOT NULL,
+      error TEXT NOT NULL,
+      task_id TEXT,
+      source TEXT,
+      failed_count INTEGER NOT NULL DEFAULT 1,
+      first_failed_at TEXT NOT NULL,
+      last_failed_at TEXT NOT NULL
+    );
+  `);
+  return db;
+}
+
+function resolveWosBlacklistDbPath(options = {}) {
+  return options.blacklistDbPath || options.dbPath || defaultWosBlacklistDbPath();
+}
+
 function safeReadonlyDatabase(dbPath) {
   if (!dbPath || !fs.existsSync(dbPath)) return null;
   try {
@@ -148,29 +175,168 @@ function existingWosDataIds(dbPath, wosids) {
   return existing;
 }
 
-function wosDataDbStats(dbPath) {
-  const stats = {
-    dbPath,
-    exists: Boolean(dbPath && fs.existsSync(dbPath)),
-    sizeBytes: 0,
-    recordCount: 0,
-    sourceCount: 0,
-  };
-  if (!stats.exists) return stats;
-  stats.sizeBytes = fs.statSync(dbPath).size;
+function existingWosDataBlacklistedIds(dbPathOrOptions, wosids) {
+  const dbPath = typeof dbPathOrOptions === "object"
+    ? resolveWosBlacklistDbPath(dbPathOrOptions)
+    : dbPathOrOptions;
+  const normalized = [...new Set((wosids || []).map(normalizeWosId).filter(Boolean))];
+  const existing = new Set();
+  if (!normalized.length) return existing;
   const db = safeReadonlyDatabase(dbPath);
-  if (!db) return stats;
+  if (!db) return existing;
   try {
-    if (tableExists(db, "wos_records")) {
-      stats.recordCount = db.prepare("SELECT COUNT(*) AS count FROM wos_records").get().count || 0;
-    }
-    if (tableExists(db, "wos_record_sources")) {
-      stats.sourceCount = db.prepare("SELECT COUNT(*) AS count FROM wos_record_sources").get().count || 0;
+    if (!tableExists(db, "wos_blacklist")) return existing;
+    const query = db.prepare("SELECT 1 FROM wos_blacklist WHERE wosid = ?");
+    for (const wosid of normalized) {
+      if (query.get(wosid)) existing.add(wosid);
     }
   } finally {
     db.close();
   }
+  return existing;
+}
+
+function wosDataDbStats(dbPath, blacklistDbPath = dbPath) {
+  const stats = {
+    dbPath,
+    blacklistDbPath,
+    exists: Boolean(dbPath && fs.existsSync(dbPath)),
+    blacklistExists: Boolean(blacklistDbPath && fs.existsSync(blacklistDbPath)),
+    sizeBytes: 0,
+    blacklistSizeBytes: 0,
+    recordCount: 0,
+    sourceCount: 0,
+    blacklistCount: 0,
+  };
+  if (stats.exists) {
+    stats.sizeBytes = fs.statSync(dbPath).size;
+    const db = safeReadonlyDatabase(dbPath);
+    if (db) {
+      try {
+        if (tableExists(db, "wos_records")) {
+          stats.recordCount = db.prepare("SELECT COUNT(*) AS count FROM wos_records").get().count || 0;
+        }
+        if (tableExists(db, "wos_record_sources")) {
+          stats.sourceCount = db.prepare("SELECT COUNT(*) AS count FROM wos_record_sources").get().count || 0;
+        }
+      } finally {
+        db.close();
+      }
+    }
+  }
+  if (stats.blacklistExists) {
+    stats.blacklistSizeBytes = fs.statSync(blacklistDbPath).size;
+    const blacklistDb = safeReadonlyDatabase(blacklistDbPath);
+    if (blacklistDb) {
+      try {
+        if (tableExists(blacklistDb, "wos_blacklist")) {
+          stats.blacklistCount = blacklistDb.prepare("SELECT COUNT(*) AS count FROM wos_blacklist").get().count || 0;
+        }
+      } finally {
+        blacklistDb.close();
+      }
+    }
+  }
   return stats;
+}
+
+function recordWosDataBlacklist({ dbPath, blacklistDbPath, wosid, taskId = "", source = "parse", reason = "no-result", error = "" }) {
+  const resolvedDbPath = resolveWosBlacklistDbPath({ dbPath, blacklistDbPath });
+  if (!resolvedDbPath) throw new Error("Missing SQLite blacklist database path");
+  const normalized = normalizeWosId(wosid);
+  if (!normalized) throw new Error(`Invalid WOS ID for blacklist: ${wosid}`);
+  const db = openWosBlacklistDatabase(resolvedDbPath);
+  const now = new Date().toISOString();
+  try {
+    db.prepare(`
+      INSERT INTO wos_blacklist (
+        wosid, reason, error, task_id, source, failed_count, first_failed_at, last_failed_at
+      ) VALUES (
+        @wosid, @reason, @error, @taskId, @source, 1, @now, @now
+      )
+      ON CONFLICT(wosid) DO UPDATE SET
+        reason = excluded.reason,
+        error = excluded.error,
+        task_id = excluded.task_id,
+        source = excluded.source,
+        failed_count = wos_blacklist.failed_count + 1,
+        last_failed_at = excluded.last_failed_at
+    `).run({
+      wosid: normalized,
+      reason: String(reason || "no-result"),
+      error: String(error || ""),
+      taskId: String(taskId || ""),
+      source: String(source || "parse"),
+      now,
+    });
+    return { ok: true, dbPath, blacklistDbPath: resolvedDbPath, wosid: normalized };
+  } finally {
+    db.close();
+  }
+}
+
+function removeWosDataBlacklist({ dbPath, blacklistDbPath, wosid }) {
+  const resolvedDbPath = resolveWosBlacklistDbPath({ dbPath, blacklistDbPath });
+  if (!resolvedDbPath) throw new Error("Missing SQLite blacklist database path");
+  const normalized = normalizeWosId(wosid);
+  if (!normalized || !fs.existsSync(resolvedDbPath)) return { ok: true, dbPath, blacklistDbPath: resolvedDbPath, wosid: normalized, removed: 0, stats: wosDataDbStats(dbPath, resolvedDbPath) };
+  const db = openWosBlacklistDatabase(resolvedDbPath);
+  let removed = 0;
+  try {
+    const result = db.prepare("DELETE FROM wos_blacklist WHERE wosid = ?").run(normalized);
+    removed = result.changes || 0;
+  } finally {
+    db.close();
+  }
+  return { ok: true, dbPath, blacklistDbPath: resolvedDbPath, wosid: normalized, removed, stats: wosDataDbStats(dbPath, resolvedDbPath) };
+}
+
+function clearWosDataBlacklist({ dbPath, blacklistDbPath }) {
+  const resolvedDbPath = resolveWosBlacklistDbPath({ dbPath, blacklistDbPath });
+  if (!resolvedDbPath) throw new Error("Missing SQLite blacklist database path");
+  if (!fs.existsSync(resolvedDbPath)) return { ok: true, dbPath, blacklistDbPath: resolvedDbPath, removed: 0, stats: wosDataDbStats(dbPath, resolvedDbPath) };
+  const db = openWosBlacklistDatabase(resolvedDbPath);
+  let removed = 0;
+  try {
+    const result = db.prepare("DELETE FROM wos_blacklist").run();
+    removed = result.changes || 0;
+  } finally {
+    db.close();
+  }
+  return { ok: true, dbPath, blacklistDbPath: resolvedDbPath, removed, stats: wosDataDbStats(dbPath, resolvedDbPath) };
+}
+
+function queryWosDataBlacklist({ dbPath, blacklistDbPath, limit = 50 }) {
+  const resolvedDbPath = resolveWosBlacklistDbPath({ dbPath, blacklistDbPath });
+  if (!resolvedDbPath) throw new Error("Missing SQLite blacklist database path");
+  if (!fs.existsSync(resolvedDbPath)) {
+    return { ok: true, dbPath, blacklistDbPath: resolvedDbPath, total: 0, rowCount: 0, rows: [], stats: wosDataDbStats(dbPath, resolvedDbPath) };
+  }
+  const rowLimit = Math.max(1, Math.min(Number(limit) || 50, 500));
+  const db = new Database(resolvedDbPath, { readonly: true });
+  try {
+    if (!tableExists(db, "wos_blacklist")) {
+      return { ok: true, dbPath, blacklistDbPath: resolvedDbPath, total: 0, rowCount: 0, rows: [], stats: wosDataDbStats(dbPath, resolvedDbPath) };
+    }
+    const total = db.prepare("SELECT COUNT(*) AS count FROM wos_blacklist").get().count || 0;
+    const rows = db.prepare(`
+      SELECT
+        wosid,
+        reason,
+        error,
+        task_id AS taskId,
+        source,
+        failed_count AS failedCount,
+        first_failed_at AS firstFailedAt,
+        last_failed_at AS lastFailedAt
+      FROM wos_blacklist
+      ORDER BY last_failed_at DESC, wosid
+      LIMIT ?
+    `).all(rowLimit);
+    return { ok: true, dbPath, blacklistDbPath: resolvedDbPath, total, limit: rowLimit, rowCount: rows.length, rows, stats: wosDataDbStats(dbPath, resolvedDbPath) };
+  } finally {
+    db.close();
+  }
 }
 
 function ensureWosDataSourceDatabase(dbPath) {
@@ -471,14 +637,20 @@ function linkExistingWosDataSources({ dbPath, wosids, taskId, source = "global-d
 
 module.exports = {
   defaultWosDataDbPath,
+  defaultWosBlacklistDbPath,
+  clearWosDataBlacklist,
+  existingWosDataBlacklistedIds,
   existingWosDataIds,
   importWosDataRecord,
   linkExistingWosDataSources,
   mergeWosDataDatabase,
   normalizeWosId,
+  queryWosDataBlacklist,
   queryWosDataByWosId,
   queryWosDataDatabase,
+  recordWosDataBlacklist,
   recordRow,
+  removeWosDataBlacklist,
   validateWosDataRecord,
   wosDataDbStats,
   wosDataRecordExists,

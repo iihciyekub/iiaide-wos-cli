@@ -5,18 +5,25 @@ const { spawn } = require("node:child_process");
 const { chromium } = require("playwright");
 const { readJson, writeFileAtomic, writeJson } = require("./lib/io");
 const { interactiveArgs, isBackResult, isQuitResult, isUserAbortError, promptConfirmationText, promptSid } = require("./lib/interactive");
-const { createProgress, createSpinner, isInteractive } = require("./lib/terminal");
+const { color, createProgress, createSpinner, isInteractive } = require("./lib/terminal");
 const { updateCli } = require("./lib/update");
 const { exportBibBatchesViaWosJs, exportTxtBatchesViaWosJs } = require("./lib/wos-browser-export");
 const { normalizeWosId, reconcileWosId } = require("./lib/wos-ids");
 const {
   defaultWosDataDbPath,
+  defaultWosBlacklistDbPath,
+  clearWosDataBlacklist,
+  existingWosDataBlacklistedIds,
   existingWosDataIds,
   importWosDataRecord,
   linkExistingWosDataSources,
   mergeWosDataDatabase,
+  queryWosDataBlacklist,
   queryWosDataByWosId,
   queryWosDataDatabase,
+  recordWosDataBlacklist,
+  removeWosDataBlacklist,
+  wosDataRecordExists,
   wosDataDbStats,
 } = require("./lib/wos-sqlite");
 const { version: VERSION } = require("../package.json");
@@ -25,7 +32,7 @@ const DEFAULT_BATCH_SIZE = 200;
 const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_RECORD_TIMEOUT_MS = 20000;
 const DEFAULT_BROWSER_RESTART_EVERY = 0;
-const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 12;
+const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 20;
 const DEFAULT_PARSE_CONNECTIVITY_QUERY = "PY=2000";
 const DEFAULT_WOS_PROTOCOL = "https";
 const DEFAULT_WOS_DOMAIN = "www.webofscience.com";
@@ -98,7 +105,7 @@ Usage:
   iiaide-wos clear (--task <task-id> | --latest) [--tasks-root <dir>]
   iiaide-wos sid [--sid <SID> | --from-browser] [--tasks-root <dir>] [--wos-domain <domain>] [--base-url <url>] [--headed]
   iiaide-wos parse [--sid <SID>] (--task <task-id> | --latest | --csv <wosids.csv>) [options]
-  iiaide-wos wosdata (--merge-db <file> | --wosid <WOSID> | --query <sql>) [--db <file>] [--tasks-root <dir>]
+  iiaide-wos wosdata (--merge-db <file> | --wosid <WOSID> | --query <sql> | --blacklist | --unblacklist <WOSID> | --clear-blacklist) [--db <file>] [--blacklist-db <file>] [--tasks-root <dir>]
 
 Inputs:
   --sid <SID>             Web of Science SID. Interactive commands prompt when missing or expired
@@ -109,14 +116,18 @@ Inputs:
   --merge-db <file>       Merge records from another WOS SQLite database into --db
   --wosid <WOSID>         Query one WOS record from the SQLite database
   --query <sql>           Run a read-only SELECT query against the WOS SQLite database
+  --blacklist             List WOSIDs skipped by parse because record-level parsing failed
+  --unblacklist <WOSID>   Remove one WOSID from the parse blacklist
+  --clear-blacklist       Remove all WOSIDs from the parse blacklist
 
 Output management:
   --task <task-id>        Stable task id. If omitted, creates a timestamp-based task id
   --task-label <label>    Human label stored in task metadata
   --tasks-root <dir>      Parent directory for tasks. Default: ./tasks
   --db <file>             SQLite WOS data database. Default: ~/.iiaide-wos/wosdata.sqlite
+  --blacklist-db <file>   SQLite parse blacklist database. Default: ~/.iiaide-wos/wos-blacklist.sqlite
   --out-dir <dir>         Exact task directory override
-  --force                 Allow managed task replacement and overwrite existing SQLite WOS records
+  --force                 Allow managed task replacement
   --reuse-raw             Rebuild CSV from existing raw batches when present
 
 Export options:
@@ -147,6 +158,8 @@ Parse options:
   --cooldown-ms <n>       Delay after each record. Default: 250
   --browser-restart-every <n>
                           Restart Playwright after n parsed WOSIDs. Default: 0 disables
+  --retry-blacklist       Include blacklisted parse-failed WOSIDs in this parse run
+  --reparse-existing      Visit WOSIDs that already exist in SQLite and overwrite them
 
 Task directory layout:
   raw/<uuid>/full-record/ WOS fullRecord text batches as <uuid>_<start>_<end>.txt
@@ -176,12 +189,16 @@ function parseArgs(argv) {
     csvPath: "",
     mergeDbPath: "",
     queryWosId: "",
+    unblacklistWosId: "",
     sqlQuery: "",
+    blacklistQuery: false,
+    clearBlacklist: false,
     taskId: "",
     taskLabel: "",
     outDir: "",
     tasksRoot: path.resolve(process.cwd(), "tasks"),
     dbPath: "",
+    blacklistDbPath: "",
     sortBy: "relevance",
     batchSize: DEFAULT_BATCH_SIZE,
     timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -198,6 +215,8 @@ function parseArgs(argv) {
     addSidInputs: [],
     force: false,
     reuseRaw: false,
+    retryBlacklist: false,
+    reparseExisting: false,
     concurrency: 1,
     concurrencySource: "",
     recordTimeoutMs: DEFAULT_RECORD_TIMEOUT_MS,
@@ -233,13 +252,17 @@ function parseArgs(argv) {
     else if (arg === "--csv") args.csvPath = readValue(arg, i++);
     else if (arg === "--merge-db") args.mergeDbPath = readValue(arg, i++);
     else if (arg === "--wosid" || arg === "--wos-id") args.queryWosId = readValue(arg, i++);
+    else if (arg === "--unblacklist" || arg === "--remove-blacklist") args.unblacklistWosId = readValue(arg, i++);
     else if (arg === "--query" || arg === "--sql") args.sqlQuery = readValue(arg, i++);
+    else if (arg === "--blacklist" || arg === "--list-blacklist") args.blacklistQuery = true;
+    else if (arg === "--clear-blacklist") args.clearBlacklist = true;
     else if (arg === "--task") args.taskId = normalizeTaskId(readValue(arg, i++));
     else if (arg === "--latest") args.latest = true;
     else if (arg === "--task-label" || arg === "--label") args.taskLabel = readValue(arg, i++);
     else if (arg === "--out-dir" || arg === "--download-dir") args.outDir = readValue(arg, i++);
     else if (arg === "--tasks-root" || arg === "--output-root") args.tasksRoot = readValue(arg, i++);
     else if (arg === "--db") args.dbPath = readValue(arg, i++);
+    else if (arg === "--blacklist-db") args.blacklistDbPath = readValue(arg, i++);
     else if (arg === "--sort-by") args.sortBy = readValue(arg, i++);
     else if (arg === "--batch-size") args.batchSize = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--timeout-ms" || arg === "--timeout") args.timeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
@@ -267,6 +290,8 @@ function parseArgs(argv) {
     else if (arg === "--add-sids") args.addSidInputs.push(readValue(arg, i++));
     else if (arg === "--force") args.force = true;
     else if (arg === "--reuse-raw") args.reuseRaw = true;
+    else if (arg === "--retry-blacklist") args.retryBlacklist = true;
+    else if (arg === "--reparse-existing" || arg === "--overwrite-existing") args.reparseExisting = true;
     else if (arg === "--concurrency") {
       args.concurrency = parseIntegerFlag(arg, readValue(arg, i++));
       args.concurrencySource = "cli";
@@ -311,6 +336,7 @@ function parseArgs(argv) {
   if (args.csvPath) args.csvPath = path.resolve(args.csvPath);
   if (args.mergeDbPath) args.mergeDbPath = path.resolve(args.mergeDbPath);
   args.dbPath = args.dbPath ? path.resolve(args.dbPath) : defaultWosDataDbPath();
+  args.blacklistDbPath = args.blacklistDbPath ? path.resolve(args.blacklistDbPath) : defaultWosBlacklistDbPath();
   if (!args.taskId && args.uuid) args.taskId = makeTaskId();
   if (!args.taskId && (command === "import" || command === "parse") && args.csvPath) args.taskId = makeTaskId();
   if (args.outDir) {
@@ -405,6 +431,16 @@ function isSessionRecoveryError(error) {
   return /query limit|session expired|invalid session|invalid sid|sid .*invalid|logged out|sign[ -]?in|login page/i.test(message) ||
     /browser .*closed|context .*closed|target .*closed|page .*closed|execution context was destroyed|protocol error|websocket.*closed/i.test(message) ||
     /WOS parse session is not available|wos\.js .*missing/i.test(message);
+}
+
+function isWosIdNoResultError(error) {
+  const message = String(error?.message || error || "");
+  return /No full-record JSON parsed|Failed to open full record|Full record timeout|full record page navigation|full-record route|current route=.*page=unknown/i.test(message);
+}
+
+function isWosIdBlacklistableError(error) {
+  const message = String(error?.message || error || "");
+  return Boolean(message);
 }
 
 function isSidInvalidRecoveryErrorCode(value) {
@@ -1165,7 +1201,7 @@ function workspaceStatus(args, sidCheck = null) {
     sidConfig: globalConfigPath(),
     deadSidCount: Array.isArray(sidConfig.deadSids) ? sidConfig.deadSids.length : 0,
     sidCheck,
-    wosDataDb: wosDataDbStats(args.dbPath),
+    wosDataDb: wosDataDbStats(args.dbPath, args.blacklistDbPath),
     tasks: tasks.map((task) => ({
       taskId: task.taskId,
       status: task.status || "",
@@ -1534,7 +1570,8 @@ function parseCsv(text) {
 
 function existingWosDataState(paths, wosids, args = {}) {
   const globalIds = existingWosDataIds(args.dbPath, wosids);
-  return { globalIds };
+  const blacklistIds = existingWosDataBlacklistedIds({ blacklistDbPath: args.blacklistDbPath }, wosids);
+  return { globalIds, blacklistIds };
 }
 
 function hasExistingWosData(state, wosid) {
@@ -1542,12 +1579,20 @@ function hasExistingWosData(state, wosid) {
   return Boolean(normalized && state.globalIds.has(normalized));
 }
 
+function hasBlacklistedWosData(state, wosid) {
+  const normalized = normalizeWosId(wosid);
+  return Boolean(normalized && state.blacklistIds.has(normalized));
+}
+
 function selectParseWork(paths, wosids, args) {
   let indexed = wosids.map((wosid, index) => ({ wosid, index: index + 1 }));
   indexed = indexed.filter((item) => item.index >= args.fromIndex);
-  if (!args.force) {
-    const state = existingWosDataState(paths, wosids, args);
+  const state = existingWosDataState(paths, wosids, args);
+  if (!args.reparseExisting) {
     indexed = indexed.filter((item) => !hasExistingWosData(state, item.wosid));
+  }
+  if (!args.retryBlacklist) {
+    indexed = indexed.filter((item) => !hasBlacklistedWosData(state, item.wosid));
   }
   if (args.limit) indexed = indexed.slice(0, args.limit);
   return indexed;
@@ -1556,17 +1601,34 @@ function selectParseWork(paths, wosids, args) {
 function parseStats(paths, wosids, args = {}) {
   const state = existingWosDataState(paths, wosids, args);
   const completed = wosids.filter((wosid) => hasExistingWosData(state, wosid)).length;
-  return { completed, missing: Math.max(0, wosids.length - completed) };
+  const blacklisted = wosids.filter((wosid) => !hasExistingWosData(state, wosid) && hasBlacklistedWosData(state, wosid)).length;
+  const skippedExisting = args.reparseExisting ? 0 : completed;
+  const skippedBlacklist = args.retryBlacklist ? 0 : blacklisted;
+  return {
+    completed,
+    skippedExisting,
+    blacklisted,
+    skippedBlacklist,
+    missing: Math.max(0, wosids.length - completed - skippedBlacklist),
+  };
 }
 
 function parseWorkSummary(paths, wosids, work, args) {
   const stats = parseStats(paths, wosids, args);
+  const dbStats = wosDataDbStats(args.dbPath, args.blacklistDbPath);
   const firstIndex = work[0]?.index || 0;
   const lastIndex = work[work.length - 1]?.index || 0;
   return {
+    dbPath: args.dbPath,
+    blacklistDbPath: args.blacklistDbPath,
+    dbRecordCount: dbStats.recordCount || 0,
+    dbBlacklistCount: dbStats.blacklistCount || 0,
     total: wosids.length,
     completed: stats.completed,
-    skipped: stats.completed,
+    skipped: stats.skippedExisting + stats.skippedBlacklist,
+    skippedExisting: stats.skippedExisting,
+    skippedBlacklist: stats.skippedBlacklist,
+    blacklisted: stats.blacklisted,
     missing: stats.missing,
     selected: work.length,
     firstIndex,
@@ -1578,9 +1640,22 @@ function parseWorkSummary(paths, wosids, work, args) {
 
 function printParseWorkSummary(summary, write = console.error) {
   const range = summary.selected ? `${summary.firstIndex}-${summary.lastIndex}` : "none";
-  write(
-    `WOS data records: total=${summary.total}, skipped=${summary.skipped}, missing=${summary.missing}, selected=${summary.selected}, range=${range}, concurrency=${summary.concurrency}, browserRestartEvery=${summary.browserRestartEvery || "off"}`
-  );
+  const label = (value) => color("1;36", value.padEnd(20), process.stderr);
+  write([
+    "WOS data records:",
+    `  ${label("total")}${summary.total}`,
+    `  ${label("skipped")}${summary.skipped}`,
+    `  ${label("blacklisted")}${summary.blacklisted}`,
+    `  ${label("missing")}${summary.missing}`,
+    `  ${label("selected")}${summary.selected}`,
+    `  ${label("range")}${range}`,
+    `  ${label("dbRecords")}${summary.dbRecordCount}`,
+    `  ${label("dbBlacklist")}${summary.dbBlacklistCount}`,
+    `  ${label("db")}${summary.dbPath}`,
+    `  ${label("blacklistDb")}${summary.blacklistDbPath}`,
+    `  ${label("concurrency")}${summary.concurrency}`,
+    `  ${label("browserRestartEvery")}${summary.browserRestartEvery || "off"}`,
+  ].join("\n"));
 }
 
 function importParsedWosData(args, taskId, wosids = []) {
@@ -1602,6 +1677,26 @@ function importParsedWosData(args, taskId, wosids = []) {
 }
 
 function runWosDataImport(args) {
+  if (args.clearBlacklist) {
+    return clearWosDataBlacklist({
+      dbPath: args.dbPath,
+      blacklistDbPath: args.blacklistDbPath,
+    });
+  }
+  if (args.unblacklistWosId) {
+    return removeWosDataBlacklist({
+      dbPath: args.dbPath,
+      blacklistDbPath: args.blacklistDbPath,
+      wosid: args.unblacklistWosId,
+    });
+  }
+  if (args.blacklistQuery) {
+    return queryWosDataBlacklist({
+      dbPath: args.dbPath,
+      blacklistDbPath: args.blacklistDbPath,
+      limit: args.limit || 50,
+    });
+  }
   if (args.queryWosId) {
     return queryWosDataByWosId({
       dbPath: args.dbPath,
@@ -1622,7 +1717,7 @@ function runWosDataImport(args) {
       force: args.force,
     });
   }
-  throw new Error("Missing wosdata operation: use --merge-db, --wosid, or --query");
+  throw new Error("Missing wosdata operation: use --merge-db, --wosid, --query, --blacklist, --unblacklist, or --clear-blacklist");
 }
 
 function sleep(ms) {
@@ -2323,19 +2418,64 @@ async function extractOneRecordInfo(page, args, wosid) {
       if (!window.wos?.record?.viewFullRecordByWosId || !window.wos?.record?.parseCurrentFullRecordPage) {
         throw new Error("wos.js record parser API missing: window.wos.record.parseCurrentFullRecordPage");
       }
-      await window.wos.record.viewFullRecordByWosId(targetWosId);
-      const parsed = await window.wos.record.parseCurrentFullRecordPage(targetWosId);
-      const normalizedWosId = window.wos.record.currentWosId || targetWosId;
-      const parsedRecords = Object.values(parsed || {}).filter((value) => (
-        value && typeof value === "object" && !Array.isArray(value)
+
+      const objectValues = (value) => Object.values(value || {}).filter((item) => (
+        item && typeof item === "object" && !Array.isArray(item)
       ));
-      const record = parsed?.[normalizedWosId] || parsed?.[targetWosId] || parsedRecords[0] || parsed;
-      if (!record || typeof record !== "object") {
-        throw new Error(`No full-record JSON parsed for ${targetWosId}`);
+      const hasRecordContent = (record) => {
+        if (!record || typeof record !== "object" || Array.isArray(record)) return false;
+        if (record.wosid || record.UT || record.AccessionNumber || record.identifiers?.accessionNumber) return true;
+        if (record.title || record.articleTitle || record.abstract) return true;
+        if (Array.isArray(record.authors) && record.authors.length) return true;
+        return Object.keys(record).length > 2;
+      };
+      const pickRecord = (parsed, preferredWosId) => {
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+        const candidates = [
+          parsed[preferredWosId],
+          parsed[targetWosId],
+          ...objectValues(parsed),
+          parsed,
+        ];
+        return candidates.find(hasRecordContent) || null;
+      };
+
+      const diagnostics = [];
+      let openedWosId = "";
+      try {
+        openedWosId = await window.wos.record.viewFullRecordByWosId(targetWosId);
+      } catch (error) {
+        diagnostics.push(`viewFullRecordByWosId: ${error?.message || error}`);
+      }
+
+      const currentWosId = () => window.wos.record.currentWosId || openedWosId || targetWosId;
+      let record = null;
+      let parseMethod = "";
+      try {
+        const parsed = await window.wos.record.parseCurrentFullRecordPage(targetWosId);
+        record = pickRecord(parsed, currentWosId());
+        if (record) parseMethod = "dom";
+      } catch (error) {
+        diagnostics.push(`parseCurrentFullRecordPage: ${error?.message || error}`);
+      }
+
+      if (!record && typeof window.wos.record.fetchFullRecordJsonByWosId === "function") {
+        try {
+          const fetched = await window.wos.record.fetchFullRecordJsonByWosId(targetWosId);
+          record = pickRecord(fetched, currentWosId());
+          if (record) parseMethod = "export-api";
+        } catch (error) {
+          diagnostics.push(`fetchFullRecordJsonByWosId: ${error?.message || error}`);
+        }
+      }
+
+      if (!record) {
+        throw new Error(`No full-record JSON parsed for ${targetWosId}${diagnostics.length ? ` (${diagnostics.join("; ")})` : ""}`);
       }
       return {
         ...record,
-        wosid: normalizedWosId,
+        wosid: currentWosId(),
+        _parseMethod: parseMethod,
         url: location.href,
       };
     }, wosid);
@@ -2411,6 +2551,8 @@ async function runParse(args) {
       selected: 0,
       parsed: 0,
       completed: beforeStats.completed,
+      blacklisted: beforeStats.blacklisted,
+      skippedBlacklist: beforeStats.skippedBlacklist,
       failed: 0,
       dbPath: args.dbPath,
       sqlite,
@@ -2421,7 +2563,7 @@ async function runParse(args) {
   if (!args.sid) {
     await prepareWosExport(args);
   }
-  appendProgress(paths, { phase: "parse-start", total: wosids.length, selected: work.length, wosidsCsv: wosidsPath });
+  appendProgress(paths, { phase: "parse-start", total: wosids.length, selected: work.length, completed: beforeStats.completed, skippedExisting: beforeStats.skippedExisting, blacklisted: beforeStats.blacklisted, skippedBlacklist: beforeStats.skippedBlacklist, retryBlacklist: args.retryBlacklist, reparseExisting: args.reparseExisting, wosidsCsv: wosidsPath });
   upsertTaskIndex(args, {
     status: "parse-running",
     lastError: "",
@@ -2521,6 +2663,15 @@ async function runParse(args) {
       }), args, async (item, _workerIndex, page) => {
         const { wosid, index } = item;
         let recordProgressStatus = "ok";
+        if (!args.reparseExisting && wosDataRecordExists(args.dbPath, wosid)) {
+          recordProgressStatus = "skipped";
+          consecutiveParseFailures = 0;
+          appendProgress(paths, { phase: "parse-record", status: "skipped-existing", wosid, index, dbPath: args.dbPath });
+          if (!isInteractive()) {
+            console.error(`parse SKIP ${index}/${wosids.length} ${wosid}: already exists in ${args.dbPath}`);
+          }
+          return;
+        }
         appendProgress(paths, { phase: "parse-record-start", wosid, index, total: wosids.length });
         try {
           const raw = await extractOneRecordInfo(page, args, wosid);
@@ -2530,16 +2681,34 @@ async function runParse(args) {
             taskId: task.taskId,
             source: raw.url || `wos:${wosid}`,
             expectedWosId: wosid,
-            force: args.force,
+            force: args.reparseExisting,
           });
+          const blacklistRemoval = removeWosDataBlacklist({ dbPath: args.dbPath, blacklistDbPath: args.blacklistDbPath, wosid });
           parsed += 1;
           consecutiveParseFailures = 0;
-          appendProgress(paths, { phase: "parse-record", status: "completed", wosid, index, dbPath: args.dbPath, imported: sqliteResult.imported, skipped: sqliteResult.skipped });
+          appendProgress(paths, { phase: "parse-record", status: "completed", wosid, index, dbPath: args.dbPath, imported: sqliteResult.imported, skipped: sqliteResult.skipped, blacklistRemoved: blacklistRemoval.removed });
           if (!isInteractive()) {
             console.error(`parse OK ${index}/${wosids.length} ${wosid} -> ${args.dbPath}`);
           }
         } catch (error) {
           const sessionRecoveryError = isSessionRecoveryError(error);
+          const blacklisted = true;
+          let blacklistError = "";
+          if (blacklisted) {
+            try {
+              recordWosDataBlacklist({
+                dbPath: args.dbPath,
+                blacklistDbPath: args.blacklistDbPath,
+                wosid,
+                taskId: task.taskId,
+                source: `parse:${task.taskId}`,
+                reason: "parse-failed",
+                error: error.message || String(error),
+              });
+            } catch (blacklistWriteError) {
+              blacklistError = blacklistWriteError.message || String(blacklistWriteError);
+            }
+          }
           recordProgressStatus = "failed";
           consecutiveParseFailures += 1;
           appendProgress(paths, {
@@ -2548,15 +2717,20 @@ async function runParse(args) {
             wosid,
             index,
             sessionRecoveryError,
+            blacklisted,
+            blacklistError,
             consecutiveParseFailures,
             error: error.message || String(error),
           });
           if (!isInteractive()) {
-            console.error(`parse FAIL ${index}/${wosids.length} ${wosid}: ${error.message || error}`);
+            console.error(`parse FAIL ${index}/${wosids.length} ${wosid}${blacklisted ? " blacklisted" : ""}: ${error.message || error}`);
+            if (blacklistError) console.error(`parse blacklist write failed for ${wosid}: ${blacklistError}`);
           }
           const failure = {
             wosid,
             index,
+            blacklisted,
+            blacklistError,
             error: error && error.stack ? error.stack : String(error),
             failedAt: new Date().toISOString(),
           };
@@ -2606,6 +2780,8 @@ async function runParse(args) {
     selected: work.length,
     parsed,
     completed: finalStats.completed,
+    blacklisted: finalStats.blacklisted,
+    skippedBlacklist: finalStats.skippedBlacklist,
     failed: failures.length,
     dbPath: args.dbPath,
     sqlite,
@@ -3163,12 +3339,12 @@ async function executeCommand(args) {
     return result.failed ? 1 : 0;
   }
   if (args.command === "wosdata") {
-    if (!args.queryWosId && !args.sqlQuery && !args.mergeDbPath) {
+    if (!args.queryWosId && !args.sqlQuery && !args.mergeDbPath && !args.blacklistQuery && !args.unblacklistWosId && !args.clearBlacklist) {
       console.error(usage());
       return 2;
     }
     const result = runWosDataImport(args);
-    if (args.queryWosId || args.sqlQuery) {
+    if (args.queryWosId || args.sqlQuery || args.blacklistQuery || args.unblacklistWosId || args.clearBlacklist) {
       console.log(JSON.stringify(result, null, 2));
       return result.ok ? 0 : 1;
     }
@@ -3418,6 +3594,8 @@ module.exports = {
   applyValidatedWosOrigin,
   isWosRootRecordRedirect,
   isSessionRecoveryError,
+  isWosIdNoResultError,
+  isWosIdBlacklistableError,
   isSidInvalidRecoveryErrorCode,
   validateTask,
   clearTask,
@@ -3457,10 +3635,15 @@ module.exports = {
   rawBatchFiles,
   bibBatchFiles,
   parseExistingRawBatches,
+  defaultWosBlacklistDbPath,
   importWosDataRecord,
   mergeWosDataDatabase,
+  clearWosDataBlacklist,
+  queryWosDataBlacklist,
   queryWosDataByWosId,
   queryWosDataDatabase,
+  recordWosDataBlacklist,
+  removeWosDataBlacklist,
   readJson,
   writeJson,
 };
