@@ -842,8 +842,7 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       if (!sid) return { refresh: true };
       if (typeof helpers.saveSid === "function") {
         activeWorkspace = await helpers.saveSid(sid);
-        stdout.write(`${color("32", "SID:", stdout)} saved. Refreshing workspace panel.\n\n`);
-        return { refresh: true };
+        stdout.write(`${color("32", "SID:", stdout)} saved.\n\n`);
       }
     }
 

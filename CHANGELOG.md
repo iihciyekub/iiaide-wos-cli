@@ -3,6 +3,22 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.35 - 2026-06-11
+
+- Retry failed WOSID page parses before recording final failures. Each WOSID now
+  gets up to 8 attempts by default, with `--parse-max-attempts <n>` available
+  for a lower retry ceiling.
+- Use `buildQuery` as the SID/session judge after 12 consecutive WOSID parse
+  failures: parse failures trigger diagnosis only, and the SID is invalidated
+  only when WOS returns `error_code`.
+- Force-close the whole Playwright context before parse recovery reconnects and
+  before invalidating a SID on WOS `error_code`, ensuring the next SID starts in
+  a fresh browser context.
+- In the interactive menu, continue the selected WOS parse workflow immediately
+  after saving a SID instead of returning to the dashboard for another Enter.
+- When parse recovery restarts from menu mode, restart the selected parse
+  command rather than reopening the top-level menu.
+
 ## 0.4.34 - 2026-06-11
 
 - Move the saved SID pool from workspace `tasks/config.json` to the user-level

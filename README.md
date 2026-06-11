@@ -353,8 +353,9 @@ CLI no longer forces parsed IDs into a `WOS:<id>` shape; it validates the
 expected TXT/CSV ID against the parsed page ID by comparing both values with
 non-alphanumeric characters removed.
 
-If full-record page parsing fails 10 times consecutively, the CLI closes the
-current Playwright context, reconnects with the current SID, and runs
+Parse failures do not directly invalidate the current SID. If the CLI sees 12
+consecutive WOSID page parse failures, it closes the entire current Playwright
+context, reconnects with the current SID, and runs
 `window.wos.query.buildQuery("AB=<random 4 letters>")` through `wos.js`. If WOS
 returns an `error_code`, the CLI force-closes Playwright and treats the current
 SID as invalid. If that SID came from the saved pool, only that pool value is
@@ -362,7 +363,11 @@ removed. If it came from `--sid` or `WOS_SID`, the saved pool is preserved, the
 explicit SID source is omitted from the restarted command, and the next run can
 pick up SID pool values added from another terminal. If the current process
 inherited `WOS_SID`, that environment value is removed before restarting the
-child CLI process.
+child CLI process. If `buildQuery` does not return `error_code`, the consecutive
+parse-failure counter resets and the parse continues without changing SID.
+
+Individual WOSID page failures are retried before becoming final failures. The
+default is up to 8 attempts per WOSID; lower it with `--parse-max-attempts <n>`.
 
 For long parse runs, fixed browser restarts are disabled by default so reusable
 tabs can keep collecting WOSID pages. Use `--browser-restart-every <n>` only
@@ -393,6 +398,7 @@ Useful options:
 --record-timeout-ms 30000
 --cooldown-ms 500       Delay between records
 --concurrency 3         Use up to 3 reusable WOS tabs for this parse run
+--parse-max-attempts 8  Retry each failed WOSID up to 8 attempts
 ```
 
 In the interactive menu, use `2 WOS IDs to SQL`. Paste either a WOS summary

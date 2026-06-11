@@ -110,6 +110,14 @@ test("parse browser restart interval is configurable", () => {
 
   const tuned = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--restart-every", "50", "--tasks-root", root]);
   assert.equal(tuned.browserRestartEvery, 50);
+
+  const attempts = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--parse-max-attempts", "4", "--tasks-root", root]);
+  assert.equal(attempts.parseMaxAttempts, 4);
+  assert.equal(cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]).parseMaxAttempts, 8);
+  assert.throws(
+    () => cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--parse-max-attempts", "9", "--tasks-root", root]),
+    /parse-max-attempts/
+  );
 });
 
 test("parse concurrency default can be saved in settings", () => {
@@ -170,6 +178,7 @@ test("parse failure recovery probes buildQuery and restarts CLI on WOS query err
   const match = source.match(/const refreshSidAfterConsecutiveFailures = async \(\) => \{[\s\S]*?\n  \};\n  try/);
   assert.ok(match, "parse SID recovery source should be present");
   assert.match(match[0], /testing WOS buildQuery recovery/);
+  assert.match(match[0], /await forceCloseWosSession\(session\)/);
   assert.match(match[0], /runWosRecoveryBuildQuery\(session\.page, args\)/);
   assert.match(match[0], /if \(recoveryQuery\.error_code\)/);
   assert.match(match[0], /await forceCloseWosSession\(session\)/);
@@ -179,6 +188,30 @@ test("parse failure recovery probes buildQuery and restarts CLI on WOS query err
   assert.match(match[0], /omitSidArgs: true/);
   assert.doesNotMatch(match[0], /startParseSession\("consecutive-failures"\)/);
   assert.doesNotMatch(match[0], /loginForFreshSid/);
+});
+
+test("parse failures are retried before becoming final failures", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const match = source.match(/const maxParseAttempts[\s\S]*?parseProgress\.update\(processed, `\$\{recordProgressStatus\} \$\{wosid\}`, failures\.length\);/);
+  assert.ok(match, "parse retry source should be present");
+  assert.match(source, /const DEFAULT_PARSE_MAX_ATTEMPTS = 8/);
+  assert.match(source, /const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 12/);
+  assert.match(match[0], /const willRetry = attempt < maxParseAttempts/);
+  assert.match(match[0], /const sessionRecoveryError = isSessionRecoveryError\(error\)/);
+  assert.match(match[0], /consecutiveParseFailures \+= 1/);
+  assert.match(match[0], /consecutiveParseFailures >= PARSE_RECOVERY_CONSECUTIVE_FAILURES/);
+  assert.match(match[0], /chunk\.push\(\{ \.\.\.item, attempt: attempt \+ 1 \}\)/);
+  assert.match(match[0], /if \(recordProgressStatus !== "retry"\) processed \+= 1/);
+  assert.match(match[0], /attempts: attempt/);
+});
+
+test("SID recovery classifies parse errors for diagnostics only", () => {
+  assert.equal(cli.isSessionRecoveryError(new Error("No full-record JSON parsed for WOS:BAD")), false);
+  assert.equal(cli.isSessionRecoveryError(new Error("Full record timeout after 20000ms: WOS:BAD")), false);
+  assert.equal(cli.isSessionRecoveryError(new Error("Expected WOSID WOS:A but parsed WOS:B")), false);
+  assert.equal(cli.isSessionRecoveryError(new Error("You’ve reached the query limit for your session.")), true);
+  assert.equal(cli.isSessionRecoveryError(new Error("WOS returned a login page")), true);
+  assert.equal(cli.isSessionRecoveryError(new Error("Target page, context or browser has been closed")), true);
 });
 
 test("parse browser restarts are disabled by default and reconnect through a query route when enabled", () => {
@@ -312,7 +345,8 @@ test("restart argv sanitization removes explicit SID values", () => {
 test("parse progress detail is completion-oriented for concurrent workers", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
   assert.match(source, /let recordProgressStatus = "ok"/);
-  assert.match(source, /recordProgressStatus = "failed"/);
+  assert.match(source, /recordProgressStatus = willRetry \? "retry" : "failed"/);
+  assert.doesNotMatch(source, /consecutiveFailures \+= 1/);
   assert.match(source, /parseProgress\.update\(processed, `\$\{recordProgressStatus\} \$\{wosid\}`, failures\.length\)/);
   assert.doesNotMatch(source, /parseProgress\.update\(processed, `source \$\{index\}/);
 });
@@ -2484,7 +2518,7 @@ test("interactive startup does not force SID setup before workflow selection", (
   assert.doesNotMatch(startupBranch[0], /helpers\.saveSid/);
 });
 
-test("interactive WOS workflows set up SID on demand and refresh the panel", () => {
+test("interactive WOS workflows set up SID on demand and continue current flow", () => {
   const interactiveSource = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
   const menuSource = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
   const sidBranch = interactiveSource.match(/let sid = ""[\s\S]*?const sourceFallback/);
@@ -2494,11 +2528,19 @@ test("interactive WOS workflows set up SID on demand and refresh the panel", () 
   assert.match(sidBranch[0], /helpers\.saveSid/);
   assert.match(sidBranch[0], /workspaceSidStatus\(activeWorkspace\) !== "valid"/);
   assert.match(sidBranch[0], /askSidFromBrowserOrManual/);
-  assert.match(sidBranch[0], /saved\. Refreshing workspace panel/);
-  assert.match(sidBranch[0], /return \{ refresh: true \}/);
+  assert.match(sidBranch[0], /saved\./);
+  assert.doesNotMatch(sidBranch[0], /Refreshing workspace panel/);
+  assert.doesNotMatch(sidBranch[0], /saved[\s\S]*?return \{ refresh: true \}/);
   assert.match(helperBranch[0], /addSidsToConfig\(menuArgs, \[sid\], \{ activate: true \}\)/);
   assert.match(helperBranch[0], /quickValidateSid\(menuArgs\)/);
   assert.match(helperBranch[0], /workspaceStatus\(menuArgs, refreshedSidCheck\)/);
+});
+
+test("interactive parse restart resumes the selected command instead of menu", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const match = source.match(/const args = parseArgs\(\[argv\[0\], argv\[1\], \.\.\.selectedArgs\]\);[\s\S]*?const exitCode = await runParsedCommand\(args, \{ argv: \[argv\[0\], argv\[1\], \.\.\.selectedArgs\] \}\);/);
+  assert.ok(match, "interactive selected command execution should be present");
+  assert.match(match[0], /runParsedCommand\(args, \{ argv: \[argv\[0\], argv\[1\], \.\.\.selectedArgs\] \}\)/);
 });
 
 test("interactive startup no longer auto-opens a browser when SID is invalid", () => {

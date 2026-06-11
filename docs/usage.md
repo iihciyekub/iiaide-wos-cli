@@ -191,16 +191,21 @@ Resume behavior is database-based:
 - Existing SQLite WOSID records are skipped by default.
 - `--force` refetches existing WOSID records and overwrites the SQLite row after validation.
 - `--from-index` and `--limit` select a slice of the WOSID index.
-- Failures are recorded at `raw/<uuid>/full-record/<uuid>_parse_failures.json`.
+- WOSID page failures are retried before becoming final failures. The default is
+  up to 8 attempts per WOSID; use `--parse-max-attempts <n>` to choose a lower
+  retry ceiling.
+- Final failures are recorded at `raw/<uuid>/full-record/<uuid>_parse_failures.json`.
 - `--browser-restart-every <n>` can explicitly restart Playwright between parse
   batches, but the default is `0` so reusable tabs keep collecting WOSID pages.
-- 10 consecutive full-record page parse failures closes Playwright and
-  reconnects with the current SID, then runs
+- Parse failures do not directly invalidate the current SID. 12 consecutive
+  WOSID page parse failures close the entire Playwright context and reconnect
+  with the current SID, then run
   `window.wos.query.buildQuery("AB=<random 4 letters>")`. If that WOS query
   returns `error_code`, the CLI force-closes Playwright and treats the current
   SID as invalid. Saved-pool SIDs are removed one at a time; `--sid` and
   `WOS_SID` values are omitted from the restarted command without clearing the
-  saved pool.
+  saved pool. If the query does not return `error_code`, the consecutive
+  parse-failure counter resets and parsing continues.
 
 Before the parse stage, WOSIDs already present in the global SQLite database are
 treated as completed and are skipped. After the parse stage, newly completed
@@ -238,7 +243,7 @@ URL/result-set UUID or a local `.csv` file path; the CLI chooses the matching
 parse pipeline automatically. The default parse options are:
 
 ```text
-concurrency=saved parse tabs, default 1 | timeout=20000ms | cooldown=250ms | restart=off | recovery=buildQuery AB=<random> | from=1 | limit=all
+concurrency=saved parse tabs, default 1 | timeout=20000ms | cooldown=250ms | max-attempts=8 | restart=off | recovery=buildQuery AB=<random> | from=1 | limit=all
 ```
 
 ## Task Lifecycle
