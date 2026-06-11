@@ -1,6 +1,6 @@
 {
   "name": "iiaide-wos-cli",
-  "version": "0.4.37",
+  "version": "0.4.38",
   "private": true,
   "description": "Task-oriented CLI for interacting with Web of Science, extracting WOS IDs and parsed WOS data, and delivering reusable data packages.",
   "repository": {
@@ -20,7 +20,8 @@
     "CHANGELOG.md"
   ],
   "bin": {
-    "iiaide-wos": "bin/iiaide-wos.js"
+    "iiaide-wos": "bin/iiaide-wos.js",
+    "iiw": "bin/iiaide-wos.js"
   },
   "scripts": {
     "lint": "node --check bin/iiaide-wos.js && node --check src/iiaide-wos.js && node --check src/lib/io.js && node --check src/lib/interactive.js && node --check src/lib/terminal.js && node --check src/lib/update.js && node --check src/lib/wos-browser-export.js && node --check src/lib/wos-ids.js && node --check src/lib/wos-sqlite.js && node --check import/wos.js",

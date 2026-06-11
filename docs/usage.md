@@ -3,6 +3,8 @@
 ## Product Model
 
 iiaide-wos CLI is built around tasks rather than isolated command outputs.
+Installed releases expose both `iiaide-wos` and the short alias `iiw`; they run
+the same CLI entry point.
 For request-level equivalents of the WOS methods used by the CLI, see
 [`docs/curl.md`](curl.md).
 

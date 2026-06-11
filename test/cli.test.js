@@ -100,6 +100,12 @@ test("parses SID check tasks", () => {
   assert.equal(args.tasksRoot, root);
 });
 
+test("package exposes iiw as the short CLI alias", () => {
+  const pkg = require("../package.json");
+  assert.equal(pkg.bin["iiaide-wos"], "bin/iiaide-wos.js");
+  assert.equal(pkg.bin.iiw, "bin/iiaide-wos.js");
+});
+
 test("parse browser restart interval is configurable", () => {
   const root = temporaryDirectory();
   const defaults = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);

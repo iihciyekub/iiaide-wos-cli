@@ -3,6 +3,11 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.38 - 2026-06-11
+
+- Add `iiw` as a short command alias for the existing `iiaide-wos` CLI entry
+  point. Both commands run the same `bin/iiaide-wos.js` executable.
+
 ## 0.4.37 - 2026-06-11
 
 - Remove per-WOSID parse retry attempts. A failed full-record parse is now

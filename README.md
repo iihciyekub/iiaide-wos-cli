@@ -3,7 +3,9 @@
 iiaide-wos CLI is a task-oriented command-line tool for interacting with the
 Web of Science website and turning WOS records into reusable data packages.
 
-The npm package name is `iiaide-wos-cli` and its command is `iiaide-wos`.
+The npm package name is `iiaide-wos-cli` and its primary command is
+`iiaide-wos`. Installed releases also expose `iiw` as a short alias for the
+same CLI.
 
 It currently supports three input workflows:
 
@@ -58,6 +60,8 @@ gh auth setup-git
 npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.14
 npx playwright install chromium
 iiaide-wos
+# or
+iiw
 ```
 
 For local development:
@@ -85,6 +89,8 @@ Show scriptable commands:
 
 ```bash
 iiaide-wos --help
+# or
+iiw --help
 ```
 
 For request-level debugging examples, see
