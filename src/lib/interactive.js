@@ -934,6 +934,7 @@ module.exports = {
   printHeader,
   promptSid,
   promptSidBatch,
+  askSidFromBrowserOrManual,
   resolveTaskSelection,
   isBackResult,
   isQuitResult,

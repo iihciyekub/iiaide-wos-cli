@@ -67,7 +67,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.47
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.48
 npx playwright install chromium
 iiaide-wos
 # or
@@ -192,6 +192,12 @@ Validate and save the SID directly:
 iiaide-wos sid
 ```
 
+Show the current saved SID pool:
+
+```bash
+iiaide-wos sid-pool
+```
+
 Add saved SID pool values without validating them immediately:
 
 ```bash
@@ -204,6 +210,8 @@ In an interactive terminal, iiaide-wos validates the SID with the canonical WOS
 initialization URL and saves it to the global SID pool in
 `~/.iiaide-wos/config.json`. SID pool values are user-level, so a SID added from
 one directory is available to CLI runs started from other directories.
+`iiaide-wos sid-pool` prints the current global SID pool as JSON, including the
+active pool position, active SID, and the full saved SID list.
 Commands that require WOS authentication use the same workspace Playwright profile at
 `tasks/.browser-profile` (profile name: `.browser-profile`); in menu mode the
 session stays open while the menu process is alive. Normal WOS work runs in
@@ -364,27 +372,43 @@ strings. It trims whitespace and can extract the accession segment from a
 SQLite validation remain responsible for canonicalization and loose ID
 comparison.
 
+When the first WOS page shows the Clarivate privacy or cookie banner, the CLI's
+persistent Playwright profile now auto-clicks the common OneTrust `Accept all`
+or close buttons, and it also recognizes the `Privacy` / `ot-sdk-container`
+dialog shell before choosing which button to press. That makes login, summary
+export, and parse warm-up pages less likely to stall behind either the
+full-banner or close-only cookie variant.
+
+When a saved SID is missing or fails browser validation in an interactive
+terminal, the CLI now offers a SID choice first: paste a SID manually or open a
+WOS browser login for auto-detection. It no longer forces the visible browser
+login path before giving you the manual SID option.
+
 WOSID parsing preserves the accession prefix found in the TXT or CSV input. The
 CLI no longer forces parsed IDs into a `WOS:<id>` shape; it validates the
 expected TXT/CSV ID against the parsed page ID by comparing both values with
 non-alphanumeric characters removed.
 
-Parse failures do not directly invalidate the current SID. If the CLI sees 12
+Parse failures do not directly invalidate the current SID. If the CLI sees 20
 consecutive WOSID page parse failures, it closes the entire current Playwright
 context, reconnects with the current SID, and runs
 `window.wos.query.buildQuery("AB=<random 4 letters>")` through `wos.js`. If WOS
 returns an explicit SID/session `error_code` such as a query-limit,
 expired-session, login, or invalid-SID message, the CLI force-closes Playwright
-and treats the current SID as invalid. If that SID came from the saved pool, only
-that pool value is removed. If it came from `--sid` or `WOS_SID`, the saved pool
-is preserved, the explicit SID source is omitted from the restarted command, and
-the next run can pick up SID pool values added from another terminal. If the
-current process inherited `WOS_SID`, that environment value is removed before
-restarting the child CLI process. Inconclusive browser-side query results such
-as `unknown error` force-close Playwright and reconnect with the current SID
-without deleting it. If `buildQuery` does not return `error_code`, the
-consecutive parse-failure counter resets and the parse continues without
-changing SID.
+and treats the current SID as invalid. The current SID is removed from the saved
+pool even if it was detected from the persistent browser profile, and that SID is
+not accepted again during the restart. If no saved SID remains, the restarted CLI
+clears the WOS browser auth state and opens a visible login window instead of
+silently reusing the old session. If the current process inherited `WOS_SID`,
+that environment value is removed before restarting the child CLI process.
+Inconclusive browser-side query results such as `unknown error` force-close
+Playwright and reconnect with the current SID without deleting it. If
+`buildQuery` does not return `error_code`, the consecutive parse-failure counter
+resets and the parse continues without changing SID.
+
+The authentication success line includes the active SID and pool position, and
+parse recovery messages are printed as short multi-line notices so the running
+SID, recovery reason, and next action are easier to read.
 
 Individual WOSID page failures are recorded once with the real extraction or
 SQLite import error. They are not requeued for retry; 20 consecutive final
@@ -405,9 +429,16 @@ If WOS opens a full-record page but the DOM structure cannot be parsed, the CLI
 falls back to the browser-side single-record export API before marking the WOSID
 as failed.
 
-For long parse runs, fixed browser restarts are disabled by default so reusable
-tabs can keep collecting WOSID pages. Use `--browser-restart-every <n>` only
-when you explicitly want periodic Playwright context restarts.
+For long parse runs, the CLI now restarts Playwright every 100 parsed WOSIDs by
+default, and it also checks RSS memory between smaller parse chunks so a hot
+Chromium renderer can be recycled before memory growth gets out of hand. Use
+`--browser-restart-every 0` if you deliberately want one long-lived browser
+session, or tune `--max-rss-mb <n>` when you want a stricter or looser memory
+cap.
+When parse recovery, a manual browser-login SID refresh, or an explicit browser
+restart closes Playwright, the CLI now first releases each reusable WOS page to
+`about:blank` and then tears down the persistent context so Chromium renderer
+memory is less likely to accumulate across long runs.
 
 Before parsing, the CLI checks the global SQLite database and skips WOSIDs that
 are already present. The work summary prints aligned multi-line fields for
@@ -457,6 +488,8 @@ Useful options:
 --record-timeout-ms 30000
 --cooldown-ms 500       Delay between records
 --concurrency 3         Use up to 3 reusable WOS tabs for this parse run
+--browser-restart-every 50
+--max-rss-mb 1536       Restart between parse chunks once RSS reaches 1536 MB
 --retry-blacklist       Retry WOSIDs previously skipped after parse failures
 ```
 

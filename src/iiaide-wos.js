@@ -1,10 +1,11 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const readline = require("node:readline/promises");
 const { spawn } = require("node:child_process");
 const { chromium } = require("playwright");
 const { readJson, writeFileAtomic, writeJson } = require("./lib/io");
-const { interactiveArgs, isBackResult, isQuitResult, isUserAbortError, promptConfirmationText, promptSid } = require("./lib/interactive");
+const { askSidFromBrowserOrManual, interactiveArgs, isBackResult, isQuitResult, isUserAbortError, promptConfirmationText, promptSid } = require("./lib/interactive");
 const { color, createProgress, createSpinner, isInteractive } = require("./lib/terminal");
 const { updateCli } = require("./lib/update");
 const { exportBibBatchesViaWosJs, exportTxtBatchesViaWosJs } = require("./lib/wos-browser-export");
@@ -31,7 +32,9 @@ const { version: VERSION } = require("../package.json");
 const DEFAULT_BATCH_SIZE = 200;
 const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_RECORD_TIMEOUT_MS = 20000;
-const DEFAULT_BROWSER_RESTART_EVERY = 0;
+const DEFAULT_BROWSER_RESTART_EVERY = 100;
+const DEFAULT_PARSE_MEMORY_CHECK_EVERY = 25;
+const DEFAULT_PARSE_MAX_RSS_MB = 2048;
 const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 20;
 const DEFAULT_PARSE_CONNECTIVITY_QUERY = "PY=2000";
 const DEFAULT_WOS_PROTOCOL = "https";
@@ -39,6 +42,27 @@ const DEFAULT_WOS_DOMAIN = "www.webofscience.com";
 const DEFAULT_BASE_URL = `${DEFAULT_WOS_PROTOCOL}://${DEFAULT_WOS_DOMAIN}`;
 const DEFAULT_WOSJS_PATH = path.resolve(__dirname, "..", "import", "wos.js");
 const HIDDEN_BROWSER_POSITION = "-32000,0";
+const WOS_POPUP_DISMISS_SELECTORS = [
+  "#onetrust-accept-btn-handler",
+  'button[aria-label="Accept all"]',
+  'button[aria-label*="Accept"]#onetrust-accept-btn-handler',
+  'button.onetrust-close-btn-handler.onetrust-close-btn-ui.banner-close-button.ot-close-icon',
+  'button[aria-label="Close"].onetrust-close-btn-handler',
+  "#onetrust-close-btn-container button",
+  'button._pendo-close-guide[aria-label="Close"]',
+  'button[id^="pendo-close-guide-"]',
+];
+const WOS_POPUP_DIALOG_SELECTORS = [
+  'div[role="dialog"][aria-label="Privacy"]',
+  "#onetrust-banner-sdk",
+  ".ot-sdk-container",
+];
+const WOS_POPUP_GUARD_OPTIONS = {
+  intervalMs: 2500,
+  minClickGapMs: 500,
+  observeMs: 30000,
+  observeAttributes: false,
+};
 const DEFAULT_TASK_ID_CONFIG = {
   prefix: "TID",
   pattern: "yyyyMMddHHmmss",
@@ -89,6 +113,7 @@ Usage:
   iiaide-wos menu
   iiaide-wos init [--tasks-root <dir>]
   iiaide-wos check [--sid <SID> | --from-browser] [--tasks-root <dir>] [--wos-domain <domain>] [--base-url <url>] [--headed]
+  iiaide-wos sid-pool [--tasks-root <dir>]
   iiaide-wos workspace [--tasks-root <dir>]
   iiaide-wos settings [--playwright-visible <on|off>] [--parse-concurrency <n>] [--add-sid <SID>] [--add-sids "<SID...>"] [--tasks-root <dir>]
   iiaide-wos update [--check]
@@ -157,7 +182,8 @@ Parse options:
   --record-timeout-ms <n> Per-record full-page timeout. Default: 20000
   --cooldown-ms <n>       Delay after each record. Default: 250
   --browser-restart-every <n>
-                          Restart Playwright after n parsed WOSIDs. Default: 0 disables
+                          Restart Playwright after n parsed WOSIDs. Default: 100, 0 disables
+  --max-rss-mb <n>        Restart Playwright between parse chunks when RSS exceeds n MB. Default: 2048, 0 disables
   --retry-blacklist       Include blacklisted parse-failed WOSIDs in this parse run
   --reparse-existing      Visit WOSIDs that already exist in SQLite and overwrite them
 
@@ -182,6 +208,7 @@ function parseArgs(argv) {
     sidSource: "",
     sidPoolIndex: -1,
     sidPoolCount: 0,
+    invalidatedSids: [],
     fromBrowser: false,
     url: "",
     urlHadProtocol: false,
@@ -221,6 +248,8 @@ function parseArgs(argv) {
     concurrencySource: "",
     recordTimeoutMs: DEFAULT_RECORD_TIMEOUT_MS,
     browserRestartEvery: DEFAULT_BROWSER_RESTART_EVERY,
+    memoryCheckEvery: DEFAULT_PARSE_MEMORY_CHECK_EVERY,
+    maxRssMb: DEFAULT_PARSE_MAX_RSS_MB,
     limit: 0,
     fromIndex: 1,
     cooldownMs: 250,
@@ -309,6 +338,7 @@ function parseArgs(argv) {
     else if (arg === "--record-timeout-ms" || arg === "--record-timeout" || arg === "--page-timeout-ms") args.recordTimeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--cooldown-ms") args.cooldownMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--browser-restart-every" || arg === "--parse-restart-every" || arg === "--restart-every") args.browserRestartEvery = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--max-rss-mb" || arg === "--memory-restart-mb") args.maxRssMb = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--check") args.checkOnly = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -330,6 +360,7 @@ function parseArgs(argv) {
   assertIntegerRange("--from-index", args.fromIndex, 1);
   assertIntegerRange("--cooldown-ms", args.cooldownMs, 0);
   assertIntegerRange("--browser-restart-every", args.browserRestartEvery, 0);
+  assertIntegerRange("--max-rss-mb", args.maxRssMb, 0);
   args.tasksRoot = path.resolve(args.tasksRoot);
   applySavedRuntimeSettings(args);
   assertIntegerRange("--concurrency", args.concurrency, 1, 10);
@@ -645,6 +676,21 @@ function sidPoolFromConfig(config = {}) {
   };
 }
 
+function currentSidPoolStatus(args) {
+  const config = readSidConfig(args);
+  const pool = sidPoolFromConfig(config);
+  const activeNumber = pool.activeIndex >= 0 ? pool.activeIndex + 1 : 0;
+  return {
+    ok: true,
+    config: globalConfigPath(),
+    sidPoolCount: pool.sids.length,
+    sidPoolIndex: pool.activeIndex,
+    sidPoolPosition: activeNumber,
+    activeSid: pool.activeSid,
+    sids: pool.sids,
+  };
+}
+
 function migrateLegacyWorkspaceSidConfig(args) {
   const workspaceConfig = readConfig(args.tasksRoot);
   const workspacePool = sidPoolFromConfig(workspaceConfig);
@@ -720,8 +766,22 @@ function addSidsToConfig(args, values, options = {}) {
   };
 }
 
-function discardActiveConfigSid(args, reason = "invalid") {
-  if (args.sidSource !== "config" || !args.sid) return false;
+function rememberInvalidatedSid(args, sid) {
+  const value = String(sid || "").trim();
+  if (!value) return;
+  if (!Array.isArray(args.invalidatedSids)) args.invalidatedSids = [];
+  if (!args.invalidatedSids.includes(value)) args.invalidatedSids.push(value);
+}
+
+function rememberDeadConfigSids(args, config = {}) {
+  const deadSids = Array.isArray(config.deadSids) ? config.deadSids : [];
+  for (const entry of deadSids) {
+    rememberInvalidatedSid(args, entry?.sid || entry);
+  }
+}
+
+function discardActiveConfigSid(args, reason = "invalid", options = {}) {
+  if ((!options.force && args.sidSource !== "config") || !args.sid) return false;
   const config = readSidConfig(args);
   const pool = sidPoolFromConfig(config);
   if (!pool.sids.length) return false;
@@ -747,6 +807,7 @@ function discardActiveConfigSid(args, reason = "invalid") {
     sidCursor: nextCursor,
     deadSids,
   });
+  rememberInvalidatedSid(args, removedSid);
   args.sid = "";
   args.sidSource = "";
   args.sidPoolIndex = -1;
@@ -760,6 +821,7 @@ function discardActiveConfigSid(args, reason = "invalid") {
 
 function saveSidConfig(args, observedSid) {
   const sidConfig = readSidConfig(args);
+  rememberDeadConfigSids(args, sidConfig);
   const pool = sidPoolFromConfig(sidConfig);
   const sidValue = String(observedSid || args.sid || "").trim();
   const nextSids = args.sidSource === "env" || !sidValue
@@ -846,6 +908,7 @@ function loadSavedSid(args) {
     args.baseUrl = wosOriginFromDomain(args.wosDomain);
   }
   const sidConfig = readSidConfig(args);
+  rememberDeadConfigSids(args, sidConfig);
   const pool = sidPoolFromConfig(sidConfig);
   args.sidPoolCount = pool.sids.length;
   args.sidPoolIndex = pool.activeIndex;
@@ -861,6 +924,28 @@ function maskSid(value) {
   if (!sid) return "";
   if (sid.length <= 8) return `${sid.slice(0, 1)}***${sid.slice(-1)}`;
   return `${sid.slice(0, 4)}...${sid.slice(-4)}`;
+}
+
+function sidBadge(args, stream = process.stderr) {
+  const sid = String(args?.sid || "").trim();
+  if (!sid) return "";
+  const source = args?.sidSource ? ` ${args.sidSource}` : "";
+  const pool = args?.sidPoolCount
+    ? ` ${Math.max(0, Number(args.sidPoolIndex) + 1)}/${args.sidPoolCount}`
+    : "";
+  return color("30;46;1", ` SID${source}${pool}: ${sid} `, stream);
+}
+
+function authValidatedMessage(args) {
+  const badge = sidBadge(args);
+  return badge ? `WOS authentication validated ${badge}` : "WOS authentication validated";
+}
+
+function writeRuntimeNotice(title, lines = [], stream = process.stderr) {
+  const prefix = isInteractive(stream) ? "\n" : "";
+  const heading = color("33;1", title, stream);
+  const body = lines.filter(Boolean).map((line) => `  ${line}`).join("\n");
+  stream.write(`${prefix}${heading}${body ? `\n${body}` : ""}\n`);
 }
 
 async function quickValidateCurrentSid(args, options = {}) {
@@ -981,11 +1066,179 @@ async function ensureWosJsOnPage(page, args) {
   return page.evaluate(() => Boolean(window.wos && window.WosUUID && window.asy_uuid));
 }
 
+async function installWosPopupGuard(context) {
+  await context.addInitScript(({ selectors, dialogSelectors, options }) => {
+    if (window.__IIAIDE_WOS_POPUP_GUARD__) return;
+    window.__IIAIDE_WOS_POPUP_GUARD__ = true;
+
+    let lastClickAt = 0;
+    const isVisible = (element) => {
+      if (!element || element.disabled) return false;
+      const style = window.getComputedStyle(element);
+      return style.display !== "none" && style.visibility !== "hidden" && style.pointerEvents !== "none";
+    };
+
+    const findVisibleElement = (selectorList, root = document) => {
+      for (const selector of selectorList) {
+        const element = root.querySelector(selector);
+        if (isVisible(element)) return { selector, element };
+      }
+      return null;
+    };
+
+    const dismissOneTrustDialog = () => {
+      const dialogMatch = findVisibleElement(dialogSelectors);
+      if (!dialogMatch) return false;
+      const dialogRoot = dialogMatch.element;
+      const preferredButton = findVisibleElement([
+        "#onetrust-accept-btn-handler",
+        'button[aria-label="Accept all"]',
+        'button[aria-label*="Accept"]',
+        "#onetrust-close-btn-container button",
+        'button[aria-label="Close"].onetrust-close-btn-handler',
+        'button.onetrust-close-btn-handler',
+      ], dialogRoot);
+      if (!preferredButton) return false;
+      preferredButton.element.click();
+      return true;
+    };
+
+    const dismissKnownPopups = () => {
+      const now = Date.now();
+      if (now - lastClickAt < options.minClickGapMs) return false;
+      if (dismissOneTrustDialog()) {
+        lastClickAt = now;
+        return true;
+      }
+      for (const selector of selectors) {
+        const button = document.querySelector(selector);
+        if (!isVisible(button)) continue;
+        button.click();
+        lastClickAt = now;
+        return true;
+      }
+      return false;
+    };
+
+    const startWosGuard = () => {
+      if (typeof window.wos?.guard?.startWosPopupGuard === "function") {
+        try {
+          window.wos.guard.startWosPopupGuard(options);
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+      if (typeof window.asy_webFuncs?.startWosPopupGuard === "function") {
+        try {
+          window.asy_webFuncs.startWosPopupGuard(options);
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+      return false;
+    };
+
+    const observer = new MutationObserver(() => {
+      dismissKnownPopups();
+      startWosGuard();
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    dismissKnownPopups();
+    startWosGuard();
+    const interval = options.intervalMs > 0 ? window.setInterval(() => {
+      dismissKnownPopups();
+      startWosGuard();
+    }, options.intervalMs) : 0;
+    const timeout = options.observeMs > 0 ? window.setTimeout(() => {
+      observer.disconnect();
+      if (interval) window.clearInterval(interval);
+      window.__IIAIDE_WOS_POPUP_GUARD__ = false;
+    }, options.observeMs) : 0;
+    window.__IIAIDE_WOS_POPUP_GUARD_STOP__ = () => {
+      observer.disconnect();
+      if (interval) window.clearInterval(interval);
+      if (timeout) window.clearTimeout(timeout);
+      window.__IIAIDE_WOS_POPUP_GUARD__ = false;
+    };
+  }, {
+    selectors: WOS_POPUP_DISMISS_SELECTORS,
+    dialogSelectors: WOS_POPUP_DIALOG_SELECTORS,
+    options: WOS_POPUP_GUARD_OPTIONS,
+  });
+}
+
+async function dismissWosPopups(page) {
+  return page.evaluate(({ selectors, dialogSelectors, options }) => {
+    const isVisible = (element) => {
+      if (!element || element.disabled) return false;
+      const style = window.getComputedStyle(element);
+      return style.display !== "none" && style.visibility !== "hidden" && style.pointerEvents !== "none";
+    };
+
+    const findVisibleElement = (selectorList, root = document) => {
+      for (const selector of selectorList) {
+        const element = root.querySelector(selector);
+        if (isVisible(element)) return { selector, element };
+      }
+      return null;
+    };
+
+    let clickedSelector = "";
+    const dialogMatch = findVisibleElement(dialogSelectors);
+    if (dialogMatch) {
+      const preferredButton = findVisibleElement([
+        "#onetrust-accept-btn-handler",
+        'button[aria-label="Accept all"]',
+        'button[aria-label*="Accept"]',
+        "#onetrust-close-btn-container button",
+        'button[aria-label="Close"].onetrust-close-btn-handler',
+        'button.onetrust-close-btn-handler',
+      ], dialogMatch.element);
+      if (preferredButton) {
+        preferredButton.element.click();
+        clickedSelector = `${dialogMatch.selector} ${preferredButton.selector}`;
+      }
+    }
+
+    if (!clickedSelector) {
+    for (const selector of selectors) {
+      const button = document.querySelector(selector);
+      if (!isVisible(button)) continue;
+      button.click();
+      clickedSelector = selector;
+      break;
+    }
+    }
+
+    if (typeof window.wos?.guard?.startWosPopupGuard === "function") {
+      window.wos.guard.startWosPopupGuard(options);
+    } else if (typeof window.asy_webFuncs?.startWosPopupGuard === "function") {
+      window.asy_webFuncs.startWosPopupGuard(options);
+    }
+
+    return {
+      clickedSelector,
+      hasDialog: Boolean(findVisibleElement(dialogSelectors)),
+    };
+  }, {
+    selectors: WOS_POPUP_DISMISS_SELECTORS,
+    dialogSelectors: WOS_POPUP_DIALOG_SELECTORS,
+    options: WOS_POPUP_GUARD_OPTIONS,
+  }).catch(() => ({
+    clickedSelector: "",
+    hasDialog: false,
+  }));
+}
+
 async function injectWosJs(context, args) {
   const filePath = requireWosJsPath(args);
+  await installWosPopupGuard(context);
   await context.addInitScript({ path: filePath });
   for (const page of context.pages()) {
     await ensureWosJsOnPage(page, args);
+    await dismissWosPopups(page);
   }
   return filePath;
 }
@@ -1013,10 +1266,35 @@ async function launchWosPersistentContext(args, visible = false) {
   return context;
 }
 
+async function releaseWosPage(page) {
+  if (!page || page.isClosed?.()) return;
+  await page.evaluate(() => {
+    try {
+      window.stop?.();
+    } catch (_) {}
+    try {
+      window.__IIAIDE_WOS_POPUP_GUARD_STOP__?.();
+    } catch (_) {}
+  }).catch(() => {});
+  await page.goto("about:blank", {
+    waitUntil: "domcontentloaded",
+    timeout: 1000,
+  }).catch(() => {});
+  await page.close({ runBeforeUnload: false }).catch(() => {});
+}
+
+async function releaseWosContext(context) {
+  if (!context) return;
+  const pages = typeof context.pages === "function" ? [...context.pages()] : [];
+  await Promise.allSettled(pages.map((page) => releaseWosPage(page)));
+  await context.close().catch(() => {});
+  await sleep(50);
+}
+
 async function closeSharedWosSession() {
   const session = sharedWosSession;
   sharedWosSession = null;
-  await session?.context?.close().catch(() => {});
+  await releaseWosContext(session?.context);
 }
 
 async function forceCloseWosSession(session = null) {
@@ -1024,7 +1302,11 @@ async function forceCloseWosSession(session = null) {
     await closeSharedWosSession();
     return;
   }
-  await session?.context?.close?.().catch(() => {});
+  const context = session?.context || null;
+  if (context) {
+    await releaseWosContext(context);
+    return;
+  }
   await session?.close?.().catch(() => {});
 }
 
@@ -1035,6 +1317,7 @@ async function readSidFromLoginBrowser(args) {
     const page = context.pages()[0] || await context.newPage();
     const loginUrl = args.sid ? buildSidInitUrl(args.sid) : `${DEFAULT_BASE_URL}/wos/`;
     await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: args.timeoutMs });
+    await dismissWosPopups(page);
     console.error("A browser window has opened. Log in to Web of Science there; iiaide-wos will continue after SID is detected.");
     const sid = await page.waitForFunction(
       () => window.sessionData?.BasicProperties?.SID || "",
@@ -1048,7 +1331,7 @@ async function readSidFromLoginBrowser(args) {
     saveSidConfig(args, args.sid);
     return String(sid).trim();
   } finally {
-    await context.close().catch(() => {});
+    await releaseWosContext(context);
   }
 }
 
@@ -1635,6 +1918,8 @@ function parseWorkSummary(paths, wosids, work, args) {
     lastIndex,
     concurrency: args.concurrency,
     browserRestartEvery: args.browserRestartEvery,
+    memoryCheckEvery: args.memoryCheckEvery,
+    maxRssMb: args.maxRssMb,
   };
 }
 
@@ -1655,6 +1940,8 @@ function printParseWorkSummary(summary, write = console.error) {
     `  ${label("blacklistDb")}${summary.blacklistDbPath}`,
     `  ${label("concurrency")}${summary.concurrency}`,
     `  ${label("browserRestartEvery")}${summary.browserRestartEvery || "off"}`,
+    `  ${label("memoryCheckEvery")}${summary.memoryCheckEvery || "off"}`,
+    `  ${label("maxRssMb")}${summary.maxRssMb || "off"}`,
   ].join("\n"));
 }
 
@@ -1744,6 +2031,23 @@ function chunkItemsByCount(items, count) {
     chunks.push(items.slice(index, index + size));
   }
   return chunks;
+}
+
+function currentProcessRssMb() {
+  const rss = Number(process.memoryUsage?.().rss || 0);
+  return rss > 0 ? Math.round(rss / (1024 * 1024)) : 0;
+}
+
+function effectiveParseChunkSize(args) {
+  const restartSize = Math.max(0, Number(args?.browserRestartEvery) || 0);
+  const memoryCheckSize = Math.max(0, Number(args?.memoryCheckEvery) || 0);
+  const size = [restartSize, memoryCheckSize].filter((value) => value > 0).reduce((min, value) => Math.min(min, value), Infinity);
+  return Number.isFinite(size) ? size : 0;
+}
+
+function shouldRestartParseForMemory(args, rssMb = currentProcessRssMb()) {
+  const maxRssMb = Math.max(0, Number(args?.maxRssMb) || 0);
+  return Boolean(maxRssMb && rssMb >= maxRssMb);
 }
 
 function batchFileName(uuid, markFrom, markTo, extension = "txt") {
@@ -1882,6 +2186,7 @@ function writeOutputs(paths, rows, meta) {
 async function validateSid(page, args) {
   const initUrl = buildSidInitUrl(args.sid);
   await page.goto(initUrl, { waitUntil: "domcontentloaded", timeout: args.timeoutMs });
+  await dismissWosPopups(page);
   await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
   await page.waitForFunction(
     () => window.sessionData?.BasicProperties?.SID || "",
@@ -1908,12 +2213,26 @@ async function validateSid(page, args) {
 }
 
 async function detectSidFromPage(page, args) {
+  const invalidatedSids = Array.isArray(args.invalidatedSids) ? args.invalidatedSids : [];
   const sid = await page.waitForFunction(
-    () => window.sessionData?.BasicProperties?.SID || "",
-    null,
+    (rejectedSids) => {
+      const value = window.sessionData?.BasicProperties?.SID || "";
+      return value && !rejectedSids.includes(value) ? value : "";
+    },
+    invalidatedSids,
     { timeout: Math.max(args.timeoutMs, 600000) }
   ).then((handle) => handle.jsonValue());
   return String(sid || "").trim();
+}
+
+async function clearWosBrowserAuthState(context, page, args) {
+  await context.clearCookies().catch(() => {});
+  const origin = stripTrailingSlash(args.baseUrl || DEFAULT_BASE_URL);
+  await page.goto(`${origin}/wos/`, { waitUntil: "domcontentloaded", timeout: args.timeoutMs }).catch(() => {});
+  await page.evaluate(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  }).catch(() => {});
 }
 
 async function loginForFreshSid(args, report = console.error) {
@@ -1922,9 +2241,13 @@ async function loginForFreshSid(args, report = console.error) {
   try {
     const page = visibleContext.pages()[0] || await visibleContext.newPage();
     page.setDefaultTimeout(args.timeoutMs);
+    if (Array.isArray(args.invalidatedSids) && args.invalidatedSids.length) {
+      await clearWosBrowserAuthState(visibleContext, page, args);
+    }
     const loginUrl = args.sid ? buildSidInitUrl(args.sid) : `${DEFAULT_BASE_URL}/wos/`;
     report("WOS SID is missing or invalid. A visible WOS browser window is open; log in there and iiaide-wos will continue automatically.");
     await page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: args.timeoutMs });
+    await dismissWosPopups(page);
     const sid = await detectSidFromPage(page, args);
     if (!sid) throw new Error("No WOS SID detected after login");
     args.sid = sid;
@@ -1935,6 +2258,52 @@ async function loginForFreshSid(args, report = console.error) {
   } finally {
     await visibleContext.close().catch(() => {});
   }
+}
+
+async function chooseFreshSidInteractively(args, report = console.error, options = {}) {
+  const chooseSid = options.chooseSid || (async () => {
+    let rl = null;
+    const getRl = () => {
+      if (!rl) rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      return rl;
+    };
+
+    try {
+      return await askSidFromBrowserOrManual(
+        getRl,
+        async () => {
+          args.sid = "";
+          args.sidSource = "";
+          return (options.readBrowserSid || readSidFromBrowser)(args);
+        },
+        () => (options.promptManualSid || promptSid)("Enter WOS SID manually")
+      );
+    } finally {
+      rl?.close();
+    }
+  });
+
+  if (!(options.canPrompt || canPromptForSid)()) {
+    return (options.readBrowserSid || ((nextArgs) => loginForFreshSid(nextArgs, report)))(args);
+  }
+
+  const sid = await chooseSid(args);
+  if (isQuitResult(sid)) throw new UserQuitError("SID setup quit by user");
+  if (isBackResult(sid)) throw new UserCancelledError("SID setup cancelled by user");
+  const value = String(sid || "").trim();
+  if (!value) throw new Error("SID must not be empty");
+  if (!args.sid) {
+    args.sid = value;
+    args.sidSource = "prompt";
+  }
+  return value;
+}
+
+async function acquireFreshSid(args, report = console.error, options = {}) {
+  if ((options.canPrompt || canPromptForSid)()) {
+    return chooseFreshSidInteractively(args, report, options);
+  }
+  return (options.readBrowserSid || ((nextArgs) => loginForFreshSid(nextArgs, report)))(args);
 }
 
 async function prepareWosSession(args, options = {}) {
@@ -1961,8 +2330,9 @@ async function prepareWosSession(args, options = {}) {
     page.setDefaultTimeout(args.timeoutMs);
     let status = null;
     if (!args.sid) {
-      await context.close().catch(() => {});
-      await loginForFreshSid(args, report);
+      await releaseWosContext(context);
+      report("No saved SID found. Choose manual SID input or browser login to continue.");
+      await acquireFreshSid(args, report);
       context = await launchWosPersistentContext(args, visible);
       page = context.pages()[0] || await context.newPage();
       page.setDefaultTimeout(args.timeoutMs);
@@ -1970,7 +2340,7 @@ async function prepareWosSession(args, options = {}) {
     try {
       status = await validateSid(page, args);
     } catch (error) {
-      await context.close().catch(() => {});
+      await releaseWosContext(context);
       if (args.sidSource === "config") {
         const discarded = discardActiveConfigSid(args, error.message || "SID validation failed");
         if (discarded?.sidPoolCount) {
@@ -1979,13 +2349,14 @@ async function prepareWosSession(args, options = {}) {
           continue;
         }
         if (discarded) {
-          report("All saved SIDs were invalid. Opening a WOS browser login to refresh authentication.");
+          report("All saved SIDs were invalid. Choose manual SID input or browser login to refresh authentication.");
         }
       }
       if (args.sidSource === "browser") {
         throw new Error(`Browser-detected WOS SID could not be validated after reopening the WOS profile. ${error.message || error}`);
       }
-      await loginForFreshSid(args, report);
+      report(`WOS SID validation failed. Choose manual SID input or browser login to continue. ${error.message || error}`);
+      await acquireFreshSid(args, report);
       context = await launchWosPersistentContext(args, visible);
       page = context.pages()[0] || await context.newPage();
       page.setDefaultTimeout(args.timeoutMs);
@@ -1998,7 +2369,7 @@ async function prepareWosSession(args, options = {}) {
       sharedWosSession = { context, page };
       return { context, page, status, close: async () => {} };
     }
-    return { context, page, status, close: async () => context.close().catch(() => {}) };
+    return { context, page, status, close: async () => releaseWosContext(context) };
   }
 }
 
@@ -2125,6 +2496,7 @@ async function runWosRecoveryBuildQuery(page, args, expr = `AB=${randomUppercase
 
 async function prepareWosRequestContext(page, args) {
   await page.goto(args.url, { waitUntil: "domcontentloaded", timeout: args.timeoutMs });
+  await dismissWosPopups(page);
   await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
   await ensureWosJsOnPage(page, args);
   const context = await page.evaluate(() => {
@@ -2159,7 +2531,7 @@ async function exportFromWos(args, paths) {
   try {
     session = await prepareWosSession(args);
     const page = session.page;
-    authSpinner.succeed("WOS authentication validated");
+    authSpinner.succeed(authValidatedMessage(args));
     appendProgress(paths, { phase: "sid-validated" });
     const context = await prepareWosRequestContext(page, args);
     appendProgress(paths, {
@@ -2253,7 +2625,7 @@ async function exportBibFromWos(args, paths) {
   try {
     session = await prepareWosSession(args);
     const page = session.page;
-    authSpinner.succeed("WOS authentication validated");
+    authSpinner.succeed(authValidatedMessage(args));
     appendProgress(paths, { phase: "sid-validated" });
     const context = await prepareWosRequestContext(page, args);
     uuid = pageContextUuid(context, uuid);
@@ -2404,6 +2776,7 @@ async function createReusableRecordPage(context, args) {
     waitUntil: "domcontentloaded",
     timeout: Math.min(10000, timeoutMs),
   });
+  await dismissWosPopups(page);
   await ensureWosJsOnPage(page, args);
   return page;
 }
@@ -2504,14 +2877,14 @@ async function runPoolWithReusableRecordPages(items, concurrency, getSessionStat
         const state = getSessionState();
         if (!state?.session?.context) throw new Error("WOS parse session is not available");
         if (!page || pageGeneration !== state.generation || page.isClosed?.()) {
-          await page?.close?.().catch(() => {});
+          await releaseWosPage(page);
           page = await createReusableRecordPage(state.session.context, args);
           pageGeneration = state.generation;
         }
         await worker(items[index], index, page);
       }
     } finally {
-      await page?.close?.().catch(() => {});
+      await releaseWosPage(page);
     }
   });
   await Promise.all(workers);
@@ -2602,7 +2975,11 @@ async function runParse(args) {
   const refreshSidAfterConsecutiveFailures = async () => {
     if (sidRecovery) return sidRecovery;
     sidRecovery = (async () => {
-      console.error(`${PARSE_RECOVERY_CONSECUTIVE_FAILURES} WOSID page parses failed in a row. Closing Playwright, reconnecting with the current SID, and testing WOS buildQuery recovery.`);
+      writeRuntimeNotice("WOS parse recovery", [
+        `${PARSE_RECOVERY_CONSECUTIVE_FAILURES} consecutive WOSID page parses failed.`,
+        "Closing Playwright and testing the current SID with a WOS query.",
+        sidBadge(args) ? `Current ${sidBadge(args)}` : "",
+      ]);
       appendProgress(paths, { phase: "parse-sid-reconnect-start", consecutiveParseFailures });
       await forceCloseWosSession(session);
       session = null;
@@ -2619,16 +2996,28 @@ async function runParse(args) {
       });
       if (recoveryQuery.error_code) {
         if (isSidInvalidRecoveryErrorCode(recoveryQuery.error_code)) {
-          console.error(`WOS recovery query returned SID/session error_code=${recoveryQuery.error_code}. Closing Playwright, invalidating the current SID, and restarting CLI.`);
+          writeRuntimeNotice("WOS SID invalid", [
+            `error_code: ${recoveryQuery.error_code}`,
+            "Closing Playwright, removing this SID, and restarting with the next saved SID.",
+          ]);
           await forceCloseWosSession(session);
           session = null;
-          discardActiveConfigSid(args, `WOS recovery query failed: ${recoveryQuery.error_code}`);
+          const discarded = discardActiveConfigSid(args, `WOS recovery query failed: ${recoveryQuery.error_code}`, { force: true });
+          if (discarded && !discarded.sidPoolCount) {
+            writeRuntimeNotice("WOS SID pool empty", [
+              "No saved SID remains after removing the invalid SID.",
+              "A visible WOS login window will be used on restart.",
+            ]);
+          }
           args.sid = "";
           args.sidSource = "";
           delete process.env.WOS_SID;
           throw new CliRestartRequestedError(`WOS recovery query failed: ${recoveryQuery.error_code}`, { omitSidArgs: true });
         }
-        console.error(`WOS recovery query returned inconclusive error_code=${recoveryQuery.error_code}. Closing Playwright, reconnecting with the current SID, and continuing parse.`);
+        writeRuntimeNotice("WOS recovery inconclusive", [
+          `error_code: ${recoveryQuery.error_code}`,
+          "Reconnecting with the current SID and continuing parse.",
+        ]);
         appendProgress(paths, {
           phase: "parse-recovery-build-query-inconclusive",
           errorCode: recoveryQuery.error_code,
@@ -2648,9 +3037,10 @@ async function runParse(args) {
   try {
     session = await prepareWosSession(args);
     sessionGeneration += 1;
-    authSpinner.succeed("WOS authentication validated");
+    authSpinner.succeed(authValidatedMessage(args));
     parseProgress = createProgress("Parsing WOS data", work.length);
-    const chunks = chunkItemsByCount(work, args.browserRestartEvery);
+    const chunkSize = effectiveParseChunkSize(args);
+    const chunks = chunkItemsByCount(work, chunkSize);
     for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
       const chunk = chunks[chunkIndex];
       if (!session) {
@@ -2745,10 +3135,24 @@ async function runParse(args) {
       }, async () => {
         if (sidRecovery) await sidRecovery;
       });
-      if (args.browserRestartEvery && chunkIndex < chunks.length - 1) {
-        appendProgress(paths, { phase: "parse-browser-restart", processed, selected: work.length, browserRestartEvery: args.browserRestartEvery });
+      const rssMb = currentProcessRssMb();
+      const restartForMemory = shouldRestartParseForMemory(args, rssMb);
+      const restartForCount = Boolean(args.browserRestartEvery && chunkIndex < chunks.length - 1 && ((chunkIndex + 1) * chunkSize) % args.browserRestartEvery === 0);
+      if ((restartForCount || restartForMemory) && chunkIndex < chunks.length - 1) {
+        appendProgress(paths, {
+          phase: restartForMemory ? "parse-memory-restart" : "parse-browser-restart",
+          processed,
+          selected: work.length,
+          browserRestartEvery: args.browserRestartEvery,
+          maxRssMb: args.maxRssMb,
+          rssMb,
+        });
         if (!isInteractive()) {
-          console.error(`parse browser restart ${processed}/${work.length}; reconnecting with current SID and testing WOS query routing with ${DEFAULT_PARSE_CONNECTIVITY_QUERY}`);
+          if (restartForMemory) {
+            console.error(`parse memory restart ${processed}/${work.length}; rss=${rssMb}MB reached max-rss-mb=${args.maxRssMb}. Reconnecting with current SID and testing WOS query routing with ${DEFAULT_PARSE_CONNECTIVITY_QUERY}`);
+          } else {
+            console.error(`parse browser restart ${processed}/${work.length}; reconnecting with current SID and testing WOS query routing with ${DEFAULT_PARSE_CONNECTIVITY_QUERY}`);
+          }
         }
         await session?.close?.();
         session = null;
@@ -3195,11 +3599,11 @@ async function checkSid(args, dependencies = {}) {
   }
 
   if (quick.status === "invalid") {
-    report("Saved SID is invalid. Opening a WOS browser login to refresh it.");
+    report("Saved SID is invalid. Choose manual SID input or browser login to refresh it.");
   } else if (quick.status === "missing") {
-    report("No saved SID found. Opening a WOS browser login to create one.");
+    report("No saved SID found. Choose manual SID input or browser login to create one.");
   } else {
-    report("SID could not be confirmed with the lightweight check. Running browser validation.");
+    report("SID could not be confirmed with the lightweight check. Choose manual SID input or browser login to continue validation.");
   }
 
   const repaired = await validateSidFlow(args);
@@ -3243,6 +3647,10 @@ async function executeCommand(args) {
   if (args.command === "check") {
     const result = await checkSid(args);
     console.log(formatCheckSidResult(result));
+    return 0;
+  }
+  if (args.command === "sid-pool") {
+    console.log(JSON.stringify(currentSidPoolStatus(args), null, 2));
     return 0;
   }
   if (args.command === "workspace") {
@@ -3569,6 +3977,7 @@ module.exports = {
   setCurrentTaskId,
   checkSid,
   formatCheckSidResult,
+  currentSidPoolStatus,
   ensureSid,
   quickValidateSid,
   quickValidateCurrentSid,
@@ -3586,11 +3995,21 @@ module.exports = {
   wosProfileName,
   wosBrowserMode,
   wosBrowserLaunchOptions,
+  releaseWosPage,
+  releaseWosContext,
+  forceCloseWosSession,
   setPlaywrightVisibleSetting,
   setParseConcurrencySetting,
   applySavedRuntimeSettings,
   resolveWosJsPath,
   requireWosJsPath,
+  WOS_POPUP_DISMISS_SELECTORS,
+  WOS_POPUP_DIALOG_SELECTORS,
+  WOS_POPUP_GUARD_OPTIONS,
+  installWosPopupGuard,
+  dismissWosPopups,
+  chooseFreshSidInteractively,
+  acquireFreshSid,
   applyValidatedWosOrigin,
   isWosRootRecordRedirect,
   isSessionRecoveryError,
@@ -3616,6 +4035,9 @@ module.exports = {
   runPool,
   runPoolWithReusableRecordPages,
   chunkItemsByCount,
+  currentProcessRssMb,
+  effectiveParseChunkSize,
+  shouldRestartParseForMemory,
   prepareWosRequestContext,
   warmUpWosQueryPage,
   runWosRecoveryBuildQuery,

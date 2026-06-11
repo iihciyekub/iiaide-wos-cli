@@ -3,6 +3,59 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.54 - 2026-06-11
+
+- Change long-running parse defaults to restart Playwright every 100 WOSIDs
+  instead of keeping one browser session forever.
+- Add `--max-rss-mb <n>` so parse can reconnect the current SID between chunks
+  once process RSS reaches a configured memory cap. The default cap is 2048 MB;
+  use `0` to disable memory-based restarts.
+- Split parse work into smaller memory-check chunks while keeping reusable pages
+  within each chunk, so long runs can recycle Chromium before renderer memory
+  grows too far.
+
+## 0.4.53 - 2026-06-11
+
+- Release reusable WOS pages to `about:blank` before closing the persistent
+  Playwright context during SID refresh, parse recovery reconnect, and explicit
+  browser restart paths, so long-running Chromium renderer memory is less
+  likely to accumulate across repeated sessions.
+
+## 0.4.52 - 2026-06-11
+
+- Add `iiaide-wos sid-pool` to print the current global saved SID pool as JSON,
+  including the active SID, pool position, and full saved SID list.
+
+## 0.4.51 - 2026-06-11
+
+- Change interactive SID recovery so missing or invalid saved SIDs offer a
+  choice between manual SID input and browser-login auto-detection, instead of
+  forcing the visible browser login flow immediately.
+
+## 0.4.50 - 2026-06-11
+
+- Extend the WOS popup guard to recognize OneTrust `Privacy` dialog containers
+  directly, then prefer `Accept all` and fall back to the dialog's close button
+  when that banner variant does not expose an accept action.
+
+## 0.4.49 - 2026-06-11
+
+- Add a Playwright-side WOS popup guard that auto-handles common Clarivate
+  privacy and cookie dialogs, including the OneTrust `Accept all` button.
+- Re-arm popup dismissal after WOS login, SID validation, summary navigation,
+  and reusable parse-page startup so first-load dialogs are less likely to
+  block browser-driven flows.
+
+## 0.4.48 - 2026-06-11
+
+- Prevent parse SID recovery from re-saving a just-invalidated SID from the
+  persistent WOS browser profile after the saved SID pool is emptied.
+- Remove the active SID from the saved pool during recovery even when that SID
+  was originally detected from the browser profile rather than loaded directly
+  from config.
+- Show the active SID and pool position in WOS authentication success output,
+  and print parse recovery decisions as short multi-line notices.
+
 ## 0.4.47 - 2026-06-11
 
 - Sync README and usage docs with the current CLI defaults for global SQLite

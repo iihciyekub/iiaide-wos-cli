@@ -360,17 +360,27 @@ Important distinction:
   SQLite validation own canonicalization and loose comparison.
 - CLI validates the structured page data and writes one SQLite row per WOSID to
   `~/.iiaide-wos/wosdata.sqlite`.
-- Fixed parse browser restarts are disabled by default so reusable WOS pages can
-  keep collecting WOSID pages. Use `--browser-restart-every <n>` only when you
-  explicitly want periodic Playwright context restarts.
+- Parse browser restarts now default to every `100` WOSIDs so reusable pages do
+  not grow without bound during long runs. Use `--browser-restart-every 0` only
+  when you intentionally want one long-lived Playwright session.
+- Parse work is split into smaller memory-check chunks, and
+  `--max-rss-mb <n>` can force a current-SID reconnect between chunks once RSS
+  crosses the configured limit. The default is `2048`; use `0` to disable this
+  recycle path.
+- On SID refresh, recovery reconnect, or explicit browser restart, the CLI
+  releases reusable pages to `about:blank` before closing the persistent
+  Playwright context so Chromium renderer memory is less likely to accumulate
+  across long parse runs.
 - If 20 full-record page parses fail consecutively, the CLI closes Playwright
   and reconnects with the current SID, then runs
   `window.wos.query.buildQuery("AB=<random 4 letters>")`. If that WOS query
   returns an explicit SID/session `error_code`, the CLI force-closes Playwright
-  and treats the current SID as invalid. Saved-pool SIDs are removed one at a
-  time; `--sid` and `WOS_SID` values are omitted from the restarted command
-  without clearing the saved pool. Inconclusive browser-side results such as
-  `unknown error` reconnect with the current SID instead of deleting it.
+  and treats the current SID as invalid. The active SID is removed from the
+  saved pool even if it was detected from the persistent browser profile, and
+  the restarted command will not accept that same SID again. If no saved SID
+  remains, the CLI clears WOS browser auth state and opens a visible login
+  window. Inconclusive browser-side results such as `unknown error` reconnect
+  with the current SID instead of deleting it.
 - The UUID-specific WOSID index remains at
   `raw/<uuid>/full-record/<uuid>_wosid.csv` and is the input list for parse.
 - For `parse --csv`, the local CSV is normalized into

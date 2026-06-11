@@ -152,6 +152,12 @@ opening and closing a new page for every WOSID.
 Save that default with `iiaide-wos settings --parse-concurrency 3` or menu item
 `5.2 Parse tabs`; explicit `--concurrency <n>` still overrides the saved value
 for one command.
+When a SID refresh, recovery reconnect, or `--browser-restart-every` segment
+restart closes Playwright, the CLI first releases those reusable pages to
+`about:blank` and then closes the persistent context so long-running Chromium
+renderer memory is more likely to drop before the next session starts. Parse
+work is also split into smaller memory-check chunks, so the CLI can restart the
+current SID session between chunks once RSS crosses the configured limit.
 
 The browser-side `wos.js` helper opens externally prepared WOSIDs. It trims
 input and accepts full-record URLs by extracting the path segment, but it does
@@ -222,19 +228,35 @@ Resume behavior is database-based:
 - Use `wosdata --unblacklist <WOSID>` to remove one blacklist entry or
   `wosdata --clear-blacklist` to remove all blacklist entries.
 - Final failures are recorded at `raw/<uuid>/full-record/<uuid>_parse_failures.json`.
-- `--browser-restart-every <n>` can explicitly restart Playwright between parse
-  batches, but the default is `0` so reusable tabs keep collecting WOSID pages.
+- `--browser-restart-every <n>` restarts Playwright between parse batches. The
+  default is `100`; use `0` only when you intentionally want one long-lived
+  browser session.
+- `--max-rss-mb <n>` restarts Playwright between parse chunks once the Node
+  process RSS reaches that limit. The default is `2048`; use `0` to disable the
+  memory-based recycle path.
 - Parse failures do not directly invalidate the current SID. 20 consecutive
   WOSID page parse failures close the entire Playwright context and reconnect
   with the current SID, then run
   `window.wos.query.buildQuery("AB=<random 4 letters>")`. If that WOS query
   returns an explicit SID/session `error_code`, the CLI force-closes Playwright
-  and treats the current SID as invalid. Saved-pool SIDs are removed one at a
-  time; `--sid` and `WOS_SID` values are omitted from the restarted command
-  without clearing the saved pool. Inconclusive browser-side results such as
-  `unknown error` reconnect with the current SID instead of deleting it. If the
-  query does not return `error_code`, the consecutive parse-failure counter
-  resets and parsing continues.
+  and treats the current SID as invalid. The active SID is removed from the
+  saved pool even if it was detected from the persistent browser profile, and
+  the restarted command will not accept that same SID again. If no saved SID
+  remains, the CLI clears WOS browser auth state and opens a visible login
+  window. Inconclusive browser-side results such as `unknown error` reconnect
+  with the current SID instead of deleting it. If the query does not return
+  `error_code`, the consecutive parse-failure counter resets and parsing
+  continues.
+- Authentication success output shows the active SID and pool position. Parse
+  recovery output is printed as short multi-line notices with the reason and
+  next action.
+- If WOS opens with the Clarivate privacy/cookie dialog, the Playwright session
+  auto-clicks the usual OneTrust `Accept all` or close buttons, recognizes the
+  `Privacy` / `ot-sdk-container` dialog shell, and keeps a short-lived popup
+  guard active across navigation.
+- If a saved SID is missing or fails validation and the current terminal is
+  interactive, the CLI offers `Manual input` and `Open browser login` as SID
+  recovery choices instead of forcing the visible browser login flow first.
 
 Before the parse stage, WOSIDs already present in the global SQLite database are
 treated as completed and are skipped. After the parse stage, newly completed
@@ -287,7 +309,7 @@ URL/result-set UUID or a local `.csv` file path; the CLI chooses the matching
 parse pipeline automatically. The default parse options are:
 
 ```text
-concurrency=saved parse tabs, default 1 | timeout=20000ms | cooldown=250ms | restart=off | blacklist=skip | recovery=20x buildQuery AB=<random> | from=1 | limit=all
+concurrency=saved parse tabs, default 1 | timeout=20000ms | cooldown=250ms | restart=100 | maxRssMb=2048 | blacklist=skip | recovery=20x buildQuery AB=<random> | from=1 | limit=all
 ```
 
 ## Task Lifecycle
@@ -453,11 +475,19 @@ iiaide-wos settings --add-sids "SID_ONE SID_TWO
 SID_THREE"
 ```
 
+Show the current global SID pool:
+
+```bash
+iiaide-wos sid-pool
+```
+
 `--add-sids` accepts spaces, newlines, or commas and de-duplicates values. In the
 interactive Settings menu, use `5.3 Add SID` for one value or `5.4 Batch add
 SIDs` for a multi-line paste. The SID pool is global per user, so values added
 from any working directory are available to every CLI run. The dashboard shows
 the current SID and the active pool position/count.
+`sid-pool` prints the same saved pool as JSON, with `sidPoolCount`,
+`sidPoolPosition`, `activeSid`, and the full `sids` array.
 
 WOS domain/origin selection is separate from SID selection. Use
 `--wos-domain <domain>` or `WOS_DOMAIN` when only the host changes. Use

@@ -127,6 +127,21 @@ test("parses SID check tasks", () => {
   assert.equal(args.tasksRoot, root);
 });
 
+test("shows the saved SID pool with the active position", () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "sid-pool", "--tasks-root", root]);
+
+  cli.addSidsToConfig(args, ["SID_ONE", "SID_TWO"], { activate: true });
+  const status = cli.currentSidPoolStatus(args);
+
+  assert.equal(args.command, "sid-pool");
+  assert.equal(status.sidPoolCount, 2);
+  assert.equal(status.sidPoolIndex, 0);
+  assert.equal(status.sidPoolPosition, 1);
+  assert.equal(status.activeSid, "SID_ONE");
+  assert.deepEqual(status.sids, ["SID_ONE", "SID_TWO"]);
+});
+
 test("package exposes iiw as the short CLI alias", () => {
   const pkg = require("../package.json");
   assert.equal(pkg.bin["iiaide-wos"], "bin/iiaide-wos.js");
@@ -136,13 +151,17 @@ test("package exposes iiw as the short CLI alias", () => {
 test("parse browser restart interval is configurable", () => {
   const root = temporaryDirectory();
   const defaults = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
-  assert.equal(defaults.browserRestartEvery, 0);
+  assert.equal(defaults.browserRestartEvery, 100);
+  assert.equal(defaults.maxRssMb, 2048);
 
   const disabled = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--browser-restart-every", "0", "--tasks-root", root]);
   assert.equal(disabled.browserRestartEvery, 0);
 
   const tuned = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--restart-every", "50", "--tasks-root", root]);
   assert.equal(tuned.browserRestartEvery, 50);
+
+  const memoryTuned = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--max-rss-mb", "1024", "--tasks-root", root]);
+  assert.equal(memoryTuned.maxRssMb, 1024);
 
   assert.throws(
     () => cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--parse-max-attempts", "4", "--tasks-root", root]),
@@ -184,6 +203,15 @@ test("uses the canonical Web of Science SID initialization URL", () => {
   );
 });
 
+test("WOS popup guard includes OneTrust accept and close selectors", () => {
+  assert.ok(cli.WOS_POPUP_DISMISS_SELECTORS.includes("#onetrust-accept-btn-handler"));
+  assert.ok(cli.WOS_POPUP_DISMISS_SELECTORS.includes("#onetrust-close-btn-container button"));
+  assert.ok(cli.WOS_POPUP_DISMISS_SELECTORS.includes('button._pendo-close-guide[aria-label="Close"]'));
+  assert.ok(cli.WOS_POPUP_DIALOG_SELECTORS.includes('div[role="dialog"][aria-label="Privacy"]'));
+  assert.ok(cli.WOS_POPUP_DIALOG_SELECTORS.includes(".ot-sdk-container"));
+  assert.equal(cli.WOS_POPUP_GUARD_OPTIONS.observeMs, 30000);
+});
+
 test("clears saved SID before browser-login repair", () => {
   const root = temporaryDirectory();
   const args = cli.parseArgs(["node", "cli", "parse", "--task", "sid-repair", "--tasks-root", root]);
@@ -207,13 +235,13 @@ test("parse failure recovery probes buildQuery and restarts CLI only on SID quer
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
   const match = source.match(/const refreshSidAfterConsecutiveFailures = async \(\) => \{[\s\S]*?\n  \};\n  try/);
   assert.ok(match, "parse SID recovery source should be present");
-  assert.match(match[0], /testing WOS buildQuery recovery/);
+  assert.match(match[0], /WOS parse recovery/);
   assert.match(match[0], /await forceCloseWosSession\(session\)/);
   assert.match(match[0], /runWosRecoveryBuildQuery\(session\.page, args\)/);
   assert.match(match[0], /if \(recoveryQuery\.error_code\)/);
   assert.match(match[0], /isSidInvalidRecoveryErrorCode\(recoveryQuery\.error_code\)/);
   assert.match(match[0], /await forceCloseWosSession\(session\)/);
-  assert.match(match[0], /discardActiveConfigSid\(args/);
+  assert.match(match[0], /discardActiveConfigSid\(args[\s\S]*force: true/);
   assert.doesNotMatch(match[0], /clearSavedSidConfig\(args\)/);
   assert.match(match[0], /delete process\.env\.WOS_SID/);
   assert.match(match[0], /omitSidArgs: true/);
@@ -278,7 +306,22 @@ test("parse browser restarts are disabled by default and reconnect through a que
   assert.ok(match, "parse restart session block should be present");
   assert.match(match[0], /startParseSession\("browser-restart", chunkIndex \+ 1, chunks\.length\)/);
   assert.match(source, /warmUpWosQueryPage\(nextSession\.page, args\)/);
-  assert.match(source, /const DEFAULT_BROWSER_RESTART_EVERY = 0/);
+  assert.match(source, /const DEFAULT_BROWSER_RESTART_EVERY = 100/);
+  assert.match(source, /const DEFAULT_PARSE_MAX_RSS_MB = 2048/);
+  assert.match(source, /phase: restartForMemory \? "parse-memory-restart" : "parse-browser-restart"/);
+});
+
+test("parse chunk sizing prefers smaller memory-check windows while preserving restart boundaries", () => {
+  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 100, memoryCheckEvery: 25 }), 25);
+  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 100, memoryCheckEvery: 0 }), 100);
+  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 0, memoryCheckEvery: 25 }), 25);
+  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 0, memoryCheckEvery: 0 }), 0);
+});
+
+test("parse memory restarts trigger only when RSS reaches the configured cap", () => {
+  assert.equal(cli.shouldRestartParseForMemory({ maxRssMb: 2048 }, 2047), false);
+  assert.equal(cli.shouldRestartParseForMemory({ maxRssMb: 2048 }, 2048), true);
+  assert.equal(cli.shouldRestartParseForMemory({ maxRssMb: 0 }, 99999), false);
 });
 
 test("connectivity query uses wos.js openQueryPage and reads search info when available", async () => {
@@ -1075,10 +1118,53 @@ test("parse workers reuse one WOS page per worker", async () => {
   );
 
   assert.equal(pages.length, 2);
-  assert.deepEqual(pages.map((page) => page.gotoCalls), [1, 1]);
+  assert.deepEqual(pages.map((page) => page.gotoCalls), [2, 2]);
   assert.deepEqual(pages.map((page) => page.closed), [true, true]);
   assert.equal(seen.length, 4);
   assert.ok(new Set(seen.map(([, pageId]) => pageId)).size <= 2);
+});
+
+test("releasing a WOS context blanks and closes every page before the context", async () => {
+  const events = [];
+  const makePage = (id) => ({
+    id,
+    closed: false,
+    async evaluate() {
+      events.push(`evaluate:${id}`);
+    },
+    async goto(url) {
+      events.push(`goto:${id}:${url}`);
+    },
+    isClosed() {
+      return this.closed;
+    },
+    async close() {
+      this.closed = true;
+      events.push(`close:${id}`);
+    },
+  });
+  const pages = [makePage(1), makePage(2)];
+  let contextClosed = 0;
+  const context = {
+    pages() {
+      return pages;
+    },
+    async close() {
+      contextClosed += 1;
+      events.push("context:close");
+    },
+  };
+
+  await cli.releaseWosContext(context);
+
+  assert.equal(contextClosed, 1);
+  assert.equal(events.filter((entry) => entry === "context:close").length, 1);
+  assert.ok(events.includes("evaluate:1"));
+  assert.ok(events.includes("evaluate:2"));
+  assert.ok(events.includes("goto:1:about:blank"));
+  assert.ok(events.includes("goto:2:about:blank"));
+  assert.ok(events.includes("close:1"));
+  assert.ok(events.includes("close:2"));
 });
 
 test("WOS data records import into global SQLite without raw TXT or BibTeX", () => {
@@ -1616,6 +1702,36 @@ test("SID preparation reuses saved WOS domain config", async () => {
   assert.equal(args.baseUrl, "https://access.example.edu");
 });
 
+test("interactive SID recovery can take a manually entered SID instead of forcing browser login", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "run", "--task", "demo", "--tasks-root", root]);
+  const sid = await cli.acquireFreshSid(args, () => {}, {
+    canPrompt: () => true,
+    chooseSid: async () => "manual-sid",
+  });
+
+  assert.equal(sid, "manual-sid");
+  assert.equal(args.sid, "manual-sid");
+  assert.equal(args.sidSource, "prompt");
+});
+
+test("SID recovery still falls back to browser login when no interactive terminal is available", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "run", "--task", "demo", "--tasks-root", root]);
+  const sid = await cli.acquireFreshSid(args, () => {}, {
+    canPrompt: () => false,
+    readBrowserSid: async () => {
+      args.sid = "browser-sid";
+      args.sidSource = "browser";
+      return args.sid;
+    },
+  });
+
+  assert.equal(sid, "browser-sid");
+  assert.equal(args.sid, "browser-sid");
+  assert.equal(args.sidSource, "browser");
+});
+
 test("SID pool parses, deduplicates, and migrates legacy saved SID config", () => {
   const root = temporaryDirectory();
   const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
@@ -1702,6 +1818,42 @@ test("quick SID validation discards invalid config SIDs and tries the next pool 
   assert.equal(readJson(cli.globalConfigPath()).sidCursor, 0);
   assert.equal(readJson(cli.globalConfigPath()).deadSids[0].sid, "bad");
   assert.equal(seen.length, 2);
+});
+
+test("forced SID discard removes the current SID from the saved pool for recovery restarts", () => {
+  const root = temporaryDirectory();
+  writeJson(cli.globalConfigPath(), { sids: ["stale", "next"], sidCursor: 0 });
+  const args = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
+  args.sid = "stale";
+  args.sidSource = "browser";
+
+  assert.equal(cli.discardActiveConfigSid(args, "query limit"), false);
+  assert.deepEqual(readJson(cli.globalConfigPath()).sids, ["stale", "next"]);
+
+  const discarded = cli.discardActiveConfigSid(args, "query limit", { force: true });
+  assert.equal(discarded.removedSid, "stale");
+  assert.equal(discarded.sidPoolCount, 1);
+  assert.deepEqual(readJson(cli.globalConfigPath()).sids, ["next"]);
+  assert.deepEqual(args.invalidatedSids, ["stale"]);
+  assert.equal(args.sid, "");
+  assert.equal(args.sidSource, "");
+});
+
+test("saved dead SIDs are rejected after a CLI restart", async () => {
+  const root = temporaryDirectory();
+  writeJson(cli.globalConfigPath(), {
+    sids: [],
+    deadSids: [{ sid: "stale", reason: "query limit", removedAt: "2026-06-11T00:00:00.000Z" }],
+  });
+  const args = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
+
+  const result = await cli.quickValidateSid(args, {
+    fetchImpl: async () => assert.fail("missing SID should not probe WOS"),
+  });
+
+  assert.equal(result.status, "missing");
+  assert.deepEqual(args.invalidatedSids, ["stale"]);
+  assert.equal(args.sid, "");
 });
 
 test("unknown SID probe does not discard saved SID pool values", async () => {
@@ -1870,7 +2022,7 @@ test("checkSid refreshes an invalid SID through the browser validation flow", as
   assert.equal(result.status, "refreshed");
   assert.equal(result.checkedWith, "browser-validation");
   assert.equal(result.initialStatus, "invalid");
-  assert.match(messages.join("\n"), /Opening a WOS browser login/);
+  assert.match(messages.join("\n"), /Choose manual SID input or browser login/);
 });
 
 test("masks SID values for dashboard display", () => {
