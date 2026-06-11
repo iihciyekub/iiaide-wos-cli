@@ -3,6 +3,18 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.37 - 2026-06-11
+
+- Remove per-WOSID parse retry attempts. A failed full-record parse is now
+  recorded once with its real extraction/import error instead of being requeued
+  as `retry`, so successful browser navigation is not hidden behind retry
+  status text.
+- Keep the 12-consecutive-failure WOS `buildQuery` diagnostic for SID/session
+  recovery, but count only real final parse failures because individual retry
+  attempts no longer exist.
+- Remove the `--parse-max-attempts` / `--max-attempts` parse option from the
+  command surface and documentation.
+
 ## 0.4.36 - 2026-06-11
 
 - Classify parse recovery `buildQuery` errors before invalidating a SID.

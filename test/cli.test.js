@@ -111,12 +111,9 @@ test("parse browser restart interval is configurable", () => {
   const tuned = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--restart-every", "50", "--tasks-root", root]);
   assert.equal(tuned.browserRestartEvery, 50);
 
-  const attempts = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--parse-max-attempts", "4", "--tasks-root", root]);
-  assert.equal(attempts.parseMaxAttempts, 4);
-  assert.equal(cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]).parseMaxAttempts, 8);
   assert.throws(
-    () => cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--parse-max-attempts", "9", "--tasks-root", root]),
-    /parse-max-attempts/
+    () => cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--parse-max-attempts", "4", "--tasks-root", root]),
+    /Unknown argument/
   );
 });
 
@@ -193,19 +190,21 @@ test("parse failure recovery probes buildQuery and restarts CLI only on SID quer
   assert.doesNotMatch(match[0], /loginForFreshSid/);
 });
 
-test("parse failures are retried before becoming final failures", () => {
+test("parse failures are recorded once without retrying individual WOSIDs", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/const maxParseAttempts[\s\S]*?parseProgress\.update\(processed, `\$\{recordProgressStatus\} \$\{wosid\}`, failures\.length\);/);
-  assert.ok(match, "parse retry source should be present");
-  assert.match(source, /const DEFAULT_PARSE_MAX_ATTEMPTS = 8/);
+  const match = source.match(/let recordProgressStatus = "ok"[\s\S]*?parseProgress\.update\(processed, `\$\{recordProgressStatus\} \$\{wosid\}`, failures\.length\);/);
+  assert.ok(match, "parse failure source should be present");
+  assert.doesNotMatch(source, /DEFAULT_PARSE_MAX_ATTEMPTS/);
+  assert.doesNotMatch(source, /parseMaxAttempts/);
+  assert.doesNotMatch(source, /willRetry/);
+  assert.doesNotMatch(source, /chunk\.push\(\{ \.\.\.item/);
   assert.match(source, /const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 12/);
-  assert.match(match[0], /const willRetry = attempt < maxParseAttempts/);
   assert.match(match[0], /const sessionRecoveryError = isSessionRecoveryError\(error\)/);
+  assert.match(match[0], /recordProgressStatus = "failed"/);
   assert.match(match[0], /consecutiveParseFailures \+= 1/);
   assert.match(match[0], /consecutiveParseFailures >= PARSE_RECOVERY_CONSECUTIVE_FAILURES/);
-  assert.match(match[0], /chunk\.push\(\{ \.\.\.item, attempt: attempt \+ 1 \}\)/);
-  assert.match(match[0], /if \(recordProgressStatus !== "retry"\) processed \+= 1/);
-  assert.match(match[0], /attempts: attempt/);
+  assert.match(match[0], /failures\.push\(failure\)/);
+  assert.match(match[0], /processed \+= 1/);
 });
 
 test("SID recovery classifies parse errors for diagnostics only", () => {
@@ -357,7 +356,7 @@ test("restart argv sanitization removes explicit SID values", () => {
 test("parse progress detail is completion-oriented for concurrent workers", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
   assert.match(source, /let recordProgressStatus = "ok"/);
-  assert.match(source, /recordProgressStatus = willRetry \? "retry" : "failed"/);
+  assert.match(source, /recordProgressStatus = "failed"/);
   assert.doesNotMatch(source, /consecutiveFailures \+= 1/);
   assert.match(source, /parseProgress\.update\(processed, `\$\{recordProgressStatus\} \$\{wosid\}`, failures\.length\)/);
   assert.doesNotMatch(source, /parseProgress\.update\(processed, `source \$\{index\}/);
@@ -934,7 +933,8 @@ test("record extraction uses injected wos.js page parser", () => {
   const match = source.match(/async function extractOneRecordInfo[\s\S]*?\n}\n\nasync function runPoolWithReusableRecordPages/);
   assert.ok(match, "extractOneRecordInfo source should be present");
   assert.match(match[0], /window\.wos\.record\.viewFullRecordByWosId\(targetWosId\)/);
-  assert.match(match[0], /parseCurrentFullRecordPage/);
+  assert.match(match[0], /parseCurrentFullRecordPage\(targetWosId\)/);
+  assert.match(match[0], /parsedRecords = Object\.values\(parsed \|\| \{\}\)\.filter/);
   assert.doesNotMatch(match[0], /context\.newPage/);
   assert.match(source, /runPoolWithReusableRecordPages\(chunk, args\.concurrency/);
   assert.doesNotMatch(source, /EXTRACT_AUTHOR_INFO/);

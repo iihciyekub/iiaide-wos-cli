@@ -191,9 +191,8 @@ Resume behavior is database-based:
 - Existing SQLite WOSID records are skipped by default.
 - `--force` refetches existing WOSID records and overwrites the SQLite row after validation.
 - `--from-index` and `--limit` select a slice of the WOSID index.
-- WOSID page failures are retried before becoming final failures. The default is
-  up to 8 attempts per WOSID; use `--parse-max-attempts <n>` to choose a lower
-  retry ceiling.
+- WOSID page failures are recorded once with the real extraction or SQLite
+  import error. They are not requeued for retry.
 - Final failures are recorded at `raw/<uuid>/full-record/<uuid>_parse_failures.json`.
 - `--browser-restart-every <n>` can explicitly restart Playwright between parse
   batches, but the default is `0` so reusable tabs keep collecting WOSID pages.
@@ -245,7 +244,7 @@ URL/result-set UUID or a local `.csv` file path; the CLI chooses the matching
 parse pipeline automatically. The default parse options are:
 
 ```text
-concurrency=saved parse tabs, default 1 | timeout=20000ms | cooldown=250ms | max-attempts=8 | restart=off | recovery=buildQuery AB=<random> | from=1 | limit=all
+concurrency=saved parse tabs, default 1 | timeout=20000ms | cooldown=250ms | restart=off | recovery=buildQuery AB=<random> | from=1 | limit=all
 ```
 
 ## Task Lifecycle

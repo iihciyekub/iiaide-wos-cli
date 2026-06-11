@@ -370,8 +370,10 @@ without deleting it. If `buildQuery` does not return `error_code`, the
 consecutive parse-failure counter resets and the parse continues without
 changing SID.
 
-Individual WOSID page failures are retried before becoming final failures. The
-default is up to 8 attempts per WOSID; lower it with `--parse-max-attempts <n>`.
+Individual WOSID page failures are recorded once with the real extraction or
+SQLite import error. They are not requeued for retry; 12 consecutive final
+parse failures still trigger the WOS `buildQuery` recovery diagnostic described
+above.
 
 For long parse runs, fixed browser restarts are disabled by default so reusable
 tabs can keep collecting WOSID pages. Use `--browser-restart-every <n>` only
@@ -402,7 +404,6 @@ Useful options:
 --record-timeout-ms 30000
 --cooldown-ms 500       Delay between records
 --concurrency 3         Use up to 3 reusable WOS tabs for this parse run
---parse-max-attempts 8  Retry each failed WOSID up to 8 attempts
 ```
 
 In the interactive menu, use `2 WOS IDs to SQL`. Paste either a WOS summary

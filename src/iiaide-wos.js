@@ -25,7 +25,6 @@ const DEFAULT_BATCH_SIZE = 200;
 const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_RECORD_TIMEOUT_MS = 20000;
 const DEFAULT_BROWSER_RESTART_EVERY = 0;
-const DEFAULT_PARSE_MAX_ATTEMPTS = 8;
 const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 12;
 const DEFAULT_PARSE_CONNECTIVITY_QUERY = "PY=2000";
 const DEFAULT_WOS_PROTOCOL = "https";
@@ -148,7 +147,6 @@ Parse options:
   --cooldown-ms <n>       Delay after each record. Default: 250
   --browser-restart-every <n>
                           Restart Playwright after n parsed WOSIDs. Default: 0 disables
-  --parse-max-attempts <n> Retry each failed WOSID up to n attempts. Default: 8, max: 8
 
 Task directory layout:
   raw/<uuid>/full-record/ WOS fullRecord text batches as <uuid>_<start>_<end>.txt
@@ -204,7 +202,6 @@ function parseArgs(argv) {
     concurrencySource: "",
     recordTimeoutMs: DEFAULT_RECORD_TIMEOUT_MS,
     browserRestartEvery: DEFAULT_BROWSER_RESTART_EVERY,
-    parseMaxAttempts: DEFAULT_PARSE_MAX_ATTEMPTS,
     limit: 0,
     fromIndex: 1,
     cooldownMs: 250,
@@ -287,7 +284,6 @@ function parseArgs(argv) {
     else if (arg === "--record-timeout-ms" || arg === "--record-timeout" || arg === "--page-timeout-ms") args.recordTimeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--cooldown-ms") args.cooldownMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--browser-restart-every" || arg === "--parse-restart-every" || arg === "--restart-every") args.browserRestartEvery = parseIntegerFlag(arg, readValue(arg, i++));
-    else if (arg === "--parse-max-attempts" || arg === "--max-attempts") args.parseMaxAttempts = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--check") args.checkOnly = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -309,7 +305,6 @@ function parseArgs(argv) {
   assertIntegerRange("--from-index", args.fromIndex, 1);
   assertIntegerRange("--cooldown-ms", args.cooldownMs, 0);
   assertIntegerRange("--browser-restart-every", args.browserRestartEvery, 0);
-  assertIntegerRange("--parse-max-attempts", args.parseMaxAttempts, 1, DEFAULT_PARSE_MAX_ATTEMPTS);
   args.tasksRoot = path.resolve(args.tasksRoot);
   applySavedRuntimeSettings(args);
   assertIntegerRange("--concurrency", args.concurrency, 1, 10);
@@ -2329,9 +2324,12 @@ async function extractOneRecordInfo(page, args, wosid) {
         throw new Error("wos.js record parser API missing: window.wos.record.parseCurrentFullRecordPage");
       }
       await window.wos.record.viewFullRecordByWosId(targetWosId);
-      const parsed = await window.wos.record.parseCurrentFullRecordPage();
+      const parsed = await window.wos.record.parseCurrentFullRecordPage(targetWosId);
       const normalizedWosId = window.wos.record.currentWosId || targetWosId;
-      const record = parsed?.[normalizedWosId] || parsed?.[targetWosId] || Object.values(parsed || {})[0] || parsed;
+      const parsedRecords = Object.values(parsed || {}).filter((value) => (
+        value && typeof value === "object" && !Array.isArray(value)
+      ));
+      const record = parsed?.[normalizedWosId] || parsed?.[targetWosId] || parsedRecords[0] || parsed;
       if (!record || typeof record !== "object") {
         throw new Error(`No full-record JSON parsed for ${targetWosId}`);
       }
@@ -2441,7 +2439,6 @@ async function runParse(args) {
   let parsed = 0;
   let consecutiveParseFailures = 0;
   let sidRecovery = null;
-  const maxParseAttempts = Math.max(1, Math.min(DEFAULT_PARSE_MAX_ATTEMPTS, args.parseMaxAttempts || DEFAULT_PARSE_MAX_ATTEMPTS));
   const failures = [];
   const startParseSession = async (reason, chunkIndex = 0, chunksLength = 0) => {
     const nextSession = await prepareWosSession(args, { report: console.error });
@@ -2523,9 +2520,8 @@ async function runParse(args) {
         generation: sessionGeneration,
       }), args, async (item, _workerIndex, page) => {
         const { wosid, index } = item;
-        const attempt = Math.max(1, Number(item.attempt || 1));
         let recordProgressStatus = "ok";
-        appendProgress(paths, { phase: "parse-record-start", wosid, index, total: wosids.length, attempt, maxAttempts: maxParseAttempts });
+        appendProgress(paths, { phase: "parse-record-start", wosid, index, total: wosids.length });
         try {
           const raw = await extractOneRecordInfo(page, args, wosid);
           const sqliteResult = importWosDataRecord({
@@ -2538,47 +2534,38 @@ async function runParse(args) {
           });
           parsed += 1;
           consecutiveParseFailures = 0;
-          appendProgress(paths, { phase: "parse-record", status: "completed", wosid, index, attempt, dbPath: args.dbPath, imported: sqliteResult.imported, skipped: sqliteResult.skipped });
+          appendProgress(paths, { phase: "parse-record", status: "completed", wosid, index, dbPath: args.dbPath, imported: sqliteResult.imported, skipped: sqliteResult.skipped });
           if (!isInteractive()) {
-            console.error(`parse OK ${index}/${wosids.length} ${wosid} attempt ${attempt}/${maxParseAttempts} -> ${args.dbPath}`);
+            console.error(`parse OK ${index}/${wosids.length} ${wosid} -> ${args.dbPath}`);
           }
         } catch (error) {
-          const willRetry = attempt < maxParseAttempts;
           const sessionRecoveryError = isSessionRecoveryError(error);
-          recordProgressStatus = willRetry ? "retry" : "failed";
+          recordProgressStatus = "failed";
           consecutiveParseFailures += 1;
           appendProgress(paths, {
             phase: "parse-record",
-            status: willRetry ? "retrying" : "failed",
+            status: "failed",
             wosid,
             index,
-            attempt,
-            maxAttempts: maxParseAttempts,
             sessionRecoveryError,
             consecutiveParseFailures,
             error: error.message || String(error),
           });
           if (!isInteractive()) {
-            const prefix = willRetry ? "parse RETRY" : "parse FAIL";
-            console.error(`${prefix} ${index}/${wosids.length} ${wosid} attempt ${attempt}/${maxParseAttempts}: ${error.message || error}`);
+            console.error(`parse FAIL ${index}/${wosids.length} ${wosid}: ${error.message || error}`);
           }
-          if (willRetry) {
-            chunk.push({ ...item, attempt: attempt + 1 });
-          } else {
-            const failure = {
-              wosid,
-              index,
-              attempts: attempt,
-              error: error && error.stack ? error.stack : String(error),
-              failedAt: new Date().toISOString(),
-            };
-            failures.push(failure);
-          }
+          const failure = {
+            wosid,
+            index,
+            error: error && error.stack ? error.stack : String(error),
+            failedAt: new Date().toISOString(),
+          };
+          failures.push(failure);
           if (consecutiveParseFailures >= PARSE_RECOVERY_CONSECUTIVE_FAILURES) {
             await refreshSidAfterConsecutiveFailures();
           }
         }
-        if (recordProgressStatus !== "retry") processed += 1;
+        processed += 1;
         parseProgress.update(processed, `${recordProgressStatus} ${wosid}`, failures.length);
         if (args.cooldownMs) await sleep(args.cooldownMs);
       }, async () => {
