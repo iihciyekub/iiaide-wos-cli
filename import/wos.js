@@ -436,6 +436,40 @@ const webWait = WebWait.getInstance();
 const asy_webWait = webWait;
 
 
+/** Extract the externally prepared WOS accession from a full-record URL/path.
+ */
+function extractWosIdFromFullRecordPath(value = '') {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    const fullRecordMatch = text.match(/\/full-record\/([^/?#\s]+)/i);
+    if (!fullRecordMatch) return '';
+    try {
+        return decodeURIComponent(fullRecordMatch[1]).trim();
+    } catch (_) {
+        return String(fullRecordMatch[1] || '').trim();
+    }
+}
+
+/** Prepare a WOS accession for browser-side routing without canonicalizing it.
+ */
+function prepareWosRecordId(value = '') {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    return extractWosIdFromFullRecordPath(text) || text;
+}
+
+/** Loose comparison for verification only; does not mutate stored WOS IDs.
+ */
+function compactWosRecordIdForCompare(value = '') {
+    return String(prepareWosRecordId(value) || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+}
+
+function wosRecordIdsMatch(left = '', right = '') {
+    const leftCompact = compactWosRecordIdForCompare(left);
+    const rightCompact = compactWosRecordIdForCompare(right);
+    return Boolean(leftCompact && rightCompact && leftCompact === rightCompact);
+}
+
 
 
 
@@ -517,23 +551,44 @@ class WosGoto {
         }
     }
 
-    /** (内部方法) 规范化传入的 WOS ID；保留传入前缀，不强制补 `WOS:`
+    /** (内部方法) 清理传入的 WOS ID；保留外部提供的前缀、大小写和标点
      * - wosid: 原始 WOS ID
-     * - 返回值: 标准化后的 WOS ID；空值时返回空字符串
+     * - 返回值: 清理后的 WOS ID；空值时返回空字符串
      */
     #normalizeWosId(wosid = '') {
-        const normalized = String(wosid || '').trim();
-        if (!normalized) {
-            return '';
+        return prepareWosRecordId(wosid);
+    }
+
+    #readCurrentFullRecordPageWosId() {
+        return prepareWosRecordId(document.querySelector('#HiddenSecTa-accessionNo')?.textContent || '');
+    }
+
+    #currentFullRecordRouteWosId() {
+        return extractWosIdFromFullRecordPath(window.location.href);
+    }
+
+    async #waitForFullRecordPageByWosId(wosid) {
+        const expectedWosId = this.#normalizeWosId(wosid);
+        for (let i = 0; i < 60; i++) {
+            const hasFullRecordRoot = Boolean(
+                document.querySelector('#snMainArticle') ||
+                document.querySelector('#FullRTa-fullRecordtitle-0')
+            );
+            const pageWosId = this.#readCurrentFullRecordPageWosId();
+            const routeWosId = this.#currentFullRecordRouteWosId();
+            if (hasFullRecordRoot && pageWosId && wosRecordIdsMatch(expectedWosId, pageWosId)) {
+                return true;
+            }
+            if (hasFullRecordRoot && !pageWosId && wosRecordIdsMatch(expectedWosId, routeWosId)) {
+                return true;
+            }
+            await webFuncs.sleep(100);
         }
-        const fullRecordMatch = normalized.match(/\/full-record\/([^/?#\s]+)/i);
-        const source = fullRecordMatch ? decodeURIComponent(fullRecordMatch[1]) : normalized;
-        const prefixed = source.match(/^([A-Za-z][A-Za-z0-9]*)\s*[:：]\s*(.+)$/);
-        if (prefixed) {
-            const suffix = String(prefixed[2] || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-            return suffix ? `${prefixed[1].toUpperCase()}:${suffix}` : '';
-        }
-        return source.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        const pageWosId = this.#readCurrentFullRecordPageWosId();
+        const routeWosId = this.#currentFullRecordRouteWosId();
+        throw new Error(
+            `[WOS] Failed to open full record for ${expectedWosId}; current route=${routeWosId || 'unknown'}, page=${pageWosId || 'unknown'}`
+        );
     }
 
     /** (内部方法) 根据 WOS ID 跳转到指定页面，并等待页头文本渲染完成
@@ -600,13 +655,12 @@ class WosGoto {
     async goToFullRecordPageByWosId(wosid) {
         const normalizedWosId = this.#normalizeWosId(wosid);
         if (!normalizedWosId) {
-            console.warn('[WOS] Missing WOS ID for full record page navigation.');
-            return null;
+            throw new Error('[WOS] Missing WOS ID for full record page navigation.');
         }
 
-        const href = `/wos/woscc/full-record/${normalizedWosId}`;
+        const href = `/wos/woscc/full-record/${encodeURIComponent(normalizedWosId)}`;
         await this.#pushRoute(href, async () => {
-            await webWait.waitForElementBySelector("#FullRTa-fullRecordtitle-0", 50);
+            await this.#waitForFullRecordPageByWosId(normalizedWosId);
         });
         return normalizedWosId;
     }
@@ -616,9 +670,10 @@ class WosGoto {
      */
     async goToCitationsPageByWosId(wosid) {
         const normalizedWosId = this.#normalizeWosId(wosid);
+        const routeWosId = encodeURIComponent(normalizedWosId);
         return this.#goToSummaryPageByWosId(
             normalizedWosId,
-            `/wos/woscc/citing-summary/${normalizedWosId}?from=woscc&type=colluid&eventMode=timeCitedOnSummary`,
+            `/wos/woscc/citing-summary/${routeWosId}?from=woscc&type=colluid&eventMode=timeCitedOnSummary`,
             'Citations of'
         );
     }
@@ -628,9 +683,10 @@ class WosGoto {
      */
     async goToReferencesPageByWosId(wosid) {
         const normalizedWosId = this.#normalizeWosId(wosid);
+        const routeWosId = encodeURIComponent(normalizedWosId);
         return this.#goToSummaryPageByWosId(
             normalizedWosId,
-            `/wos/woscc/cited-references-summary/${normalizedWosId}?type=colluid&from=woscc`,
+            `/wos/woscc/cited-references-summary/${routeWosId}?type=colluid&from=woscc`,
             'References of'
         );
     }
@@ -640,9 +696,10 @@ class WosGoto {
      */
     async goToRelatedRecordsPageByWosId(wosid) {
         const normalizedWosId = this.#normalizeWosId(wosid);
+        const routeWosId = encodeURIComponent(normalizedWosId);
         return this.#goToSummaryPageByWosId(
             normalizedWosId,
-            `/wos/woscc/related-records-summary/${normalizedWosId}?type=colluid&from=woscc`,
+            `/wos/woscc/related-records-summary/${routeWosId}?type=colluid&from=woscc`,
             'Related to'
         );
     }
@@ -661,7 +718,7 @@ class WosGoto {
         }
 
         await this.#pushRoute(
-            `/wos/woscc/shared-references-summary/${normalizedWosId1}/${normalizedWosId2}?type=colluid&from=woscc`,
+            `/wos/woscc/shared-references-summary/${encodeURIComponent(normalizedWosId1)}/${encodeURIComponent(normalizedWosId2)}?type=colluid&from=woscc`,
             async () => {
                 await webWait.waitForElementTextToInclude('#GenericFD-article-metadata-parent', 'Shared references between', 50);
             }
@@ -725,7 +782,7 @@ const wosGoto = WosGoto.getInstance();
  */
 class WosIdStore {
     static instance = null;
-    static def_value = 'A1993KH59100006';
+    static def_value = '';
 
     static getInstance() {
         return WosIdStore.instance || new WosIdStore();
@@ -738,23 +795,20 @@ class WosIdStore {
         this.db = {};
     }
 
-    /** 规范化 WOS ID；保留传入前缀，不强制补 `WOS:`
+    /** 清理 WOS ID；保留外部提供的前缀、大小写和标点
      * - wosid: 原始 WOS ID
-     * - 返回值: 标准化后的 WOS ID；空值时返回空字符串
+     * - 返回值: 清理后的 WOS ID；空值时返回空字符串
      */
     #normalizeWosId(wosid = '') {
-        const normalized = String(wosid || '').trim();
-        if (!normalized) {
-            return '';
+        return prepareWosRecordId(wosid);
+    }
+
+    #requireWosId(wosid = '', action = 'WOS ID operation') {
+        const normalizedWosId = this.#normalizeWosId(wosid);
+        if (!normalizedWosId) {
+            throw new Error(`[WOS] Missing WOS ID for ${action}.`);
         }
-        const fullRecordMatch = normalized.match(/\/full-record\/([^/?#\s]+)/i);
-        const source = fullRecordMatch ? decodeURIComponent(fullRecordMatch[1]) : normalized;
-        const prefixed = source.match(/^([A-Za-z][A-Za-z0-9]*)\s*[:：]\s*(.+)$/);
-        if (prefixed) {
-            const suffix = String(prefixed[2] || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-            return suffix ? `${prefixed[1].toUpperCase()}:${suffix}` : '';
-        }
-        return source.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        return normalizedWosId;
     }
 
     /** 将数据按 WOS ID 合并写入当前会话的内存缓存
@@ -848,7 +902,7 @@ class WosIdStore {
      */
     async syncCurrentWosIdFromUrl() {
         const href = window.location.href;
-        const wosid = this.#normalizeWosId(href.split('/').pop());
+        const wosid = this.#normalizeWosId(href);
         if (!wosid) {
             console.log('Not on a WOS record page. Cannot update WOS ID.');
             return null;
@@ -861,15 +915,17 @@ class WosIdStore {
      * - wosid: 目标 WOS ID
      */
     async viewFullRecordByWosId(wosid = '') {
-        this.currentWosId = wosid;
-        return wosGoto.goToFullRecordPageByWosId(this.currentWosId);
+        const normalizedWosId = this.#requireWosId(wosid, 'full record page navigation');
+        const openedWosId = await wosGoto.goToFullRecordPageByWosId(normalizedWosId);
+        this._value = openedWosId;
+        return openedWosId;
     }
 
     /** 收集指定 WOS ID 的引用文献汇总页信息，并写入内存缓存
      * - wosid: 目标 WOS ID
      */
     async collectCitationsByWosId(wosid = '') {
-        this.currentWosId = wosid;
+        this._value = this.#requireWosId(wosid, 'citations page navigation');
         await wosGoto.goToCitationsPageByWosId(this.currentWosId);
         await this.#saveCitations();
     }
@@ -885,7 +941,7 @@ class WosIdStore {
      * - wosid: 目标 WOS ID
      */
     async collectReferencesByWosId(wosid = '') {
-        this.currentWosId = wosid;
+        this._value = this.#requireWosId(wosid, 'references page navigation');
         await wosGoto.goToReferencesPageByWosId(this.currentWosId);
         await this.#saveReferences();
     }
@@ -901,7 +957,7 @@ class WosIdStore {
      * - wosid: 目标 WOS ID
      */
     async collectRelatedRecordsByWosId(wosid = '') {
-        this.currentWosId = wosid;
+        this._value = this.#requireWosId(wosid, 'related-records page navigation');
         await wosGoto.goToRelatedRecordsPageByWosId(this.currentWosId);
         await this.#saveRelated();
     }
@@ -941,7 +997,7 @@ class WosIdStore {
      * - 返回值: 成功时返回导出的原始文本；失败时返回 null
      */
     async fetchFullRecordExportTextByWosId(wosid = '') {
-        this.currentWosId = wosid;
+        this._value = this.#requireWosId(wosid, 'full record export');
         const requestBody = {
             ids: [this.currentWosId],
             displayTimesCited: 'true',
@@ -1030,8 +1086,8 @@ class WosIdStore {
      * - 返回值: 成功时返回 `{ [wosid]: json }`，失败时返回 null
      */
     async fetchFullRecordJsonByWosId(wosid = '') {
-        this.currentWosId = wosid;
-        const text = await this.fetchFullRecordExportTextByWosId(this.currentWosId);
+        const normalizedWosId = this.#requireWosId(wosid, 'full record JSON fetch');
+        const text = await this.fetchFullRecordExportTextByWosId(normalizedWosId);
         if (!text) {
             return null;
         }
@@ -1044,7 +1100,6 @@ class WosIdStore {
         this.mergeIntoCache(this.currentWosId, record);
         return { [this.currentWosId]: record };
     }
-
 
     /** 展开当前 WOS full record 页面中的折叠信息，再解析为 JSON 对象
      * - root: full record 主内容 DOM，默认 `#snMainArticle`

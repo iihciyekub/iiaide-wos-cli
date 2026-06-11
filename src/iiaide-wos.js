@@ -23,8 +23,9 @@ const { version: VERSION } = require("../package.json");
 const DEFAULT_BATCH_SIZE = 200;
 const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_RECORD_TIMEOUT_MS = 20000;
-const DEFAULT_BROWSER_RESTART_EVERY = 100;
-const PARSE_SID_REFRESH_CONSECUTIVE_FAILURES = 20;
+const DEFAULT_BROWSER_RESTART_EVERY = 0;
+const PARSE_SID_REFRESH_CONSECUTIVE_FAILURES = 10;
+const DEFAULT_PARSE_CONNECTIVITY_QUERY = "PY=2000";
 const DEFAULT_WOS_PROTOCOL = "https";
 const DEFAULT_WOS_DOMAIN = "www.webofscience.com";
 const DEFAULT_BASE_URL = `${DEFAULT_WOS_PROTOCOL}://${DEFAULT_WOS_DOMAIN}`;
@@ -53,12 +54,25 @@ class UserQuitError extends UserCancelledError {
   }
 }
 
+class CliRestartRequestedError extends Error {
+  constructor(message = "Restarting CLI", options = {}) {
+    super(message);
+    this.name = "CliRestartRequestedError";
+    this.code = "CLI_RESTART_REQUESTED";
+    this.omitSidArgs = Boolean(options.omitSidArgs);
+  }
+}
+
 function isUserCancelledError(error) {
   return error?.code === "USER_CANCELLED" || error?.name === "UserCancelledError";
 }
 
 function isUserQuitError(error) {
   return error?.code === "USER_QUIT" || error?.name === "UserQuitError";
+}
+
+function isCliRestartRequestedError(error) {
+  return error?.code === "CLI_RESTART_REQUESTED" || error?.name === "CliRestartRequestedError";
 }
 
 function usage() {
@@ -68,6 +82,7 @@ Usage:
   iiaide-wos init [--tasks-root <dir>]
   iiaide-wos check [--sid <SID> | --from-browser] [--tasks-root <dir>] [--wos-domain <domain>] [--base-url <url>] [--headed]
   iiaide-wos workspace [--tasks-root <dir>]
+  iiaide-wos settings [--playwright-visible <on|off>] [--parse-concurrency <n>] [--add-sid <SID>] [--add-sids "<SID...>"] [--tasks-root <dir>]
   iiaide-wos update [--check]
   iiaide-wos run [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
   iiaide-wos bib [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
@@ -111,6 +126,12 @@ Export options:
   --wosjs <file>          Browser-side wos.js injection file. Default: ./import/wos.js
   --base-url <url>        WOS origin URL. Default: https://www.webofscience.com
   --headed                Show browser instead of headless mode
+  --headless              Run browser in background mode for this command
+  --playwright-visible <on|off>
+                          Save whether WOS Playwright work opens a visible browser
+  --parse-concurrency <n> Save default parse reusable WOS tabs. 1-10
+  --add-sid <SID>         Add one SID to the saved SID pool
+  --add-sids <text>       Add multiple SIDs separated by spaces, newlines, or commas
   --version               Show CLI version
   --help                  Show this help
   --check                 Check for an update without installing it
@@ -124,7 +145,7 @@ Parse options:
   --record-timeout-ms <n> Per-record full-page timeout. Default: 20000
   --cooldown-ms <n>       Delay after each record. Default: 250
   --browser-restart-every <n>
-                          Restart Playwright after n parsed WOSIDs. Default: 100, 0 disables
+                          Restart Playwright after n parsed WOSIDs. Default: 0 disables
 
 Task directory layout:
   raw/<uuid>/full-record/ WOS fullRecord text batches as <uuid>_<start>_<end>.txt
@@ -145,6 +166,8 @@ function parseArgs(argv) {
     command,
     sid: "",
     sidSource: "",
+    sidPoolIndex: -1,
+    sidPoolCount: 0,
     fromBrowser: false,
     url: "",
     urlHadProtocol: false,
@@ -168,9 +191,14 @@ function parseArgs(argv) {
       : wosOriginFromDomain(process.env.WOS_DOMAIN || DEFAULT_WOS_DOMAIN),
     baseUrlSource: process.env.WOS_BASE_URL ? "env" : (process.env.WOS_DOMAIN ? "domain-env" : ""),
     headed: false,
+    headedSource: "",
+    playwrightVisible: null,
+    parseConcurrencySetting: null,
+    addSidInputs: [],
     force: false,
     reuseRaw: false,
     concurrency: 1,
+    concurrencySource: "",
     recordTimeoutMs: DEFAULT_RECORD_TIMEOUT_MS,
     browserRestartEvery: DEFAULT_BROWSER_RESTART_EVERY,
     limit: 0,
@@ -225,10 +253,31 @@ function parseArgs(argv) {
       args.wosDomain = urlDomain(args.baseUrl) || args.wosDomain;
       args.baseUrlSource = "cli";
     }
-    else if (arg === "--headed") args.headed = true;
+    else if (arg === "--headed") {
+      args.headed = true;
+      args.headedSource = "cli";
+    }
+    else if (arg === "--headless") {
+      args.headed = false;
+      args.headedSource = "cli";
+    }
+    else if (arg === "--playwright-visible") args.playwrightVisible = parseBooleanFlag(arg, readValue(arg, i++));
+    else if (arg === "--add-sid") args.addSidInputs.push(readValue(arg, i++));
+    else if (arg === "--add-sids") args.addSidInputs.push(readValue(arg, i++));
     else if (arg === "--force") args.force = true;
     else if (arg === "--reuse-raw") args.reuseRaw = true;
-    else if (arg === "--concurrency") args.concurrency = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--concurrency") {
+      args.concurrency = parseIntegerFlag(arg, readValue(arg, i++));
+      args.concurrencySource = "cli";
+    }
+    else if (arg === "--parse-concurrency" || arg === "--parse-tabs") {
+      const value = parseIntegerFlag(arg, readValue(arg, i++));
+      args.parseConcurrencySetting = value;
+      if (!args.concurrencySource && command !== "settings") {
+        args.concurrency = value;
+        args.concurrencySource = "cli";
+      }
+    }
     else if (arg === "--limit") args.limit = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--from-index") args.fromIndex = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--record-timeout-ms" || arg === "--record-timeout" || arg === "--page-timeout-ms") args.recordTimeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
@@ -250,11 +299,14 @@ function parseArgs(argv) {
   assertIntegerRange("--timeout-ms", args.timeoutMs, 5000);
   assertIntegerRange("--record-timeout-ms", args.recordTimeoutMs, 5000);
   assertIntegerRange("--concurrency", args.concurrency, 1, 10);
+  if (args.parseConcurrencySetting !== null) assertIntegerRange("--parse-concurrency", args.parseConcurrencySetting, 1, 10);
   assertIntegerRange("--limit", args.limit, 0);
   assertIntegerRange("--from-index", args.fromIndex, 1);
   assertIntegerRange("--cooldown-ms", args.cooldownMs, 0);
   assertIntegerRange("--browser-restart-every", args.browserRestartEvery, 0);
   args.tasksRoot = path.resolve(args.tasksRoot);
+  applySavedRuntimeSettings(args);
+  assertIntegerRange("--concurrency", args.concurrency, 1, 10);
   if (args.csvPath) args.csvPath = path.resolve(args.csvPath);
   if (args.mergeDbPath) args.mergeDbPath = path.resolve(args.mergeDbPath);
   args.dbPath = args.dbPath ? path.resolve(args.dbPath) : defaultWosDataDbPath();
@@ -271,6 +323,25 @@ function parseArgs(argv) {
 function parseIntegerFlag(flag, value) {
   if (!/^-?\d+$/.test(String(value))) throw new Error(`Invalid integer for ${flag}: ${value}`);
   return Number(value);
+}
+
+function parseBooleanFlag(flag, value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on", "visible", "headed"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off", "background", "headless"].includes(normalized)) return false;
+  throw new Error(`Invalid boolean for ${flag}: ${value}`);
+}
+
+function omitSidArgs(argv = []) {
+  const result = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === "--sid") {
+      index += 1;
+      continue;
+    }
+    result.push(argv[index]);
+  }
+  return result;
 }
 
 function assertIntegerRange(flag, value, minimum, maximum = Number.MAX_SAFE_INTEGER) {
@@ -449,6 +520,17 @@ function readConfig(tasksRoot) {
   return readJson(configPath(tasksRoot), { version: 1 });
 }
 
+function applySavedRuntimeSettings(args) {
+  const config = readConfig(args.tasksRoot);
+  if (!args.headedSource && typeof config.playwrightVisible === "boolean") {
+    args.headed = config.playwrightVisible;
+  }
+  if (!args.concurrencySource && Number.isSafeInteger(config.parseConcurrency)) {
+    args.concurrency = config.parseConcurrency;
+  }
+  return config;
+}
+
 function writeConfig(tasksRoot, config) {
   fs.mkdirSync(tasksRoot, { recursive: true });
   writeJson(
@@ -458,32 +540,186 @@ function writeConfig(tasksRoot, config) {
   );
 }
 
-function saveSidConfig(args, observedSid) {
+function parseSidValues(value) {
+  return String(value || "")
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function dedupeSidValues(values = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const sid = String(value || "").trim();
+    if (!sid || seen.has(sid)) continue;
+    seen.add(sid);
+    result.push(sid);
+  }
+  return result;
+}
+
+function sidPoolFromConfig(config = {}) {
+  const sids = dedupeSidValues([
+    ...(Array.isArray(config.sids) ? config.sids : []),
+    ...(config.sid ? [config.sid] : []),
+  ]);
+  const sidCursor = Number.isSafeInteger(config.sidCursor) && config.sidCursor >= 0
+    ? config.sidCursor
+    : 0;
+  const activeIndex = sids.length ? sidCursor % sids.length : -1;
+  return {
+    sids,
+    activeIndex,
+    activeSid: activeIndex >= 0 ? sids[activeIndex] : "",
+  };
+}
+
+function addSidsToConfig(args, values, options = {}) {
+  const inputs = Array.isArray(values) ? values : [values];
+  const incoming = dedupeSidValues(inputs.flatMap(parseSidValues));
+  const config = readConfig(args.tasksRoot);
+  const pool = sidPoolFromConfig(config);
+  const merged = dedupeSidValues([...pool.sids, ...incoming]);
+  const { sid: _sid, ...rest } = config;
+  const activeSid = options.activate
+    ? (incoming[0] || pool.activeSid || merged[0] || "")
+    : (pool.activeSid || incoming[0] || merged[0] || "");
+  const sidCursor = activeSid ? Math.max(0, merged.indexOf(activeSid)) : 0;
   writeConfig(args.tasksRoot, {
-    ...(args.sidSource === "env" ? {} : { sid: observedSid || args.sid }),
+    ...rest,
+    sids: merged,
+    sidCursor,
+  });
+  if (!args.sid && activeSid) {
+    args.sid = activeSid;
+    args.sidSource = "config";
+    args.sidPoolIndex = sidCursor;
+    args.sidPoolCount = merged.length;
+  }
+  return {
+    ok: true,
+    config: configPath(args.tasksRoot),
+    added: incoming.filter((sid) => !pool.sids.includes(sid)).length,
+    sidPoolCount: merged.length,
+    activeSid,
+  };
+}
+
+function discardActiveConfigSid(args, reason = "invalid") {
+  if (args.sidSource !== "config" || !args.sid) return false;
+  const config = readConfig(args.tasksRoot);
+  const pool = sidPoolFromConfig(config);
+  if (!pool.sids.length) return false;
+  const removeIndex = pool.activeIndex >= 0 && pool.sids[pool.activeIndex] === args.sid
+    ? pool.activeIndex
+    : pool.sids.indexOf(args.sid);
+  if (removeIndex < 0) return false;
+  const removedSid = pool.sids[removeIndex];
+  const nextSids = pool.sids.filter((_, index) => index !== removeIndex);
+  const nextCursor = nextSids.length ? removeIndex % nextSids.length : 0;
+  const deadSids = [
+    ...(Array.isArray(config.deadSids) ? config.deadSids : []),
+    {
+      sid: removedSid,
+      reason: String(reason || "invalid"),
+      removedAt: new Date().toISOString(),
+    },
+  ].slice(-50);
+  const { sid: _sid, ...rest } = config;
+  writeConfig(args.tasksRoot, {
+    ...rest,
+    sids: nextSids,
+    sidCursor: nextCursor,
+    deadSids,
+  });
+  args.sid = "";
+  args.sidSource = "";
+  args.sidPoolIndex = -1;
+  args.sidPoolCount = nextSids.length;
+  return {
+    removedSid,
+    sidPoolCount: nextSids.length,
+    nextIndex: nextCursor,
+  };
+}
+
+function saveSidConfig(args, observedSid) {
+  const config = readConfig(args.tasksRoot);
+  const pool = sidPoolFromConfig(config);
+  const sidValue = String(observedSid || args.sid || "").trim();
+  const nextSids = args.sidSource === "env" || !sidValue
+    ? pool.sids
+    : dedupeSidValues([...pool.sids, sidValue]);
+  const nextCursor = sidValue && nextSids.includes(sidValue)
+    ? nextSids.indexOf(sidValue)
+    : Math.max(0, pool.activeIndex);
+  const { sid: _sid, ...rest } = config;
+  writeConfig(args.tasksRoot, {
+    ...rest,
+    ...(nextSids.length ? { sids: nextSids, sidCursor: nextCursor } : { sids: [], sidCursor: 0 }),
     wosDomain: args.wosDomain || urlDomain(args.baseUrl) || DEFAULT_WOS_DOMAIN,
     baseUrl: args.baseUrl,
   });
+  if (sidValue && args.sidSource !== "env") {
+    args.sid = sidValue;
+    args.sidPoolIndex = nextCursor;
+    args.sidPoolCount = nextSids.length;
+  }
+}
+
+function setPlaywrightVisibleSetting(args, visible) {
+  const config = readConfig(args.tasksRoot);
+  const playwrightVisible = Boolean(visible);
+  writeConfig(args.tasksRoot, {
+    ...config,
+    playwrightVisible,
+  });
+  if (!args.headedSource) args.headed = playwrightVisible;
+  return {
+    ok: true,
+    config: configPath(args.tasksRoot),
+    playwrightVisible,
+    wosBrowserMode: playwrightVisible ? "visible" : "background",
+  };
+}
+
+function setParseConcurrencySetting(args, value) {
+  assertIntegerRange("--parse-concurrency", value, 1, 10);
+  const config = readConfig(args.tasksRoot);
+  writeConfig(args.tasksRoot, {
+    ...config,
+    parseConcurrency: value,
+  });
+  if (!args.concurrencySource) args.concurrency = value;
+  return {
+    ok: true,
+    config: configPath(args.tasksRoot),
+    parseConcurrency: value,
+  };
 }
 
 function clearSavedSidConfig(args) {
   const config = readConfig(args.tasksRoot);
-  if (!config.sid && !args.sid) return false;
-  const { sid: _sid, ...rest } = config;
+  const pool = sidPoolFromConfig(config);
+  if (!config.sid && !pool.sids.length && !args.sid) return false;
+  const { sid: _sid, sids: _sids, sidCursor: _sidCursor, deadSids: _deadSids, ...rest } = config;
   writeConfig(args.tasksRoot, rest);
   args.sid = "";
   args.sidSource = "";
+  args.sidPoolIndex = -1;
+  args.sidPoolCount = 0;
   return true;
 }
 
 function loadSavedSid(args) {
+  const config = applySavedRuntimeSettings(args);
   if (args.sid) return args.sid;
   if (process.env.WOS_SID) {
     args.sid = process.env.WOS_SID;
     args.sidSource = "env";
     return args.sid;
   }
-  const config = readConfig(args.tasksRoot);
   if (config.baseUrl && !args.baseUrlSource) {
     args.baseUrl = stripTrailingSlash(config.baseUrl);
     args.wosDomain = config.wosDomain || urlDomain(args.baseUrl) || args.wosDomain;
@@ -491,8 +727,11 @@ function loadSavedSid(args) {
     args.wosDomain = normalizeWosDomain(config.wosDomain);
     args.baseUrl = wosOriginFromDomain(args.wosDomain);
   }
-  if (config.sid) {
-    args.sid = config.sid;
+  const pool = sidPoolFromConfig(config);
+  args.sidPoolCount = pool.sids.length;
+  args.sidPoolIndex = pool.activeIndex;
+  if (pool.activeSid) {
+    args.sid = pool.activeSid;
     args.sidSource = "config";
   }
   return args.sid;
@@ -505,18 +744,17 @@ function maskSid(value) {
   return `${sid.slice(0, 4)}...${sid.slice(-4)}`;
 }
 
-async function quickValidateSid(args, options = {}) {
-  loadSavedSid(args);
+async function quickValidateCurrentSid(args, options = {}) {
   const sid = args.sid;
   const sidSource = args.sidSource || "";
-  const sidMasked = maskSid(sid);
   if (!sid) {
-    return { status: "missing", sidSource, sidMasked, ok: false, message: "No SID configured" };
+    return { status: "missing", sidSource, sid, sidMasked: maskSid(sid), ok: false, message: "No SID configured" };
   }
+  const sidMasked = maskSid(sid);
 
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   if (typeof fetchImpl !== "function") {
-    return { status: "unknown", sidSource, sidMasked, ok: false, message: "fetch is not available" };
+    return { status: "unknown", sidSource, sid, sidMasked, ok: false, message: "fetch is not available" };
   }
 
   const timeoutMs = Math.max(500, Number(options.timeoutMs) || 3500);
@@ -537,14 +775,15 @@ async function quickValidateSid(args, options = {}) {
     const origin = urlOrigin(href);
     const haystack = `${href}\n${text}`.toLowerCase();
     if ([401, 403].includes(response.status) || /\b(logged out|session expired)\b/i.test(haystack)) {
-      return { status: "invalid", sidSource, sidMasked, ok: false, href, origin, httpStatus: response.status, message: "SID was rejected by WOS" };
+      return { status: "invalid", sidSource, sid, sidMasked, ok: false, href, origin, httpStatus: response.status, message: "SID was rejected by WOS" };
     }
     if (response.ok && text.includes(sid) && /sessionData|BasicProperties|SID/.test(text)) {
-      return { status: "valid", sidSource, sidMasked, ok: true, href, origin, httpStatus: response.status, message: "SID accepted by WOS" };
+      return { status: "valid", sidSource, sid, sidMasked, ok: true, href, origin, httpStatus: response.status, message: "SID accepted by WOS" };
     }
     return {
       status: "unknown",
       sidSource,
+      sid,
       sidMasked,
       ok: false,
       href,
@@ -558,12 +797,37 @@ async function quickValidateSid(args, options = {}) {
     return {
       status: "unknown",
       sidSource,
+      sid,
       sidMasked,
       ok: false,
       message: error?.name === "AbortError" ? "SID check timed out" : `SID check failed: ${error.message || error}`,
     };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function quickValidateSid(args, options = {}) {
+  loadSavedSid(args);
+  for (;;) {
+    const result = await quickValidateCurrentSid(args, options);
+    if (result.status !== "invalid" || args.sidSource !== "config") return result;
+    const discarded = discardActiveConfigSid(args, result.message || "SID was rejected by WOS");
+    if (!discarded) return result;
+    if (!discarded.sidPoolCount) {
+      return {
+        ...result,
+        status: "missing",
+        ok: false,
+        sid: "",
+        sidMasked: "",
+        sidSource: "",
+        sidPoolCount: 0,
+        discardedSid: discarded.removedSid,
+        message: "All saved SIDs were rejected by WOS",
+      };
+    }
+    loadSavedSid(args);
   }
 }
 
@@ -576,7 +840,7 @@ function wosProfileName(args) {
 }
 
 function wosBrowserMode(args) {
-  return args.headed ? "headed" : "background";
+  return args.headed ? "visible" : "background";
 }
 
 function resolveWosJsPath(args) {
@@ -634,6 +898,15 @@ async function closeSharedWosSession() {
   const session = sharedWosSession;
   sharedWosSession = null;
   await session?.context?.close().catch(() => {});
+}
+
+async function forceCloseWosSession(session = null) {
+  if (sharedWosSession && (!session || session.context === sharedWosSession.context)) {
+    await closeSharedWosSession();
+    return;
+  }
+  await session?.context?.close?.().catch(() => {});
+  await session?.close?.().catch(() => {});
 }
 
 async function readSidFromLoginBrowser(args) {
@@ -771,12 +1044,14 @@ function setCurrentTaskId(args, taskId) {
 }
 
 function workspaceStatus(args, sidCheck = null) {
+  applySavedRuntimeSettings(args);
   const index = readTaskIndex(args.tasksRoot);
   const tasks = Array.isArray(index.tasks) ? index.tasks : [];
   const currentTask = readLatestTaskId(args.tasksRoot) || "";
   const config = readConfig(args.tasksRoot);
-  const sid = args.sid || process.env.WOS_SID || config.sid || "";
-  const sidSource = args.sidSource || (process.env.WOS_SID ? "env" : (config.sid ? "config" : ""));
+  const pool = sidPoolFromConfig(config);
+  const sid = args.sid || process.env.WOS_SID || pool.activeSid || "";
+  const sidSource = args.sidSource || (process.env.WOS_SID ? "env" : (pool.activeSid ? "config" : ""));
   const baseUrl = args.baseUrlSource ? args.baseUrl : (config.baseUrl || args.baseUrl || DEFAULT_BASE_URL);
   const wosDomain = args.baseUrlSource
     ? (args.wosDomain || urlDomain(args.baseUrl) || DEFAULT_WOS_DOMAIN)
@@ -788,6 +1063,8 @@ function workspaceStatus(args, sidCheck = null) {
     baseUrl,
     wosDomain,
     wosOrigin: sidCheck?.origin || "",
+    playwrightVisible: Boolean(args.headed),
+    parseConcurrency: args.concurrency,
     wosBrowserMode: wosBrowserMode(args),
     wosProfileName: wosProfileName(args),
     wosProfilePath: wosUserDataDir(args),
@@ -796,8 +1073,12 @@ function workspaceStatus(args, sidCheck = null) {
     currentTask,
     latestTask: currentTask,
     hasSavedSid: Boolean(sid),
+    sid,
     sidMasked: maskSid(sid),
     sidSource,
+    sidPoolCount: pool.sids.length,
+    sidPoolIndex: pool.activeIndex,
+    deadSidCount: Array.isArray(config.deadSids) ? config.deadSids.length : 0,
     sidCheck,
     wosDataDb: wosDataDbStats(args.dbPath),
     tasks: tasks.map((task) => ({
@@ -1489,11 +1770,11 @@ async function prepareWosSession(args, options = {}) {
     }
   }
 
-  let context = await launchWosPersistentContext(args, visible);
-  let page = context.pages()[0] || await context.newPage();
-  page.setDefaultTimeout(args.timeoutMs);
-  let status = null;
-  try {
+  for (;;) {
+    let context = await launchWosPersistentContext(args, visible);
+    let page = context.pages()[0] || await context.newPage();
+    page.setDefaultTimeout(args.timeoutMs);
+    let status = null;
     if (!args.sid) {
       await context.close().catch(() => {});
       await loginForFreshSid(args, report);
@@ -1501,23 +1782,36 @@ async function prepareWosSession(args, options = {}) {
       page = context.pages()[0] || await context.newPage();
       page.setDefaultTimeout(args.timeoutMs);
     }
-    status = await validateSid(page, args);
-  } catch (error) {
-    await context.close().catch(() => {});
-    await loginForFreshSid(args, report);
-    context = await launchWosPersistentContext(args, visible);
-    page = context.pages()[0] || await context.newPage();
-    page.setDefaultTimeout(args.timeoutMs);
-    status = await validateSid(page, args);
-  }
+    try {
+      status = await validateSid(page, args);
+    } catch (error) {
+      await context.close().catch(() => {});
+      if (args.sidSource === "config") {
+        const discarded = discardActiveConfigSid(args, error.message || "SID validation failed");
+        if (discarded?.sidPoolCount) {
+          report(`Saved SID was invalid and removed from the pool; trying next saved SID (${discarded.sidPoolCount} left).`);
+          loadSavedSid(args);
+          continue;
+        }
+        if (discarded) {
+          report("All saved SIDs were invalid. Opening a WOS browser login to refresh authentication.");
+        }
+      }
+      await loginForFreshSid(args, report);
+      context = await launchWosPersistentContext(args, visible);
+      page = context.pages()[0] || await context.newPage();
+      page.setDefaultTimeout(args.timeoutMs);
+      status = await validateSid(page, args);
+    }
 
-  applyValidatedWosOrigin(args, status);
-  if (!visible) await hideWosWindow(page);
-  if (keepAlive) {
-    sharedWosSession = { context, page };
-    return { context, page, status, close: async () => {} };
+    applyValidatedWosOrigin(args, status);
+    if (!visible) await hideWosWindow(page);
+    if (keepAlive) {
+      sharedWosSession = { context, page };
+      return { context, page, status, close: async () => {} };
+    }
+    return { context, page, status, close: async () => context.close().catch(() => {}) };
   }
-  return { context, page, status, close: async () => context.close().catch(() => {}) };
 }
 
 function applyValidatedWosOrigin(args, status) {
@@ -1538,6 +1832,14 @@ async function validateSidWithRetry(
   try {
     return await validateSid(page, args);
   } catch (error) {
+    if (args.sidSource === "config") {
+      const discarded = discardActiveConfigSid(args, error.message || "SID validation failed");
+      if (discarded?.sidPoolCount) {
+        report(`Saved SID was invalid and removed from the pool; trying next saved SID (${discarded.sidPoolCount} left).`);
+        loadSavedSid(args);
+        return validateSid(page, args);
+      }
+    }
     if (!canPrompt()) throw error;
     report(`WOS SID is invalid or expired: ${error.message || error}`);
     const sid = await prompt("Enter a new WOS SID to validate and save");
@@ -1567,6 +1869,70 @@ async function readSummaryInfo(page, args) {
     }
     return window.asy_uuid.fetchCurrentPageInfo("iiaide-wos summary").then(normalizeInfo);
   });
+}
+
+async function warmUpWosQueryPage(page, args, rowText = DEFAULT_PARSE_CONNECTIVITY_QUERY) {
+  await ensureWosJsOnPage(page, args);
+  const probe = await page.evaluate(async (queryText) => {
+    if (!window.wos?.query?.openQueryPage) {
+      throw new Error("wos.js query API missing: window.wos.query.openQueryPage");
+    }
+    await window.wos.query.openQueryPage(queryText);
+    return {
+      rowText: queryText,
+      href: window.location.href,
+      status: window.location.pathname.includes("/wos/woscc/general-summary") ? "routed" : "unknown",
+      sid: window.sessionData?.BasicProperties?.SID || "",
+    };
+  }, rowText);
+  const searchInfoReady = await page.waitForSelector('div[data-ta="search-info"]', {
+    state: "attached",
+    timeout: Math.min(args.recordTimeoutMs || args.timeoutMs, 5000),
+  }).then(() => true).catch(() => false);
+  await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+  let info = null;
+  if (searchInfoReady) {
+    try {
+      info = await readSummaryInfo(page, { ...args, timeoutMs: Math.min(args.timeoutMs, 5000) });
+    } catch (_) {
+      info = null;
+    }
+  }
+  return {
+    rowText,
+    href: info?.href || probe.href,
+    countText: info?.countText || "",
+    expectedCount: info?.expectedCount || 0,
+    status: info?.status || probe.status,
+    searchInfoReady,
+  };
+}
+
+function randomUppercaseLetters(length = 4) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  let value = "";
+  for (let index = 0; index < length; index += 1) {
+    value += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return value;
+}
+
+async function runWosRecoveryBuildQuery(page, args, expr = `AB=${randomUppercaseLetters(4)}`) {
+  await ensureWosJsOnPage(page, args);
+  const result = await page.evaluate(async (queryText) => {
+    if (!window.wos?.query?.buildQuery) {
+      throw new Error("wos.js query API missing: window.wos.query.buildQuery");
+    }
+    return window.wos.query.buildQuery(queryText);
+  }, expr);
+  return {
+    expr,
+    uuid: result?.uuid || "",
+    ref_count: Number(result?.ref_count || 0) || 0,
+    rowText: result?.rowText || expr,
+    status: result?.status || "",
+    error_code: result?.error_code || "",
+  };
 }
 
 async function prepareWosRequestContext(page, args) {
@@ -1842,16 +2208,23 @@ function remainingRecordTimeout(deadline, timeoutMs, wosid) {
   return remaining;
 }
 
-async function extractOneRecordInfo(context, args, wosid) {
+async function createReusableRecordPage(context, args) {
   const timeoutMs = args.recordTimeoutMs || args.timeoutMs;
-  const deadline = Date.now() + timeoutMs;
   const page = await context.newPage();
   page.setDefaultTimeout(timeoutMs);
+  await page.goto(`${args.baseUrl}/wos/`, {
+    waitUntil: "domcontentloaded",
+    timeout: Math.min(10000, timeoutMs),
+  });
+  await ensureWosJsOnPage(page, args);
+  return page;
+}
+
+async function extractOneRecordInfo(page, args, wosid) {
+  const timeoutMs = args.recordTimeoutMs || args.timeoutMs;
+  const deadline = Date.now() + timeoutMs;
+  page.setDefaultTimeout(timeoutMs);
   try {
-    await page.goto(`${args.baseUrl}/wos/`, {
-      waitUntil: "domcontentloaded",
-      timeout: Math.min(10000, remainingRecordTimeout(deadline, timeoutMs, wosid)),
-    });
     await ensureWosJsOnPage(page, args);
     const raw = await page.evaluate(async (targetWosId) => {
       if (!window.wos?.record?.viewFullRecordByWosId || !window.wos?.record?.parseCurrentFullRecordPage) {
@@ -1878,9 +2251,34 @@ async function extractOneRecordInfo(context, args, wosid) {
       throw new Error(`Full record timeout after ${timeoutMs}ms: ${wosid}`);
     }
     throw error;
-  } finally {
-    await page.close().catch(() => {});
   }
+}
+
+async function runPoolWithReusableRecordPages(items, concurrency, getSessionState, args, worker, beforeItem = null) {
+  let cursor = 0;
+  const workerCount = Math.min(concurrency, items.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    let page = null;
+    let pageGeneration = 0;
+    try {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        if (typeof beforeItem === "function") await beforeItem(items[index], index);
+        const state = getSessionState();
+        if (!state?.session?.context) throw new Error("WOS parse session is not available");
+        if (!page || pageGeneration !== state.generation || page.isClosed?.()) {
+          await page?.close?.().catch(() => {});
+          page = await createReusableRecordPage(state.session.context, args);
+          pageGeneration = state.generation;
+        }
+        await worker(items[index], index, page);
+      }
+    } finally {
+      await page?.close?.().catch(() => {});
+    }
+  });
+  await Promise.all(workers);
 }
 
 async function runParse(args) {
@@ -1940,23 +2338,59 @@ async function runParse(args) {
   const authSpinner = createSpinner("Validating WOS authentication");
   let parseProgress = null;
   let session = null;
+  let sessionGeneration = 0;
   let processed = 0;
   let parsed = 0;
   let consecutiveFailures = 0;
   let sidRecovery = null;
   const failures = [];
+  const startParseSession = async (reason, chunkIndex = 0, chunksLength = 0) => {
+    const nextSession = await prepareWosSession(args, { report: console.error });
+    sessionGeneration += 1;
+    const warmup = await warmUpWosQueryPage(nextSession.page, args);
+    appendProgress(paths, {
+      phase: "parse-connectivity-query",
+      reason,
+      rowText: warmup.rowText,
+      href: warmup.href,
+      countText: warmup.countText,
+      status: warmup.status,
+      searchInfoReady: warmup.searchInfoReady,
+      chunk: chunkIndex || undefined,
+      chunks: chunksLength || undefined,
+    });
+    return nextSession;
+  };
   const refreshSidAfterConsecutiveFailures = async () => {
     if (sidRecovery) return sidRecovery;
     sidRecovery = (async () => {
-      console.error(`More than ${PARSE_SID_REFRESH_CONSECUTIVE_FAILURES} WOSID page parses failed in a row. The saved SID may be expired; opening a WOS login window to refresh it.`);
-      appendProgress(paths, { phase: "parse-sid-refresh-start", consecutiveFailures });
+      console.error(`${PARSE_SID_REFRESH_CONSECUTIVE_FAILURES} WOSID page parses failed in a row. Closing Playwright, reconnecting with the current SID, and testing WOS buildQuery recovery.`);
+      appendProgress(paths, { phase: "parse-sid-reconnect-start", consecutiveFailures });
       await session?.close?.();
       session = null;
-      clearSavedSidConfig(args);
-      await loginForFreshSid(args, console.error);
-      session = await prepareWosSession(args);
+      session = await prepareWosSession(args, { report: console.error });
+      sessionGeneration += 1;
+      const recoveryQuery = await runWosRecoveryBuildQuery(session.page, args);
+      appendProgress(paths, {
+        phase: "parse-recovery-build-query",
+        expr: recoveryQuery.expr,
+        status: recoveryQuery.status,
+        errorCode: recoveryQuery.error_code,
+        uuid: recoveryQuery.uuid,
+        refCount: recoveryQuery.ref_count,
+      });
+      if (recoveryQuery.error_code) {
+        console.error(`WOS recovery query returned error_code=${recoveryQuery.error_code}. Closing Playwright, invalidating the current SID, and restarting CLI.`);
+        await forceCloseWosSession(session);
+        session = null;
+        discardActiveConfigSid(args, `WOS recovery query failed: ${recoveryQuery.error_code}`);
+        args.sid = "";
+        args.sidSource = "";
+        delete process.env.WOS_SID;
+        throw new CliRestartRequestedError(`WOS recovery query failed: ${recoveryQuery.error_code}`, { omitSidArgs: true });
+      }
       consecutiveFailures = 0;
-      appendProgress(paths, { phase: "parse-sid-refresh-completed", sidSource: args.sidSource });
+      appendProgress(paths, { phase: "parse-sid-reconnect-completed", sidSource: args.sidSource });
     })().finally(() => {
       sidRecovery = null;
     });
@@ -1964,21 +2398,25 @@ async function runParse(args) {
   };
   try {
     session = await prepareWosSession(args);
+    sessionGeneration += 1;
     authSpinner.succeed("WOS authentication validated");
     parseProgress = createProgress("Parsing WOS data", work.length);
     const chunks = chunkItemsByCount(work, args.browserRestartEvery);
     for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
       const chunk = chunks[chunkIndex];
       if (!session) {
-        session = await prepareWosSession(args);
+        session = await startParseSession("browser-restart", chunkIndex + 1, chunks.length);
         appendProgress(paths, { phase: "parse-browser-session-start", chunk: chunkIndex + 1, chunks: chunks.length });
       }
-      await runPool(chunk, args.concurrency, async (item) => {
-        if (sidRecovery) await sidRecovery;
+      await runPoolWithReusableRecordPages(chunk, args.concurrency, () => ({
+        session,
+        generation: sessionGeneration,
+      }), args, async (item, _workerIndex, page) => {
         const { wosid, index } = item;
+        let recordProgressStatus = "ok";
         appendProgress(paths, { phase: "parse-record-start", wosid, index, total: wosids.length });
         try {
-          const raw = await extractOneRecordInfo(session.context, args, wosid);
+          const raw = await extractOneRecordInfo(page, args, wosid);
           const sqliteResult = importWosDataRecord({
             dbPath: args.dbPath,
             record: raw,
@@ -1994,6 +2432,7 @@ async function runParse(args) {
             console.error(`parse OK ${index}/${wosids.length} ${wosid} -> ${args.dbPath}`);
           }
         } catch (error) {
+          recordProgressStatus = "failed";
           const failure = {
             wosid,
             index,
@@ -2006,18 +2445,20 @@ async function runParse(args) {
           if (!isInteractive()) {
             console.error(`parse FAIL ${index}/${wosids.length} ${wosid}: ${error.message || error}`);
           }
-          if (consecutiveFailures > PARSE_SID_REFRESH_CONSECUTIVE_FAILURES) {
+          if (consecutiveFailures >= PARSE_SID_REFRESH_CONSECUTIVE_FAILURES) {
             await refreshSidAfterConsecutiveFailures();
           }
         }
         processed += 1;
-        parseProgress.update(processed, `${index}/${wosids.length} ${wosid}`, failures.length);
+        parseProgress.update(processed, `${recordProgressStatus} ${wosid}`, failures.length);
         if (args.cooldownMs) await sleep(args.cooldownMs);
+      }, async () => {
+        if (sidRecovery) await sidRecovery;
       });
       if (args.browserRestartEvery && chunkIndex < chunks.length - 1) {
         appendProgress(paths, { phase: "parse-browser-restart", processed, selected: work.length, browserRestartEvery: args.browserRestartEvery });
         if (!isInteractive()) {
-          console.error(`parse browser restart ${processed}/${work.length}; reusing current SID`);
+          console.error(`parse browser restart ${processed}/${work.length}; reconnecting with current SID and testing WOS query routing with ${DEFAULT_PARSE_CONNECTIVITY_QUERY}`);
         }
         await session?.close?.();
         session = null;
@@ -2516,6 +2957,24 @@ async function executeCommand(args) {
     console.log(JSON.stringify(workspaceStatus(args), null, 2));
     return 0;
   }
+  if (args.command === "settings") {
+    if (args.playwrightVisible === null && args.parseConcurrencySetting === null && !args.addSidInputs.length) {
+      console.error(usage());
+      return 2;
+    }
+    const result = { ok: true, config: configPath(args.tasksRoot) };
+    if (args.playwrightVisible !== null) {
+      Object.assign(result, setPlaywrightVisibleSetting(args, args.playwrightVisible));
+    }
+    if (args.parseConcurrencySetting !== null) {
+      Object.assign(result, setParseConcurrencySetting(args, args.parseConcurrencySetting));
+    }
+    if (args.addSidInputs.length) {
+      Object.assign(result, addSidsToConfig(args, args.addSidInputs, { activate: true }));
+    }
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
   if (args.command === "update") {
     const spinner = createSpinner(args.checkOnly ? "Checking for iiaide-wos updates" : "Checking and updating iiaide-wos");
     try {
@@ -2659,10 +3118,16 @@ function recordCommandFailure(args, error) {
   }
 }
 
-async function runParsedCommand(args) {
+async function runParsedCommand(args, options = {}) {
   try {
     return await executeCommand(args);
   } catch (error) {
+    if (isCliRestartRequestedError(error)) {
+      console.error(error.message || "Restarting CLI");
+      await closeSharedWosSession();
+      const argv = options.argv || process.argv;
+      return restartCurrentCli(error.omitSidArgs ? omitSidArgs(argv) : argv);
+    }
     if (isUserQuitError(error)) {
       console.error(error.message || "Quit by user");
       return 130;
@@ -2709,14 +3174,28 @@ async function runInteractiveMenu(argv = process.argv) {
         makeTaskId,
         readBrowserSid: () => readSidFromBrowser(menuArgs),
         async saveSid(sid) {
-          menuArgs.sid = sid;
-          menuArgs.sidSource = menuArgs.sidSource || "prompt";
-          saveSidConfig(menuArgs, sid);
+          addSidsToConfig(menuArgs, [sid], { activate: true });
+          menuArgs.sid = "";
+          menuArgs.sidSource = "";
           const refreshedSidCheck = await quickValidateSid(menuArgs);
           return workspaceStatus(menuArgs, refreshedSidCheck);
         },
+        addSids(sids) {
+          addSidsToConfig(menuArgs, [sids], { activate: true });
+          menuArgs.sid = "";
+          menuArgs.sidSource = "";
+          return workspaceStatus(menuArgs, sidCheck);
+        },
         setCurrentTask(taskId) {
           setCurrentTaskId(menuArgs, taskId);
+          return workspaceStatus(menuArgs, sidCheck);
+        },
+        setPlaywrightVisible(visible) {
+          setPlaywrightVisibleSetting(menuArgs, visible);
+          return workspaceStatus(menuArgs, sidCheck);
+        },
+        setParseConcurrency(value) {
+          setParseConcurrencySetting(menuArgs, value);
           return workspaceStatus(menuArgs, sidCheck);
         },
       });
@@ -2800,14 +3279,22 @@ module.exports = {
   formatCheckSidResult,
   ensureSid,
   quickValidateSid,
+  quickValidateCurrentSid,
   validateSidWithRetry,
   prepareWosSession,
   clearSavedSidConfig,
+  discardActiveConfigSid,
+  addSidsToConfig,
+  parseSidValues,
+  sidPoolFromConfig,
   buildSidInitUrl,
   wosUserDataDir,
   wosProfileName,
   wosBrowserMode,
   wosBrowserLaunchOptions,
+  setPlaywrightVisibleSetting,
+  setParseConcurrencySetting,
+  applySavedRuntimeSettings,
   resolveWosJsPath,
   requireWosJsPath,
   applyValidatedWosOrigin,
@@ -2816,6 +3303,7 @@ module.exports = {
   clearTask,
   confirmAndClearTask,
   parseArgs,
+  omitSidArgs,
   makeTaskId,
   parseExportText,
   parseBibEntryCount,
@@ -2825,10 +3313,15 @@ module.exports = {
   reportDownloadPlan,
   isUserCancelledError,
   isUserQuitError,
+  isCliRestartRequestedError,
   isUserAbortError,
   runPool,
+  runPoolWithReusableRecordPages,
   chunkItemsByCount,
   prepareWosRequestContext,
+  warmUpWosQueryPage,
+  runWosRecoveryBuildQuery,
+  randomUppercaseLetters,
   pageContextUuid,
   readWosIdsCsv,
   normalizeWosId,

@@ -312,7 +312,8 @@ CLI method:
 
 ```text
 extractOneRecordInfo()
-  -> window.wos.record.viewFullRecordByWosId(wosid)
+  -> page.evaluate(targetWosId)
+  -> window.wos.record.viewFullRecordByWosId(targetWosId)
   -> window.wos.record.parseCurrentFullRecordPage()
 ```
 
@@ -341,15 +342,33 @@ Important distinction:
 
 - Page parsing is browser/page based, not a request-only JSON API path.
 - The CLI starts from a WOS page with injected `import/wos.js`, calls
-  `wos.record.viewFullRecordByWosId()`, then calls
-  `wos.record.parseCurrentFullRecordPage()` in the page context.
+  `window.wos.record.viewFullRecordByWosId(targetWosId)`, then calls
+  `window.wos.record.parseCurrentFullRecordPage()` in the page context.
+- The CLI does not click summary-page links or `page.goto()` each WOSID record;
+  the injected helper owns the browser-side full-record route change and loaded
+  page verification.
+- Each parse worker reuses one WOS page across records and relies on the
+  `wos.js` front-end route helper to move between full-record pages; concurrency
+  controls the number of reusable pages.
+- Save the default reusable page count with `iiaide-wos settings
+  --parse-concurrency <n>` or interactive menu item `5.2 Parse tabs`; explicit
+  `--concurrency <n>` still overrides the saved value for one command.
+- The browser-side opener treats the input as an externally prepared accession
+  string. It trims whitespace and can extract `/full-record/<id>` path segments,
+  but it preserves prefixes and punctuation such as `PUB:...`; CLI import and
+  SQLite validation own canonicalization and loose comparison.
 - CLI validates the structured page data and writes one SQLite row per WOSID to
   `~/.iiaide-wos/wosdata.sqlite`.
-- By default, parse work is grouped into 100-record browser batches. Between
-  batches, the CLI closes Playwright and opens a fresh context with the same SID.
-  Use `--browser-restart-every 0` to disable that behavior.
-- If more than 20 full-record page parses fail consecutively, the CLI clears the
-  saved SID and opens a visible WOS login window before continuing parse work.
+- Fixed parse browser restarts are disabled by default so reusable WOS pages can
+  keep collecting WOSID pages. Use `--browser-restart-every <n>` only when you
+  explicitly want periodic Playwright context restarts.
+- If 10 full-record page parses fail consecutively, the CLI closes Playwright
+  and reconnects with the current SID, then runs
+  `window.wos.query.buildQuery("AB=<random 4 letters>")`. If that WOS query
+  returns `error_code`, the CLI force-closes Playwright and treats the current
+  SID as invalid. Saved-pool SIDs are removed one at a time; `--sid` and
+  `WOS_SID` values are omitted from the restarted command without clearing the
+  saved pool.
 - The UUID-specific WOSID index remains at
   `raw/<uuid>/full-record/<uuid>_wosid.csv` and is the input list for parse.
 - For `parse --csv`, the local CSV is normalized into

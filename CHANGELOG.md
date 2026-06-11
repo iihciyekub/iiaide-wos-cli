@@ -3,6 +3,137 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.33 - 2026-06-11
+
+- Remove the `Dead SIDs` row from the interactive workspace dashboard. Invalid
+  saved SIDs are still removed from the active pool immediately; discarded SID
+  details remain only in config history for audit/debugging.
+
+## 0.4.32 - 2026-06-11
+
+- Stop forcing SID setup before the interactive workflow menu opens. Startup now
+  only probes and displays authentication status, while WOS download/parse
+  workflows request SID setup on demand.
+- Keep non-WOS interactive workflows such as Settings, SQLite status/query,
+  task management, and Update usable when no SID is configured.
+
+## 0.4.31 - 2026-06-11
+
+- Treat WOS `error_code` recovery responses as explicit evidence that the
+  current SID is invalid without clearing the saved SID pool when the bad SID
+  came from `--sid` or `WOS_SID`.
+- Restart recovery commands without the explicit `--sid <value>` pair after an
+  `error_code`, so a long-running command can pick up SID pool values added from
+  another terminal.
+
+## 0.4.30 - 2026-06-11
+
+- Replace the single saved SID with a saved SID pool in `tasks/config.json`.
+  The CLI selects the pool cursor value, removes only SIDs that are clearly
+  invalid, then tries the next saved SID before falling back to browser login or
+  manual input.
+- Add `iiaide-wos settings --add-sid <SID>` and `--add-sids "<SID...>"` for
+  scriptable SID pool updates. Batch input accepts spaces, newlines, or commas
+  and de-duplicates saved values.
+- Add interactive Settings actions `5.3 Add SID` and `5.4 Batch add SIDs`, and
+  show the current SID, pool position/count, and discarded SID count in the
+  workspace dashboard.
+
+## 0.4.29 - 2026-06-11
+
+- On WOS recovery `error_code`, force-close the shared Playwright context before
+  clearing SID state and restarting the CLI. This avoids leaving the workspace
+  `.browser-profile` locked by a kept-alive Chromium process in interactive
+  menu runs.
+
+## 0.4.28 - 2026-06-11
+
+- Change the 10-consecutive-failure parse recovery probe to run
+  `window.wos.query.buildQuery("AB=<random 4 letters>")` through `wos.js`.
+- If that recovery query returns `error_code`, close Playwright, clear the saved
+  SID and current `WOS_SID` environment value, and restart the current CLI
+  command/menu so the next run starts from a fresh SID flow.
+
+## 0.4.27 - 2026-06-11
+
+- Disable fixed parse browser restarts by default so multi-tab parsing keeps
+  collecting WOSID pages until real page failures force recovery.
+- Change parse recovery to close the Playwright context after 10 consecutive
+  WOSID page failures, reconnect with the current SID, and test WOS routing by
+  opening `PY=2000` through `window.wos.query.openQueryPage()`.
+- Make the recovery query tolerate missing summary `search-info` elements, so a
+  selector timeout during connectivity probing does not stop the parse run.
+
+## 0.4.26 - 2026-06-11
+
+- Make parse progress detail completion-oriented so single-tab and multi-tab
+  runs show the same progress semantics: the bar tracks completed selected
+  records and the detail shows the last completed WOSID status, while source
+  CSV positions remain in logs and non-interactive OK/FAIL lines.
+
+## 0.4.25 - 2026-06-11
+
+- Add a persistent parse tab setting: `iiaide-wos settings
+  --parse-concurrency <n>` writes the default reusable WOS page count for
+  `parse` and `parse-pipeline`, while explicit `--concurrency <n>` still
+  overrides it for one command.
+- Expose the same default in the interactive Settings menu as `5.2 Parse tabs`
+  and show it in the workspace dashboard.
+
+## 0.4.24 - 2026-06-11
+
+- Clarify the CLI full-record parse contract: `parse` opens WOSID pages through
+  the injected `window.wos.record.viewFullRecordByWosId(targetWosId)` helper,
+  then parses the loaded page with `window.wos.record.parseCurrentFullRecordPage()`.
+- Align README and usage/curl docs with the browser-helper boundary so CLI
+  documentation matches the current `wos.js` opening path.
+
+## 0.4.23 - 2026-06-11
+
+- Harden browser-side full-record opening so `import/wos.js` preserves externally
+  prepared WOSIDs such as `PUB:...`, rejects empty WOSID navigation instead of
+  reusing old state, URL-encodes full-record routes, and verifies the loaded
+  page before parsing.
+- Document that CLI import and SQLite validation own WOSID canonicalization;
+  the browser helper only trims input or extracts `/full-record/<id>` segments.
+
+## 0.4.22 - 2026-06-11
+
+- Reuse one WOS full-record Playwright page per parse worker instead of opening
+  and closing a new page for every WOSID. Full-record parsing still uses the
+  browser-side `wos.js` route/parser methods, but each worker now keeps its tab
+  across records until the parse session or browser-restart boundary ends.
+
+## 0.4.21 - 2026-06-11
+
+- Add a persistent Playwright visibility setting: `iiaide-wos settings
+  --playwright-visible on|off` writes `playwrightVisible` to
+  `tasks/config.json`, and the interactive menu exposes it as `5.1 Playwright
+  visible`.
+- Preserve the saved Playwright visibility setting when refreshing or saving a
+  WOS SID.
+
+## 0.4.20 - 2026-06-11
+
+- After parse browser restarts and 10-failure SID reconnects, run a warm-up WOS
+  query page using `PY=2020` before continuing WOSID full-record parsing.
+
+## 0.4.19 - 2026-06-11
+
+- Clarify parse progress detail by labeling the original WOSID CSV position as
+  `source <index>/<total>` so it is not confused with processed/failed counts.
+
+## 0.4.18 - 2026-06-11
+
+- Change the 10-failure parse recovery path to first close Playwright and
+  reconnect with the current SID; visible browser login is used only if that SID
+  reconnect cannot be validated.
+
+## 0.4.17 - 2026-06-11
+
+- Refresh the WOS SID after 10 consecutive full-record page parse failures
+  instead of waiting for more than 20 failures.
+
 ## 0.4.16 - 2026-06-11
 
 - Restart the Playwright WOS browser context between parse batches by default:

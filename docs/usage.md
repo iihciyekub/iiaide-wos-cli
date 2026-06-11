@@ -56,9 +56,8 @@ The `run` command:
 2. Shows the resolved WOS UUID parsed from the URL or UUID input.
 3. Validates the supplied or saved WOS SID by opening
    `https://www.webofscience.com/wos/?Init=Yes&SrcApp=CR&SID=<sid>`.
-   If the saved SID is invalid, it opens a visible WOS login window, detects the
-   fresh page SID after login, saves it, and reopens the same profile in
-   background headless mode.
+   If the active saved pool SID is invalid, it removes that SID and tries the
+   next saved value before falling back to a visible WOS login window.
 4. Opens the WOS summary page to prepare the same-origin request context.
 5. Reads and reports the result-set UUID and expected record count.
 6. Calls the injected `window.wos.export.fetchTxtBatches` API in batches.
@@ -128,6 +127,27 @@ The `parse` command reads the task's WOSID CSV and opens missing WOS full-record
 pages through the injected browser-side `wos.js` parser. Its deliverable is the
 global SQLite database, not local JSON files or a CSV export.
 
+For each selected WOSID, the CLI enters the Playwright page context and calls
+`window.wos.record.viewFullRecordByWosId(targetWosId)`, then parses the loaded
+page with `window.wos.record.parseCurrentFullRecordPage()`. It does not click
+summary-page links or call `page.goto()` for each record; `wos.js` owns the
+browser-side full-record route change and readiness verification.
+
+Each parse worker reuses one WOS Playwright page across records. The worker
+opens `/wos/` once, then uses the browser-side `wos.js` front-end route helper
+to move between full-record pages before parsing the current page. With
+`--concurrency 3`, the CLI keeps up to three reusable WOS pages instead of
+opening and closing a new page for every WOSID.
+Save that default with `iiaide-wos settings --parse-concurrency 3` or menu item
+`5.2 Parse tabs`; explicit `--concurrency <n>` still overrides the saved value
+for one command.
+
+The browser-side `wos.js` helper opens externally prepared WOSIDs. It trims
+input and accepts full-record URLs by extracting the path segment, but it does
+not canonicalize prefixes, case, or punctuation; values such as `PUB:...` are
+passed through to WOS routing. CSV/TXT import and SQLite validation remain the
+canonicalization and loose-comparison boundary.
+
 For every successfully processed WOS ID it validates the parsed object, augments
 it with `wosid`, `url`, and `fetchedAt`, and writes it directly to
 `~/.iiaide-wos/wosdata.sqlite`.
@@ -172,10 +192,15 @@ Resume behavior is database-based:
 - `--force` refetches existing WOSID records and overwrites the SQLite row after validation.
 - `--from-index` and `--limit` select a slice of the WOSID index.
 - Failures are recorded at `raw/<uuid>/full-record/<uuid>_parse_failures.json`.
-- `--browser-restart-every <n>` restarts Playwright between parse batches while
-  reusing the current SID. The default is `100`; use `0` to disable it.
-- More than 20 consecutive full-record page parse failures clears the saved SID,
-  opens a visible WOS login window, saves the refreshed SID, and continues.
+- `--browser-restart-every <n>` can explicitly restart Playwright between parse
+  batches, but the default is `0` so reusable tabs keep collecting WOSID pages.
+- 10 consecutive full-record page parse failures closes Playwright and
+  reconnects with the current SID, then runs
+  `window.wos.query.buildQuery("AB=<random 4 letters>")`. If that WOS query
+  returns `error_code`, the CLI force-closes Playwright and treats the current
+  SID as invalid. Saved-pool SIDs are removed one at a time; `--sid` and
+  `WOS_SID` values are omitted from the restarted command without clearing the
+  saved pool.
 
 Before the parse stage, WOSIDs already present in the global SQLite database are
 treated as completed and are skipped. After the parse stage, newly completed
@@ -213,7 +238,7 @@ URL/result-set UUID or a local `.csv` file path; the CLI chooses the matching
 parse pipeline automatically. The default parse options are:
 
 ```text
-concurrency=1 | timeout=20000ms | cooldown=250ms | restart=100 | from=1 | limit=all
+concurrency=saved parse tabs, default 1 | timeout=20000ms | cooldown=250ms | restart=off | recovery=buildQuery AB=<random> | from=1 | limit=all
 ```
 
 ## Task Lifecycle
@@ -278,6 +303,11 @@ actions:
   4.1 Status
   4.2 Merge database
   4.3 Query WOSID
+5 Settings
+  5.1 Playwright visible
+  5.2 Parse tabs
+  5.3 Add SID
+  5.4 Batch add SIDs
 c Check SID
 u Update
 B Back
@@ -286,7 +316,7 @@ q Exit
 
 Download workflows run directly in the current task marked with `*`. Use
 `c Check SID` to validate the saved SID from the startup panel and go
-directly into browser login when WOS rejects it.
+through the saved SID pool before browser login is needed.
 Use `2 WOS IDs to SQL` to parse from either a local WOSID CSV or a WOS summary
 URL/UUID; `.csv` input runs the CSV path and URL/UUID input runs the WOS export
 path first. Interactive parsing uses the default parse options directly.
@@ -353,13 +383,28 @@ Normal work should use the default `./tasks` directory.
 Commands that interact with WOS require a current SID:
 
 ```text
-explicit --sid -> WOS_SID -> tasks/config.json
+explicit --sid -> WOS_SID -> tasks/config.json SID pool
 ```
 
 Use `iiaide-wos check` when you want an explicit SID health check. It runs the
-lightweight HTTP probe first, and if the SID is missing, invalid, or still not
-confirmed, it opens a visible WOS browser login, saves the refreshed SID, and
-prints only a short safe status message.
+lightweight HTTP probe first. If a saved pool SID is clearly invalid, the CLI
+removes only that SID and tries the next saved value. If the pool is empty,
+missing, or still cannot be confirmed, it opens a visible WOS browser login,
+saves the refreshed SID into the pool, and prints only a short safe status
+message.
+
+Add one or many saved SID values without validating them immediately:
+
+```bash
+iiaide-wos settings --add-sid "SID_ONE"
+iiaide-wos settings --add-sids "SID_ONE SID_TWO
+SID_THREE"
+```
+
+`--add-sids` accepts spaces, newlines, or commas and de-duplicates values. In the
+interactive Settings menu, use `5.3 Add SID` for one value or `5.4 Batch add
+SIDs` for a multi-line paste. The dashboard shows the current SID and the active
+pool position/count.
 
 WOS domain/origin selection is separate from SID selection. Use
 `--wos-domain <domain>` or `WOS_DOMAIN` when only the host changes. Use
@@ -367,16 +412,25 @@ WOS domain/origin selection is separate from SID selection. Use
 sessions save both `wosDomain` and `baseUrl` in `tasks/config.json`.
 
 The CLI validates the SID against WOS before use. In an interactive terminal,
-missing or invalid SIDs are resolved by opening a visible WOS login window and
-detecting `window.sessionData.BasicProperties.SID` after login. Non-interactive
-environments must use `--sid`, `WOS_SID`, or an existing config.
+missing SIDs or an exhausted SID pool are resolved by opening a visible WOS
+login window and detecting `window.sessionData.BasicProperties.SID` after login.
+Non-interactive environments must use `--sid`, `WOS_SID`, or an existing saved
+pool.
 
 All Playwright-backed WOS work uses the same workspace profile:
 `<tasksRoot>/.browser-profile` (profile name: `.browser-profile`). Login, SID
 validation, summary-page metadata, request-based export calls, and page
 parsing should compose through that profile instead of creating isolated
 browser contexts or alternate profiles. Normal WOS work runs in background
-headless mode; only login and `--headed` runs open a visible browser.
+headless mode. Use `iiaide-wos settings --playwright-visible on` or menu item
+`5.1 Playwright visible` to save visible browser mode in `tasks/config.json`;
+use `off` to return to background mode. The `--headed` and `--headless` flags
+override the saved setting for one command. Login always opens a visible browser
+when user action is required.
+Use `iiaide-wos settings --parse-concurrency <n>` or menu item `5.2 Parse tabs`
+to save the default reusable WOS tab count for parse workflows. The saved value
+is stored in `tasks/config.json`; explicit `--concurrency <n>` overrides it for
+one parse command.
 Single-shot CLI commands close the browser process when they finish, but the
 next command reopens the same profile. Interactive menu runs keep the same
 profile session open across commands.
@@ -389,21 +443,25 @@ WOS logic as the older injected tool. Use `--wosjs <file>` or `WOSJS_PATH` only
 when the helper file is stored somewhere else.
 
 When the interactive CLI starts, it runs a lightweight SID probe against the WOS
-initialization URL. This does not open Chromium and does not save or overwrite
-the SID. The dashboard shows `Auth yes` only when that probe confirms the SID.
-If the SID is `missing`, `invalid`, or still `unknown`, the dashboard shows
-`Auth no` and the CLI prompts for either manual SID input or a visible WOS
-browser login. The dashboard shows the WOS origin URL under the left-side
-`iiaide-wos CLI` title, using the detected origin when the probe can resolve
-it. The left dashboard logo is highlighted in color-capable terminals. If no
-origin is confirmed, the CLI prints a hint to reopen WOS with
+initialization URL. This does not open Chromium. It removes a saved SID only when
+the probe clearly classifies it as invalid, then tries the next pool value. The
+dashboard shows `Auth yes` only when that probe confirms the active SID. If the
+SID is `missing`, `invalid`, or still `unknown`, the dashboard shows `Auth no`
+but still opens the workflow menu. SID setup is requested only after you choose
+a WOS download or parse workflow that needs WOS network access. The dashboard
+shows the WOS origin URL under the left-side `iiaide-wos CLI` title, using the
+detected origin when the probe can resolve it. The left dashboard logo is
+highlighted in color-capable terminals. If no origin is confirmed, the CLI
+prints a hint to reopen WOS with
 `https://www.webofscience.com/wos/?Init=Yes&SrcApp=CR&SID=<SID>`. Commands that
 download or extract WOS data still perform strict persistent Playwright
-validation before doing network work.
+validation before doing network work. Settings, SQLite, task management, and
+update workflows can be used while `Auth no` is shown.
 
 In interactive menu mode, manual SID entry and browser login SID detection save
-the refreshed SID, return to the outer menu loop, rerun the lightweight probe,
-and redraw the dashboard before asking for the next workflow input.
+the refreshed SID into the pool, return to the outer menu loop, rerun the
+lightweight probe, and redraw the dashboard before asking for the next workflow
+input.
 
 The CLI does not log in to WOS or manage user account credentials. SQLite
 imports also keep credentials out of the database.

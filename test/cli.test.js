@@ -101,13 +101,29 @@ test("parses SID check tasks", () => {
 test("parse browser restart interval is configurable", () => {
   const root = temporaryDirectory();
   const defaults = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
-  assert.equal(defaults.browserRestartEvery, 100);
+  assert.equal(defaults.browserRestartEvery, 0);
 
   const disabled = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--browser-restart-every", "0", "--tasks-root", root]);
   assert.equal(disabled.browserRestartEvery, 0);
 
   const tuned = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--restart-every", "50", "--tasks-root", root]);
   assert.equal(tuned.browserRestartEvery, 50);
+});
+
+test("parse concurrency default can be saved in settings", () => {
+  const root = temporaryDirectory();
+  const settingsArgs = cli.parseArgs(["node", "cli", "settings", "--parse-concurrency", "3", "--tasks-root", root]);
+  const saved = cli.setParseConcurrencySetting(settingsArgs, settingsArgs.parseConcurrencySetting);
+
+  assert.equal(saved.parseConcurrency, 3);
+  assert.equal(readJson(path.join(root, "config.json")).parseConcurrency, 3);
+
+  const configured = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
+  assert.equal(configured.concurrency, 3);
+  assert.equal(cli.workspaceStatus(configured).parseConcurrency, 3);
+
+  const oneOff = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--concurrency", "5", "--tasks-root", root]);
+  assert.equal(oneOff.concurrency, 5);
 });
 
 test("supports WOS domain variables for generated URLs", () => {
@@ -145,6 +161,158 @@ test("clears saved SID before browser-login repair", () => {
   assert.equal(args.sidSource, "");
   assert.equal(readJson(path.join(root, "config.json")).sid, undefined);
   assert.equal(readJson(path.join(root, "config.json")).baseUrl, "https://www.webofscience.com");
+});
+
+test("parse failure recovery probes buildQuery and restarts CLI on WOS query errors", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const match = source.match(/const refreshSidAfterConsecutiveFailures = async \(\) => \{[\s\S]*?\n  \};\n  try/);
+  assert.ok(match, "parse SID recovery source should be present");
+  assert.match(match[0], /testing WOS buildQuery recovery/);
+  assert.match(match[0], /runWosRecoveryBuildQuery\(session\.page, args\)/);
+  assert.match(match[0], /if \(recoveryQuery\.error_code\)/);
+  assert.match(match[0], /await forceCloseWosSession\(session\)/);
+  assert.match(match[0], /discardActiveConfigSid\(args/);
+  assert.doesNotMatch(match[0], /clearSavedSidConfig\(args\)/);
+  assert.match(match[0], /delete process\.env\.WOS_SID/);
+  assert.match(match[0], /omitSidArgs: true/);
+  assert.doesNotMatch(match[0], /startParseSession\("consecutive-failures"\)/);
+  assert.doesNotMatch(match[0], /loginForFreshSid/);
+});
+
+test("parse browser restarts are disabled by default and reconnect through a query route when enabled", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const match = source.match(/if \(!session\) \{[\s\S]*?\n      \}/);
+  assert.ok(match, "parse restart session block should be present");
+  assert.match(match[0], /startParseSession\("browser-restart", chunkIndex \+ 1, chunks\.length\)/);
+  assert.match(source, /warmUpWosQueryPage\(nextSession\.page, args\)/);
+  assert.match(source, /const DEFAULT_BROWSER_RESTART_EVERY = 0/);
+});
+
+test("connectivity query uses wos.js openQueryPage and reads search info when available", async () => {
+  const calls = [];
+  const page = {
+    evaluate: async (fn, arg) => {
+      const body = fn.toString();
+      if (body.includes("Boolean(window.wos")) return true;
+      if (body.includes("openQueryPage")) {
+        calls.push(["openQueryPage", arg]);
+        return null;
+      }
+      if (body.includes("fetchCurrentPageInfo")) {
+        return {
+          uuid: "warmup",
+          expectedCount: 12,
+          countText: "12",
+          rowText: "PY=2000",
+          href: "https://www.webofscience.com/wos/woscc/general-summary?queryJson=...",
+          status: "success",
+        };
+      }
+      return null;
+    },
+    waitForSelector: async (selector, options) => {
+      calls.push(["waitForSelector", selector, options.state]);
+    },
+    waitForLoadState: async (state) => {
+      calls.push(["waitForLoadState", state]);
+    },
+  };
+
+  const info = await cli.warmUpWosQueryPage(page, { timeoutMs: 120000 }, "PY=2000");
+  assert.deepEqual(calls.slice(0, 3), [
+    ["openQueryPage", "PY=2000"],
+    ["waitForSelector", 'div[data-ta="search-info"]', "attached"],
+    ["waitForLoadState", "networkidle"],
+  ]);
+  assert.equal(info.rowText, "PY=2000");
+  assert.equal(info.expectedCount, 12);
+  assert.equal(info.searchInfoReady, true);
+});
+
+test("connectivity query can continue when search info never renders", async () => {
+  const page = {
+    evaluate: async (fn, arg) => {
+      const body = fn.toString();
+      if (body.includes("Boolean(window.wos")) return true;
+      if (body.includes("openQueryPage")) {
+        assert.equal(arg, "PY=2000");
+        return {
+          rowText: arg,
+          href: "https://www.webofscience.com/wos/woscc/general-summary?queryJson=...",
+          status: "routed",
+          sid: "sid",
+        };
+      }
+      throw new Error("fetchCurrentPageInfo should not be called without search info");
+    },
+    waitForSelector: async () => {
+      throw new Error("Timeout 5000ms exceeded");
+    },
+    waitForLoadState: async () => {},
+  };
+
+  const info = await cli.warmUpWosQueryPage(page, { timeoutMs: 120000, recordTimeoutMs: 30000 }, "PY=2000");
+  assert.equal(info.rowText, "PY=2000");
+  assert.equal(info.status, "routed");
+  assert.equal(info.searchInfoReady, false);
+  assert.equal(info.expectedCount, 0);
+});
+
+test("recovery buildQuery uses a random abstract query and surfaces WOS errors", async () => {
+  assert.match(cli.randomUppercaseLetters(4), /^[A-Z]{4}$/);
+  const calls = [];
+  const page = {
+    evaluate: async (fn, arg) => {
+      const body = fn.toString();
+      if (body.includes("Boolean(window.wos")) return true;
+      if (body.includes("buildQuery")) {
+        calls.push(["buildQuery", arg]);
+        return {
+          uuid: "random-query",
+          ref_count: 0,
+          rowText: arg,
+          status: "failed",
+          error_code: "unknown error",
+        };
+      }
+      return null;
+    },
+  };
+
+  const result = await cli.runWosRecoveryBuildQuery(page, { timeoutMs: 120000 }, "AB=QWER");
+  assert.deepEqual(calls, [["buildQuery", "AB=QWER"]]);
+  assert.equal(result.expr, "AB=QWER");
+  assert.equal(result.error_code, "unknown error");
+  assert.equal(result.status, "failed");
+});
+
+test("runParsedCommand restarts the current CLI when parse recovery requests it", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const match = source.match(/async function runParsedCommand[\s\S]*?\n}\n\nfunction restartCurrentCli/);
+  assert.ok(match, "runParsedCommand source should be present");
+  assert.match(match[0], /isCliRestartRequestedError\(error\)/);
+  assert.match(match[0], /await closeSharedWosSession\(\)/);
+  assert.match(match[0], /error\.omitSidArgs \? omitSidArgs\(argv\) : argv/);
+  assert.equal(cli.isCliRestartRequestedError({ code: "CLI_RESTART_REQUESTED" }), true);
+});
+
+test("restart argv sanitization removes explicit SID values", () => {
+  assert.deepEqual(
+    cli.omitSidArgs(["node", "cli", "parse", "--sid", "bad", "--task", "demo"]),
+    ["node", "cli", "parse", "--task", "demo"]
+  );
+  assert.deepEqual(
+    cli.omitSidArgs(["node", "cli", "parse", "--task", "demo"]),
+    ["node", "cli", "parse", "--task", "demo"]
+  );
+});
+
+test("parse progress detail is completion-oriented for concurrent workers", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  assert.match(source, /let recordProgressStatus = "ok"/);
+  assert.match(source, /recordProgressStatus = "failed"/);
+  assert.match(source, /parseProgress\.update\(processed, `\$\{recordProgressStatus\} \$\{wosid\}`, failures\.length\)/);
+  assert.doesNotMatch(source, /parseProgress\.update\(processed, `source \$\{index\}/);
 });
 
 test("detects readline Ctrl+C abort errors", () => {
@@ -342,6 +510,11 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(workflowMatch[0], /4\.1", "Status/);
   assert.match(workflowMatch[0], /4\.2", "Merge database/);
   assert.match(workflowMatch[0], /4\.3", "Query WOSID/);
+  assert.match(workflowMatch[0], /Settings/);
+  assert.match(workflowMatch[0], /5\.1", "Playwright visible/);
+  assert.match(workflowMatch[0], /5\.2", "Parse tabs/);
+  assert.match(workflowMatch[0], /5\.3", "Add SID/);
+  assert.match(workflowMatch[0], /5\.4", "Batch add SIDs/);
   assert.match(workflowMatch[0], /shortcutRow/);
   assert.match(workflowMatch[0], /\["c", "Check SID"\]/);
   assert.match(workflowMatch[0], /\["u", "Update"\]/);
@@ -350,7 +523,7 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.doesNotMatch(workflowMatch[0], /Probe the saved SID/);
   assert.doesNotMatch(workflowMatch[0], /Install the latest release/);
   assert.doesNotMatch(workflowMatch[0], /Return to the workspace menu/);
-  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 2, 3\.1, 3\.2, 3\.3, 4\.1, 4\.2, 4\.3, c to check SID, u to update, B to go back/);
+  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 2, 3\.1, 3\.2, 3\.3, 4\.1, 4\.2, 4\.3, 5\.1, 5\.2, 5\.3, 5\.4, c to check SID, u to update, B to go back/);
   assert.doesNotMatch(workflowMatch[0], /Download WOS IDs/);
   assert.match(argsMatch[0], /choice === "c"/);
   assert.match(argsMatch[0], /return \["check", "--tasks-root", activeWorkspace\.tasksRoot\]/);
@@ -369,6 +542,13 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(argsMatch[0], /choice === "4\.3"/);
   assert.match(argsMatch[0], /WOSID/);
   assert.match(argsMatch[0], /\["wosdata", "--wosid", wosid, "--tasks-root", activeWorkspace\.tasksRoot\]/);
+  assert.match(argsMatch[0], /choice === "5\.1"/);
+  assert.match(argsMatch[0], /helpers\.setPlaywrightVisible/);
+  assert.match(argsMatch[0], /choice === "5\.2"/);
+  assert.match(argsMatch[0], /helpers\.setParseConcurrency/);
+  assert.match(argsMatch[0], /choice === "5\.3"/);
+  assert.match(argsMatch[0], /choice === "5\.4"/);
+  assert.match(argsMatch[0], /helpers\.addSids/);
   assert.doesNotMatch(argsMatch[0], /SQL SELECT query/);
   assert.match(argsMatch[0], /Force overwrite existing SQL rows/);
   assert.match(argsMatch[0], /choice === "2"/);
@@ -435,6 +615,9 @@ test("interactive header shows WOS browser mode and profile name", () => {
       wosBrowserMode: "background",
       wosProfileName: ".browser-profile",
       runtimeMs: 65000,
+      sid: "current-sid",
+      sidPoolCount: 3,
+      sidPoolIndex: 1,
       sidCheck: { origin: "https://www.webofscience.com" },
     });
   } finally {
@@ -443,6 +626,10 @@ test("interactive header shows WOS browser mode and profile name", () => {
   }
 
   assert.match(output, /Playwright\s+background/);
+  assert.match(output, /Parse Tabs\s+1/);
+  assert.match(output, /SID Value\s+current-sid/);
+  assert.match(output, /SID Pool\s+2\/3/);
+  assert.doesNotMatch(output, /Dead SIDs/);
   assert.match(output, /Profile\s+\.browser-profile/);
   assert.match(output, /Task ID\s+TID20260610120000/);
   assert.match(output, /WOS DB\s+none/);
@@ -474,7 +661,7 @@ test("interactive header shows WOS browser mode and profile name", () => {
   const panelRows = output
     .split(/\r?\n/)
     .filter((line) => /\|.*\|\s+\|.*\|/.test(line));
-  assert.equal(panelRows.length, 13);
+  assert.equal(panelRows.length, 15);
   assert.match(panelRows[0], /^\| {50}\|/);
   const logoRowIndex = panelRows.findIndex((line) => line.includes("[ W O S - C L I ]"));
   assert.ok(logoRowIndex > 0);
@@ -547,6 +734,55 @@ test("uses one workspace-scoped WOS Playwright profile", () => {
   assert.ok(status.runtimeMs >= 0);
   assert.equal(status.wosDataDb.dbPath, dbPath);
   assert.equal(status.wosDataDb.recordCount, 0);
+});
+
+test("persists visible Playwright mode in workspace config", () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
+  const saved = cli.setPlaywrightVisibleSetting(args, true);
+
+  assert.equal(saved.playwrightVisible, true);
+  assert.equal(readJson(path.join(root, "config.json")).playwrightVisible, true);
+
+  const configured = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
+  assert.equal(configured.headed, true);
+  assert.equal(cli.wosBrowserMode(configured), "visible");
+  assert.equal(cli.workspaceStatus(configured).playwrightVisible, true);
+
+  const oneOffBackground = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root, "--headless"]);
+  assert.equal(oneOffBackground.headed, false);
+  assert.equal(cli.wosBrowserMode(oneOffBackground), "background");
+
+  cli.setPlaywrightVisibleSetting(configured, false);
+  const disabled = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
+  assert.equal(disabled.headed, false);
+  assert.equal(cli.workspaceStatus(disabled).wosBrowserMode, "background");
+});
+
+test("settings command can add single and batch SID pool values", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs([
+    "node", "cli", "settings",
+    "--tasks-root", root,
+    "--add-sid", "one",
+    "--add-sids", "two three\none",
+  ]);
+
+  const originalLog = console.log;
+  let output = "";
+  console.log = (value = "") => {
+    output += `${value}\n`;
+  };
+  try {
+    assert.equal(await cli.executeCommand(args), 0);
+  } finally {
+    console.log = originalLog;
+  }
+
+  const result = JSON.parse(output);
+  assert.equal(result.sidPoolCount, 3);
+  assert.equal(result.added, 3);
+  assert.deepEqual(readJson(path.join(root, "config.json")).sids, ["one", "two", "three"]);
 });
 
 test("runs WOS Playwright in background unless visible browser is requested", () => {
@@ -647,11 +883,99 @@ test("detects WOS full-record redirects back to the WOS root", () => {
 
 test("record extraction uses injected wos.js page parser", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/async function extractOneRecordInfo[\s\S]*?\n}\n\nasync function runParse/);
+  const match = source.match(/async function extractOneRecordInfo[\s\S]*?\n}\n\nasync function runPoolWithReusableRecordPages/);
   assert.ok(match, "extractOneRecordInfo source should be present");
-  assert.match(match[0], /viewFullRecordByWosId/);
+  assert.match(match[0], /window\.wos\.record\.viewFullRecordByWosId\(targetWosId\)/);
   assert.match(match[0], /parseCurrentFullRecordPage/);
+  assert.doesNotMatch(match[0], /context\.newPage/);
+  assert.match(source, /runPoolWithReusableRecordPages\(chunk, args\.concurrency/);
   assert.doesNotMatch(source, /EXTRACT_AUTHOR_INFO/);
+});
+
+test("browser-side wos.js preserves externally prepared WOSIDs", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  const helper = source.match(/function prepareWosRecordId\(value = ''\) \{[\s\S]*?\n\}/);
+  assert.ok(helper, "prepareWosRecordId helper should be present");
+  assert.match(helper[0], /return extractWosIdFromFullRecordPath\(text\) \|\| text;/);
+  assert.doesNotMatch(helper[0], /toUpperCase|replace\(/);
+  assert.match(source, /static def_value = '';/);
+  assert.match(source, /const href = `\/wos\/woscc\/full-record\/\$\{encodeURIComponent\(normalizedWosId\)\}`/);
+});
+
+test("browser-side wos.js rejects empty WOSID navigation instead of reusing current state", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  const viewMethod = source.match(/async viewFullRecordByWosId\(wosid = ''\) \{[\s\S]*?\n    \}/);
+  assert.ok(viewMethod, "viewFullRecordByWosId source should be present");
+  assert.match(viewMethod[0], /#requireWosId\(wosid, 'full record page navigation'\)/);
+  assert.doesNotMatch(viewMethod[0], /this\.currentWosId = wosid/);
+});
+
+test("browser-side wos.js extracts full-record WOSID path segments without query or hash", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  const extractor = source.match(/function extractWosIdFromFullRecordPath\(value = ''\) \{[\s\S]*?\n\}/);
+  assert.ok(extractor, "full-record WOSID extractor should be present");
+  assert.ok(extractor[0].includes("text.match(/\\/full-record\\/([^/?#\\s]+)/i)"));
+  assert.match(extractor[0], /decodeURIComponent/);
+  const syncMethod = source.match(/async syncCurrentWosIdFromUrl\(\) \{[\s\S]*?\n    \}/);
+  assert.ok(syncMethod, "syncCurrentWosIdFromUrl source should be present");
+  assert.match(syncMethod[0], /const wosid = this\.#normalizeWosId\(href\);/);
+  assert.doesNotMatch(syncMethod[0], /href\.split\('\/'\)\.pop\(\)/);
+});
+
+test("browser-side wos.js does not let stale full-record DOM satisfy another WOSID", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  const waitMethod = source.match(/async #waitForFullRecordPageByWosId\(wosid\) \{[\s\S]*?\n    \}/);
+  assert.ok(waitMethod, "full-record wait helper should be present");
+  assert.match(waitMethod[0], /pageWosId && wosRecordIdsMatch\(expectedWosId, pageWosId\)/);
+  assert.match(waitMethod[0], /!pageWosId && wosRecordIdsMatch\(expectedWosId, routeWosId\)/);
+  assert.match(waitMethod[0], /throw new Error/);
+});
+
+test("parse workers reuse one WOS page per worker", async () => {
+  const pages = [];
+  const context = {
+    async newPage() {
+      const page = {
+        id: pages.length + 1,
+        closed: false,
+        gotoCalls: 0,
+        async goto() {
+          this.gotoCalls += 1;
+        },
+        setDefaultTimeout() {},
+        async evaluate(fn) {
+          if (fn.toString().includes("Boolean(window.wos")) return true;
+          return null;
+        },
+        isClosed() {
+          return this.closed;
+        },
+        async close() {
+          this.closed = true;
+        },
+      };
+      pages.push(page);
+      return page;
+    },
+  };
+  const seen = [];
+
+  await cli.runPoolWithReusableRecordPages(
+    [1, 2, 3, 4],
+    2,
+    () => ({ session: { context }, generation: 1 }),
+    { baseUrl: "https://www.webofscience.com", timeoutMs: 1000, recordTimeoutMs: 1000 },
+    async (item, _index, page) => {
+      seen.push([item, page.id]);
+      await Promise.resolve();
+    }
+  );
+
+  assert.equal(pages.length, 2);
+  assert.deepEqual(pages.map((page) => page.gotoCalls), [1, 1]);
+  assert.deepEqual(pages.map((page) => page.closed), [true, true]);
+  assert.equal(seen.length, 4);
+  assert.ok(new Set(seen.map(([, pageId]) => pageId)).size <= 2);
 });
 
 test("WOS data records import into global SQLite without raw TXT or BibTeX", () => {
@@ -1092,6 +1416,94 @@ test("SID preparation reuses saved WOS domain config", async () => {
   assert.equal(args.baseUrl, "https://access.example.edu");
 });
 
+test("SID pool parses, deduplicates, and migrates legacy saved SID config", () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
+  writeJson(path.join(root, "config.json"), {
+    sid: "legacy",
+    sids: ["one", "legacy"],
+    sidCursor: 1,
+    playwrightVisible: true,
+  });
+
+  assert.deepEqual(cli.parseSidValues("two three\nfour, five"), ["two", "three", "four", "five"]);
+  assert.deepEqual(cli.sidPoolFromConfig(readJson(path.join(root, "config.json"))).sids, ["one", "legacy"]);
+
+  const saved = cli.addSidsToConfig(args, ["legacy two\nthree", "three,four"]);
+  const config = readJson(path.join(root, "config.json"));
+  assert.equal(saved.added, 3);
+  assert.equal(saved.sidPoolCount, 5);
+  assert.equal(config.sid, undefined);
+  assert.deepEqual(config.sids, ["one", "legacy", "two", "three", "four"]);
+  assert.equal(config.sidCursor, 1);
+  assert.equal(config.playwrightVisible, true);
+
+  const status = cli.workspaceStatus(args);
+  assert.equal(status.sid, "legacy");
+  assert.equal(status.sidPoolCount, 5);
+  assert.equal(status.sidPoolIndex, 1);
+  assert.equal(status.playwrightVisible, true);
+});
+
+test("quick SID validation discards invalid config SIDs and tries the next pool value", async () => {
+  const root = temporaryDirectory();
+  writeJson(path.join(root, "config.json"), { sids: ["bad", "good"], sidCursor: 0 });
+  const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
+  const seen = [];
+
+  const result = await cli.quickValidateSid(args, {
+    fetchImpl: async (url) => {
+      seen.push(url);
+      if (url.includes("SID=bad")) {
+        return {
+          ok: false,
+          status: 403,
+          url: "https://www.webofscience.com/wos/",
+          async text() {
+            return "session expired";
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        url: "https://www.webofscience.com/wos/",
+        async text() {
+          return "window.sessionData={BasicProperties:{SID:'good'}}";
+        },
+      };
+    },
+  });
+
+  assert.equal(result.status, "valid");
+  assert.equal(result.sid, "good");
+  assert.equal(args.sid, "good");
+  assert.deepEqual(readJson(path.join(root, "config.json")).sids, ["good"]);
+  assert.equal(readJson(path.join(root, "config.json")).sidCursor, 0);
+  assert.equal(readJson(path.join(root, "config.json")).deadSids[0].sid, "bad");
+  assert.equal(seen.length, 2);
+});
+
+test("unknown SID probe does not discard saved SID pool values", async () => {
+  const root = temporaryDirectory();
+  writeJson(path.join(root, "config.json"), { sids: ["maybe", "later"], sidCursor: 0 });
+  const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
+
+  const result = await cli.quickValidateSid(args, {
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      url: "https://www.webofscience.com/wos/",
+      async text() {
+        return "<html>Sign In</html>";
+      },
+    }),
+  });
+
+  assert.equal(result.status, "unknown");
+  assert.deepEqual(readJson(path.join(root, "config.json")).sids, ["maybe", "later"]);
+});
+
 test("SID preparation fails clearly outside an interactive terminal", async () => {
   const args = cli.parseArgs(["node", "cli", "sid", "--tasks-root", temporaryDirectory()]);
   await assert.rejects(
@@ -1250,6 +1662,7 @@ test("masks SID values for dashboard display", () => {
 test("invalid SID can be replaced and immediately revalidated", async () => {
   const root = temporaryDirectory();
   const args = cli.parseArgs(["node", "cli", "sid", "--sid", "expired", "--tasks-root", root]);
+  writeJson(path.join(root, "config.json"), { playwrightVisible: true });
   const page = {
     async goto() {},
     async waitForLoadState() {},
@@ -1269,7 +1682,9 @@ test("invalid SID can be replaced and immediately revalidated", async () => {
   assert.equal(status.sid, "fresh");
   assert.equal(args.sid, "fresh");
   assert.equal(args.sidSource, "prompt");
-  assert.equal(readJson(path.join(root, "config.json")).sid, "fresh");
+  assert.deepEqual(readJson(path.join(root, "config.json")).sids, ["fresh"]);
+  assert.equal(readJson(path.join(root, "config.json")).sidCursor, 0);
+  assert.equal(readJson(path.join(root, "config.json")).playwrightVisible, true);
   assert.match(messages[0], /invalid or expired/);
 });
 
@@ -2038,18 +2453,27 @@ test("interactive workflow does not print saved SID noise", () => {
   assert.match(source, /workspaceSidStatus/);
 });
 
-test("interactive SID setup saves and refreshes the workspace panel", () => {
+test("interactive startup does not force SID setup before workflow selection", () => {
+  const interactiveSource = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
+  const startupBranch = interactiveSource.match(/const generatedTaskId = helpers\.makeTaskId[\s\S]*?const choice = await askWorkflow\(rl\)/);
+  assert.ok(startupBranch, "interactive startup branch should be present");
+  assert.doesNotMatch(startupBranch[0], /askSidFromBrowserOrManual/);
+  assert.doesNotMatch(startupBranch[0], /helpers\.saveSid/);
+});
+
+test("interactive WOS workflows set up SID on demand and refresh the panel", () => {
   const interactiveSource = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
   const menuSource = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const sidBranch = interactiveSource.match(/const sidStatus = workspaceSidStatus\(activeWorkspace\)[\s\S]*?const choice = await askWorkflow/);
+  const sidBranch = interactiveSource.match(/let sid = ""[\s\S]*?const sourceFallback/);
   const helperBranch = menuSource.match(/async saveSid\(sid\)[\s\S]*?setCurrentTask/);
-  assert.ok(sidBranch, "interactive SID validation branch should be present");
+  assert.ok(sidBranch, "interactive on-demand SID branch should be present");
   assert.ok(helperBranch, "interactive saveSid helper should be present");
   assert.match(sidBranch[0], /helpers\.saveSid/);
-  assert.match(sidBranch[0], /sidStatus !== "valid"/);
+  assert.match(sidBranch[0], /workspaceSidStatus\(activeWorkspace\) !== "valid"/);
+  assert.match(sidBranch[0], /askSidFromBrowserOrManual/);
   assert.match(sidBranch[0], /saved\. Refreshing workspace panel/);
   assert.match(sidBranch[0], /return \{ refresh: true \}/);
-  assert.match(helperBranch[0], /saveSidConfig\(menuArgs, sid\)/);
+  assert.match(helperBranch[0], /addSidsToConfig\(menuArgs, \[sid\], \{ activate: true \}\)/);
   assert.match(helperBranch[0], /quickValidateSid\(menuArgs\)/);
   assert.match(helperBranch[0], /workspaceStatus\(menuArgs, refreshedSidCheck\)/);
 });

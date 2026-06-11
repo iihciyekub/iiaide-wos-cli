@@ -76,8 +76,8 @@ function sidOkLabel(status) {
   return "no";
 }
 
-function sidCheckLine(status, sidMasked) {
-  return `SID check: Auth ${sidOkLabel(status)} | SID ${sidMasked || "none"}`;
+function sidCheckLine(status, sidValue) {
+  return `SID check: Auth ${sidOkLabel(status)} | SID ${sidValue || "none"}`;
 }
 
 function workspaceSidStatus(workspace = {}) {
@@ -125,10 +125,13 @@ function printHeader(version, workspace = {}) {
   const currentTask = workspace.currentTask || workspace.latestTask || "";
   const sidCheck = workspace.sidCheck || {};
   const sidStatus = workspaceSidStatus(workspace);
-  const sidMasked = sidCheck.sidMasked || workspace.sidMasked || "";
+  const sidValue = sidCheck.sid || workspace.sid || sidCheck.sidMasked || workspace.sidMasked || "";
   const sidOrigin = sidCheck.origin || workspace.wosOrigin || "";
   const originUrl = sidOrigin || workspace.baseUrl || "https://www.webofscience.com";
   const wosDataDb = workspace.wosDataDb || {};
+  const sidPoolCount = Number(workspace.sidPoolCount || 0);
+  const sidPoolIndex = Number(workspace.sidPoolIndex || -1);
+  const activeSidNumber = sidPoolIndex >= 0 ? sidPoolIndex + 1 : 0;
   const rightLines = [
     kvLine("Workspace", workspacePath),
     kvLine("Task ID", currentTask ? highlightTaskId(currentTask) : "none"),
@@ -138,9 +141,11 @@ function printHeader(version, workspace = {}) {
     kvLine("DB Size", formatBytes(wosDataDb.sizeBytes || 0)),
     "",
     kvLine("Auth", sidOkLabel(sidStatus)),
-    kvLine("SID Value", sidMasked || "none"),
+    kvLine("SID Value", sidValue || "none"),
+    kvLine("SID Pool", sidPoolCount ? `${activeSidNumber}/${sidPoolCount}` : "0"),
     "",
     kvLine("Playwright", workspace.wosBrowserMode || "background"),
+    kvLine("Parse Tabs", String(workspace.parseConcurrency || 1)),
     kvLine("Profile", workspace.wosProfileName || ".browser-profile"),
     kvLine("Runtime", formatRuntime(workspace.runtimeMs)),
   ];
@@ -161,8 +166,8 @@ function printHeader(version, workspace = {}) {
 
   stdout.write("\n");
   stdout.write(`${color("32", ">", stdout)} ${color("1;32", "iiaide-wos", stdout)}\n\n`);
-  stdout.write(`${color("36", sidCheckLine(sidStatus, sidMasked), stdout)}\n\n`);
-  if (!sidOrigin && sidMasked) {
+  stdout.write(`${color("36", sidCheckLine(sidStatus, sidValue), stdout)}\n\n`);
+  if (!sidOrigin && sidValue) {
     stdout.write(`${color("33", "Origin not confirmed:", stdout)} open WOS and refresh SID with ${workspace.baseUrl || "https://www.webofscience.com"}/wos/?Init=Yes&SrcApp=CR&SID=<SID>\n\n`);
   }
   if (twoColumns) {
@@ -225,6 +230,19 @@ async function askOptionalBoolean(rl, message, fallback = false) {
     if (answer === "y" || answer === "yes") return true;
     if (answer === "n" || answer === "no") return false;
     stdout.write(`${color("33", "Required:", stdout)} enter y, n, B to go back, or q to quit\n`);
+  }
+}
+
+async function askIntegerInRange(rl, message, fallback, minimum, maximum) {
+  for (;;) {
+    const answer = (await ask(rl, message, String(fallback))).trim();
+    if (isBackInput(answer)) return CONTROL_BACK;
+    if (isQuitInput(answer)) return CONTROL_QUIT;
+    if (/^-?\d+$/.test(answer)) {
+      const value = Number(answer);
+      if (Number.isSafeInteger(value) && value >= minimum && value <= maximum) return value;
+    }
+    stdout.write(`${color("33", "Required:", stdout)} enter an integer from ${minimum} to ${maximum}, B to go back, or q to quit\n`);
   }
 }
 
@@ -483,6 +501,11 @@ async function askWorkflow(rl) {
   workflowItem("4.1", "Status", "Show global SQLite path, WOSID count, source count, and size");
   workflowItem("4.2", "Merge database", "Merge another WOS SQLite database into the global database");
   workflowItem("4.3", "Query WOSID", "Enter one WOSID and print its SQLite record");
+  workflowGroup("5", "Settings");
+  workflowItem("5.1", "Playwright visible", "Choose whether WOS browser work opens a visible window");
+  workflowItem("5.2", "Parse tabs", "Set default reusable WOS tabs for WOSID parsing");
+  workflowItem("5.3", "Add SID", "Add one SID to the saved SID pool");
+  workflowItem("5.4", "Batch add SIDs", "Paste multiple SIDs separated by spaces or new lines");
   shortcutRow([["c", "Check SID"], ["u", "Update"], ["B", "Back"], ["q", "Exit"]]);
   stdout.write("\n");
 
@@ -492,8 +515,8 @@ async function askWorkflow(rl) {
     if (isQuitInput(choice)) return CONTROL_QUIT;
     if (choice === "c") return "c";
     if (choice === "u") return "u";
-    if (["1.1", "1.2", "2", "3.1", "3.2", "3.3", "4.1", "4.2", "4.3"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, c to check SID, u to update, B to go back, or q to quit\n`);
+    if (["1.1", "1.2", "2", "3.1", "3.2", "3.3", "4.1", "4.2", "4.3", "5.1", "5.2", "5.3", "5.4"].includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.1, 5.2, 5.3, 5.4, c to check SID, u to update, B to go back, or q to quit\n`);
   }
 }
 
@@ -514,6 +537,27 @@ async function promptSid(message = "Enter a current WOS SID") {
     if (isBackInput(sid)) return CONTROL_BACK;
     if (isQuitInput(sid)) return CONTROL_QUIT;
     return sid;
+  } finally {
+    rl.close();
+  }
+}
+
+async function promptSidBatch(message = "Paste WOS SIDs") {
+  if (!isInteractive(stdout) || !stdin.isTTY) {
+    throw new Error("SID input requires an interactive terminal. Pass --add-sids to iiaide-wos settings.");
+  }
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+  const lines = [];
+  stdout.write(`${message}. Use spaces or one SID per line. Submit an empty line to finish. B back, q quit.\n`);
+  try {
+    for (;;) {
+      const line = (await rl.question(lines.length ? "> " : "SIDs: ")).trim();
+      if (isBackInput(line)) return CONTROL_BACK;
+      if (isQuitInput(line)) return CONTROL_QUIT;
+      if (!line) break;
+      lines.push(line);
+    }
+    return lines.join("\n");
   } finally {
     rl.close();
   }
@@ -622,19 +666,17 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       openRl();
     }
   };
+  const promptBatchSids = async () => {
+    closeRl();
+    try {
+      return await promptSidBatch("Paste WOS SIDs");
+    } finally {
+      openRl();
+    }
+  };
 
   try {
     const generatedTaskId = helpers.makeTaskId?.() || defaultTaskId();
-    const sidStatus = workspaceSidStatus(activeWorkspace);
-    if (sidStatus !== "valid") {
-      const sid = await askSidFromBrowserOrManual(() => rl, helpers.readBrowserSid, promptManualSid);
-      if (isQuitResult(sid)) return null;
-      if (sid && typeof helpers.saveSid === "function") {
-        activeWorkspace = await helpers.saveSid(sid);
-        stdout.write(`${color("32", "SID:", stdout)} saved. Refreshing workspace panel.\n\n`);
-        return { refresh: true };
-      }
-    }
     const choice = await askWorkflow(rl);
     if (isBackResult(choice)) return { refresh: true };
     if (isQuitResult(choice)) return null;
@@ -716,6 +758,69 @@ async function interactiveArgs(version, workspace, helpers = {}) {
         activeWorkspace
       );
       return result;
+    }
+
+    if (choice === "5.1") {
+      const visible = await askOptionalBoolean(
+        rl,
+        "Run WOS Playwright in a visible browser window",
+        Boolean(activeWorkspace.playwrightVisible)
+      );
+      if (isBackResult(visible)) return { refresh: true };
+      if (isQuitResult(visible)) return null;
+      if (typeof helpers.setPlaywrightVisible === "function") {
+        activeWorkspace = await helpers.setPlaywrightVisible(visible);
+        stdout.write(`${color("32", "Playwright:", stdout)} ${visible ? "visible" : "background"} saved. Refreshing workspace panel.\n\n`);
+        return { refresh: true };
+      }
+      return { refresh: true };
+    }
+
+    if (choice === "5.2") {
+      const parseConcurrency = await askIntegerInRange(
+        rl,
+        "Default WOS parse tabs",
+        Number(activeWorkspace.parseConcurrency || 1),
+        1,
+        10
+      );
+      if (isBackResult(parseConcurrency)) return { refresh: true };
+      if (isQuitResult(parseConcurrency)) return null;
+      if (typeof helpers.setParseConcurrency === "function") {
+        activeWorkspace = await helpers.setParseConcurrency(parseConcurrency);
+        stdout.write(`${color("32", "Parse tabs:", stdout)} ${parseConcurrency} saved. Refreshing workspace panel.\n\n`);
+        return { refresh: true };
+      }
+      return { refresh: true };
+    }
+
+    if (choice === "5.3") {
+      const sid = await askParameterOrCancel(
+        rl,
+        "WOS SID",
+        "enter one WOS SID"
+      );
+      if (isBackResult(sid)) return { refresh: true };
+      if (isQuitResult(sid)) return null;
+      if (typeof helpers.addSids === "function") {
+        activeWorkspace = await helpers.addSids(sid);
+        stdout.write(`${color("32", "SID pool:", stdout)} added. Refreshing workspace panel.\n\n`);
+        return { refresh: true };
+      }
+      return { refresh: true };
+    }
+
+    if (choice === "5.4") {
+      const sids = await promptBatchSids();
+      if (isBackResult(sids)) return { refresh: true };
+      if (isQuitResult(sids)) return null;
+      if (!String(sids || "").trim()) return { refresh: true };
+      if (typeof helpers.addSids === "function") {
+        activeWorkspace = await helpers.addSids(sids);
+        stdout.write(`${color("32", "SID pool:", stdout)} batch added. Refreshing workspace panel.\n\n`);
+        return { refresh: true };
+      }
+      return { refresh: true };
     }
 
     let selection = currentTaskSelection(activeWorkspace);
@@ -822,6 +927,7 @@ module.exports = {
   listTaskHints,
   printHeader,
   promptSid,
+  promptSidBatch,
   resolveTaskSelection,
   isBackResult,
   isQuitResult,
