@@ -360,13 +360,16 @@ Important distinction:
   SQLite validation own canonicalization and loose comparison.
 - CLI validates the structured page data and writes one SQLite row per WOSID to
   `~/.iiaide-wos/wosdata.sqlite`.
-- Parse browser restarts now default to every `100` WOSIDs so reusable pages do
+- Parse browser restarts now default to every `600` WOSIDs so reusable pages do
   not grow without bound during long runs. Use `--browser-restart-every 0` only
   when you intentionally want one long-lived Playwright session.
-- Parse work is split into smaller memory-check chunks, and
+- Parse work is split into smaller memory-check chunks. By default the CLI
+  checks RSS every `200` WOSIDs, and
   `--max-rss-mb <n>` can force a current-SID reconnect between chunks once RSS
-  crosses the configured limit. The default is `2048`; use `0` to disable this
+  crosses the configured limit. The default is `4096`; use `0` to disable this
   recycle path.
+- Dashboard, `workspace`, and `sid-pool` output mask saved SID values so status
+  and troubleshooting commands do not print the full session token.
 - On SID refresh, recovery reconnect, or explicit browser restart, the CLI
   releases reusable pages to `about:blank` before closing the persistent
   Playwright context so Chromium renderer memory is less likely to accumulate

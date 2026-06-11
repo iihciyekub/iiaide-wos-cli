@@ -138,8 +138,8 @@ test("shows the saved SID pool with the active position", () => {
   assert.equal(status.sidPoolCount, 2);
   assert.equal(status.sidPoolIndex, 0);
   assert.equal(status.sidPoolPosition, 1);
-  assert.equal(status.activeSid, "SID_ONE");
-  assert.deepEqual(status.sids, ["SID_ONE", "SID_TWO"]);
+  assert.equal(status.activeSid, "S***E");
+  assert.deepEqual(status.sids, ["S***E", "S***O"]);
 });
 
 test("package exposes iiw as the short CLI alias", () => {
@@ -151,8 +151,9 @@ test("package exposes iiw as the short CLI alias", () => {
 test("parse browser restart interval is configurable", () => {
   const root = temporaryDirectory();
   const defaults = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
-  assert.equal(defaults.browserRestartEvery, 100);
-  assert.equal(defaults.maxRssMb, 2048);
+  assert.equal(defaults.browserRestartEvery, 600);
+  assert.equal(defaults.memoryCheckEvery, 200);
+  assert.equal(defaults.maxRssMb, 4096);
 
   const disabled = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--browser-restart-every", "0", "--tasks-root", root]);
   assert.equal(disabled.browserRestartEvery, 0);
@@ -306,21 +307,22 @@ test("parse browser restarts are disabled by default and reconnect through a que
   assert.ok(match, "parse restart session block should be present");
   assert.match(match[0], /startParseSession\("browser-restart", chunkIndex \+ 1, chunks\.length\)/);
   assert.match(source, /warmUpWosQueryPage\(nextSession\.page, args\)/);
-  assert.match(source, /const DEFAULT_BROWSER_RESTART_EVERY = 100/);
-  assert.match(source, /const DEFAULT_PARSE_MAX_RSS_MB = 2048/);
+  assert.match(source, /const DEFAULT_BROWSER_RESTART_EVERY = 600/);
+  assert.match(source, /const DEFAULT_PARSE_MEMORY_CHECK_EVERY = 200/);
+  assert.match(source, /const DEFAULT_PARSE_MAX_RSS_MB = 4096/);
   assert.match(source, /phase: restartForMemory \? "parse-memory-restart" : "parse-browser-restart"/);
 });
 
 test("parse chunk sizing prefers smaller memory-check windows while preserving restart boundaries", () => {
-  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 100, memoryCheckEvery: 25 }), 25);
-  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 100, memoryCheckEvery: 0 }), 100);
-  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 0, memoryCheckEvery: 25 }), 25);
+  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 600, memoryCheckEvery: 200 }), 200);
+  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 600, memoryCheckEvery: 0 }), 600);
+  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 0, memoryCheckEvery: 200 }), 200);
   assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 0, memoryCheckEvery: 0 }), 0);
 });
 
 test("parse memory restarts trigger only when RSS reaches the configured cap", () => {
-  assert.equal(cli.shouldRestartParseForMemory({ maxRssMb: 2048 }, 2047), false);
-  assert.equal(cli.shouldRestartParseForMemory({ maxRssMb: 2048 }, 2048), true);
+  assert.equal(cli.shouldRestartParseForMemory({ maxRssMb: 4096 }, 4095), false);
+  assert.equal(cli.shouldRestartParseForMemory({ maxRssMb: 4096 }, 4096), true);
   assert.equal(cli.shouldRestartParseForMemory({ maxRssMb: 0 }, 99999), false);
 });
 
@@ -764,7 +766,7 @@ test("interactive header shows WOS browser mode and profile name", () => {
 
   assert.match(output, /Playwright\s+background/);
   assert.match(output, /Parse Tabs\s+1/);
-  assert.match(output, /SID Value\s+current-sid/);
+  assert.match(output, /SID Value\s+curr...-sid/);
   assert.match(output, /SID Pool\s+2\/3/);
   assert.doesNotMatch(output, /Dead SIDs/);
   assert.match(output, /Profile\s+\.browser-profile/);
@@ -1758,7 +1760,7 @@ test("SID pool parses, deduplicates, and migrates legacy saved SID config", () =
   assert.equal(workspaceConfig.playwrightVisible, true);
 
   const status = cli.workspaceStatus(args);
-  assert.equal(status.sid, "legacy");
+  assert.equal(status.sid, "l***y");
   assert.equal(status.sidPoolCount, 5);
   assert.equal(status.sidPoolIndex, 1);
   assert.equal(status.playwrightVisible, true);
@@ -1775,7 +1777,7 @@ test("SID pool is shared across task roots through global config", () => {
   const secondArgs = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", secondRoot]);
   const status = cli.workspaceStatus(secondArgs);
 
-  assert.equal(status.sid, "one");
+  assert.equal(status.sid, "o***e");
   assert.equal(status.sidPoolCount, 2);
   assert.equal(status.sidConfig, globalConfig);
   assert.equal(readJson(path.join(secondRoot, "config.json"), {}).sids, undefined);

@@ -211,7 +211,7 @@ initialization URL and saves it to the global SID pool in
 `~/.iiaide-wos/config.json`. SID pool values are user-level, so a SID added from
 one directory is available to CLI runs started from other directories.
 `iiaide-wos sid-pool` prints the current global SID pool as JSON, including the
-active pool position, active SID, and the full saved SID list.
+active pool position, a masked active SID, and masked saved SID values.
 Commands that require WOS authentication use the same workspace Playwright profile at
 `tasks/.browser-profile` (profile name: `.browser-profile`); in menu mode the
 session stays open while the menu process is alive. Normal WOS work runs in
@@ -245,7 +245,7 @@ redraws the workspace dashboard so the refreshed authentication state is visible
 before the next workflow prompt. The Settings menu also provides `5.3 Add SID`
 for one value and `5.4 Batch add SIDs` for multiple values separated by spaces,
 newlines, or commas. Settings, SQLite, task management, and update workflows can
-be used while `Auth no` is shown. The dashboard shows the current SID and the
+be used while `Auth no` is shown. The dashboard shows a masked current SID and the
 active pool position/count.
 `iiaide-wos check` first runs the lightweight SID probe; when the SID is
 missing, invalid, or cannot be confirmed, it tries the saved SID pool and then
@@ -406,7 +406,7 @@ Playwright and reconnect with the current SID without deleting it. If
 `buildQuery` does not return `error_code`, the consecutive parse-failure counter
 resets and the parse continues without changing SID.
 
-The authentication success line includes the active SID and pool position, and
+The authentication success line includes a masked active SID and pool position, and
 parse recovery messages are printed as short multi-line notices so the running
 SID, recovery reason, and next action are easier to read.
 
@@ -429,8 +429,8 @@ If WOS opens a full-record page but the DOM structure cannot be parsed, the CLI
 falls back to the browser-side single-record export API before marking the WOSID
 as failed.
 
-For long parse runs, the CLI now restarts Playwright every 100 parsed WOSIDs by
-default, and it also checks RSS memory between smaller parse chunks so a hot
+For long parse runs, the CLI now restarts Playwright every 600 parsed WOSIDs by
+default, and it also checks RSS memory every 200 WOSIDs so a hot
 Chromium renderer can be recycled before memory growth gets out of hand. Use
 `--browser-restart-every 0` if you deliberately want one long-lived browser
 session, or tune `--max-rss-mb <n>` when you want a stricter or looser memory

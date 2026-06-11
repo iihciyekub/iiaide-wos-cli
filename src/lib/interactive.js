@@ -80,6 +80,13 @@ function sidCheckLine(status, sidValue) {
   return `SID check: Auth ${sidOkLabel(status)} | SID ${sidValue || "none"}`;
 }
 
+function maskSid(value) {
+  const sid = String(value || "").trim();
+  if (!sid) return "";
+  if (sid.length <= 8) return `${sid.slice(0, 1)}***${sid.slice(-1)}`;
+  return `${sid.slice(0, 4)}...${sid.slice(-4)}`;
+}
+
 function workspaceSidStatus(workspace = {}) {
   const sidCheck = workspace.sidCheck || {};
   return sidCheck.status || (workspace.hasSavedSid ? "unknown" : "missing");
@@ -125,7 +132,7 @@ function printHeader(version, workspace = {}) {
   const currentTask = workspace.currentTask || workspace.latestTask || "";
   const sidCheck = workspace.sidCheck || {};
   const sidStatus = workspaceSidStatus(workspace);
-  const sidValue = sidCheck.sid || workspace.sid || sidCheck.sidMasked || workspace.sidMasked || "";
+  const sidValue = sidCheck.sidMasked || sidCheck.sid || workspace.sidMasked || maskSid(workspace.sid) || "";
   const sidOrigin = sidCheck.origin || workspace.wosOrigin || "";
   const originUrl = sidOrigin || workspace.baseUrl || "https://www.webofscience.com";
   const wosDataDb = workspace.wosDataDb || {};

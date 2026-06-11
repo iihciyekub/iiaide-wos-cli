@@ -3,6 +3,16 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.56 - 2026-06-11
+
+- Raise the default long-running parse browser restart interval from 100 to 600
+  WOSIDs so stable sessions are interrupted less often.
+- Raise the default parse memory-check interval from 25 to 200 WOSIDs.
+- Raise the default parse RSS restart cap from 2048 MB to 4096 MB.
+- Mask saved SID values in the dashboard, `workspace`, and `sid-pool` outputs
+  so routine status checks do not expose the full session token.
+- Redact SID values from validation failure output that references WOS URLs.
+
 ## 0.4.54 - 2026-06-11
 
 - Change long-running parse defaults to restart Playwright every 100 WOSIDs

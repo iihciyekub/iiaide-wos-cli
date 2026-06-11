@@ -156,8 +156,9 @@ When a SID refresh, recovery reconnect, or `--browser-restart-every` segment
 restart closes Playwright, the CLI first releases those reusable pages to
 `about:blank` and then closes the persistent context so long-running Chromium
 renderer memory is more likely to drop before the next session starts. Parse
-work is also split into smaller memory-check chunks, so the CLI can restart the
-current SID session between chunks once RSS crosses the configured limit.
+work is also split into smaller memory-check chunks. By default the CLI checks
+RSS every 200 WOSIDs and can restart the current SID session between chunks
+once RSS crosses the configured limit.
 
 The browser-side `wos.js` helper opens externally prepared WOSIDs. It trims
 input and accepts full-record URLs by extracting the path segment, but it does
@@ -229,10 +230,10 @@ Resume behavior is database-based:
   `wosdata --clear-blacklist` to remove all blacklist entries.
 - Final failures are recorded at `raw/<uuid>/full-record/<uuid>_parse_failures.json`.
 - `--browser-restart-every <n>` restarts Playwright between parse batches. The
-  default is `100`; use `0` only when you intentionally want one long-lived
+  default is `600`; use `0` only when you intentionally want one long-lived
   browser session.
 - `--max-rss-mb <n>` restarts Playwright between parse chunks once the Node
-  process RSS reaches that limit. The default is `2048`; use `0` to disable the
+  process RSS reaches that limit. The default is `4096`; use `0` to disable the
   memory-based recycle path.
 - Parse failures do not directly invalidate the current SID. 20 consecutive
   WOSID page parse failures close the entire Playwright context and reconnect
@@ -247,7 +248,7 @@ Resume behavior is database-based:
   with the current SID instead of deleting it. If the query does not return
   `error_code`, the consecutive parse-failure counter resets and parsing
   continues.
-- Authentication success output shows the active SID and pool position. Parse
+- Authentication success output shows a masked active SID and pool position. Parse
   recovery output is printed as short multi-line notices with the reason and
   next action.
 - If WOS opens with the Clarivate privacy/cookie dialog, the Playwright session
@@ -309,7 +310,7 @@ URL/result-set UUID or a local `.csv` file path; the CLI chooses the matching
 parse pipeline automatically. The default parse options are:
 
 ```text
-concurrency=saved parse tabs, default 1 | timeout=20000ms | cooldown=250ms | restart=100 | maxRssMb=2048 | blacklist=skip | recovery=20x buildQuery AB=<random> | from=1 | limit=all
+concurrency=saved parse tabs, default 1 | timeout=20000ms | cooldown=250ms | restart=600 | memoryCheck=200 | maxRssMb=4096 | blacklist=skip | recovery=20x buildQuery AB=<random> | from=1 | limit=all
 ```
 
 ## Task Lifecycle
@@ -485,9 +486,9 @@ iiaide-wos sid-pool
 interactive Settings menu, use `5.3 Add SID` for one value or `5.4 Batch add
 SIDs` for a multi-line paste. The SID pool is global per user, so values added
 from any working directory are available to every CLI run. The dashboard shows
-the current SID and the active pool position/count.
+the masked current SID and the active pool position/count.
 `sid-pool` prints the same saved pool as JSON, with `sidPoolCount`,
-`sidPoolPosition`, `activeSid`, and the full `sids` array.
+`sidPoolPosition`, a masked `activeSid`, and masked `sids` values.
 
 WOS domain/origin selection is separate from SID selection. Use
 `--wos-domain <domain>` or `WOS_DOMAIN` when only the host changes. Use

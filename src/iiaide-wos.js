@@ -32,9 +32,9 @@ const { version: VERSION } = require("../package.json");
 const DEFAULT_BATCH_SIZE = 200;
 const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_RECORD_TIMEOUT_MS = 20000;
-const DEFAULT_BROWSER_RESTART_EVERY = 100;
-const DEFAULT_PARSE_MEMORY_CHECK_EVERY = 25;
-const DEFAULT_PARSE_MAX_RSS_MB = 2048;
+const DEFAULT_BROWSER_RESTART_EVERY = 600;
+const DEFAULT_PARSE_MEMORY_CHECK_EVERY = 200;
+const DEFAULT_PARSE_MAX_RSS_MB = 4096;
 const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 20;
 const DEFAULT_PARSE_CONNECTIVITY_QUERY = "PY=2000";
 const DEFAULT_WOS_PROTOCOL = "https";
@@ -182,8 +182,8 @@ Parse options:
   --record-timeout-ms <n> Per-record full-page timeout. Default: 20000
   --cooldown-ms <n>       Delay after each record. Default: 250
   --browser-restart-every <n>
-                          Restart Playwright after n parsed WOSIDs. Default: 100, 0 disables
-  --max-rss-mb <n>        Restart Playwright between parse chunks when RSS exceeds n MB. Default: 2048, 0 disables
+                          Restart Playwright after n parsed WOSIDs. Default: 600, 0 disables
+  --max-rss-mb <n>        Restart Playwright between parse chunks when RSS exceeds n MB. Default: 4096, 0 disables
   --retry-blacklist       Include blacklisted parse-failed WOSIDs in this parse run
   --reparse-existing      Visit WOSIDs that already exist in SQLite and overwrite them
 
@@ -686,8 +686,8 @@ function currentSidPoolStatus(args) {
     sidPoolCount: pool.sids.length,
     sidPoolIndex: pool.activeIndex,
     sidPoolPosition: activeNumber,
-    activeSid: pool.activeSid,
-    sids: pool.sids,
+    activeSid: maskSid(pool.activeSid),
+    sids: pool.sids.map(maskSid),
   };
 }
 
@@ -926,6 +926,10 @@ function maskSid(value) {
   return `${sid.slice(0, 4)}...${sid.slice(-4)}`;
 }
 
+function redactSidInUrl(value) {
+  return String(value || "").replace(/([?&]SID=)[^&#\s]+/gi, "$1[redacted]");
+}
+
 function sidBadge(args, stream = process.stderr) {
   const sid = String(args?.sid || "").trim();
   if (!sid) return "";
@@ -933,7 +937,7 @@ function sidBadge(args, stream = process.stderr) {
   const pool = args?.sidPoolCount
     ? ` ${Math.max(0, Number(args.sidPoolIndex) + 1)}/${args.sidPoolCount}`
     : "";
-  return color("30;46;1", ` SID${source}${pool}: ${sid} `, stream);
+  return color("30;46;1", ` SID${source}${pool}: ${maskSid(sid)} `, stream);
 }
 
 function authValidatedMessage(args) {
@@ -1459,6 +1463,15 @@ function workspaceStatus(args, sidCheck = null) {
   const wosDomain = args.baseUrlSource
     ? (args.wosDomain || urlDomain(args.baseUrl) || DEFAULT_WOS_DOMAIN)
     : (config.wosDomain || urlDomain(baseUrl) || args.wosDomain || DEFAULT_WOS_DOMAIN);
+  const maskedSid = maskSid(sid);
+  const safeSidCheck = sidCheck
+    ? {
+      ...sidCheck,
+      sid: maskSid(sidCheck.sid),
+      sidMasked: sidCheck.sidMasked || maskSid(sidCheck.sid),
+      href: redactSidInUrl(sidCheck.href || ""),
+    }
+    : null;
   return {
     initialized: fs.existsSync(args.tasksRoot) && fs.existsSync(taskIndexPath(args.tasksRoot)),
     cwd: process.cwd(),
@@ -1476,14 +1489,14 @@ function workspaceStatus(args, sidCheck = null) {
     currentTask,
     latestTask: currentTask,
     hasSavedSid: Boolean(sid),
-    sid,
-    sidMasked: maskSid(sid),
+    sid: maskedSid,
+    sidMasked: maskedSid,
     sidSource,
     sidPoolCount: pool.sids.length,
     sidPoolIndex: pool.activeIndex,
     sidConfig: globalConfigPath(),
     deadSidCount: Array.isArray(sidConfig.deadSids) ? sidConfig.deadSids.length : 0,
-    sidCheck,
+    sidCheck: safeSidCheck,
     wosDataDb: wosDataDbStats(args.dbPath, args.blacklistDbPath),
     tasks: tasks.map((task) => ({
       taskId: task.taskId,
@@ -2200,12 +2213,14 @@ async function validateSid(page, args) {
     sid: window.sessionData?.BasicProperties?.SID || "",
   }));
   if (!status.sid || status.sid !== args.sid) {
+    const observedSid = maskSid(status.sid);
+    const safeHref = redactSidInUrl(status.href);
     if (args.sidSource === "config") {
       throw new Error(
-        `Saved SID is invalid or expired. Pass a fresh SID with --sid, or run: iiaide-wos sid --sid "<SID>". observedSid=${status.sid || "(missing)"} href=${status.href}`
+        `Saved SID is invalid or expired. Pass a fresh SID with --sid, or run: iiaide-wos sid --sid "<SID>". observedSid=${observedSid || "(missing)"} href=${safeHref}`
       );
     }
-    throw new Error(`SID validation failed. observedSid=${status.sid || "(missing)"} href=${status.href}`);
+    throw new Error(`SID validation failed. observedSid=${observedSid || "(missing)"} href=${safeHref}`);
   }
   if (status.origin) args.baseUrl = stripTrailingSlash(status.origin);
   saveSidConfig(args, status.sid);
