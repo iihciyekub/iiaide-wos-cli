@@ -412,6 +412,14 @@ function isSessionRecoveryError(error) {
     /WOS parse session is not available|wos\.js .*missing/i.test(message);
 }
 
+function isSidInvalidRecoveryErrorCode(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  if (/^unknown error$/i.test(text)) return false;
+  if (/failed to read (current query page|query result page) info/i.test(text)) return false;
+  return /query limit|session|sid|logged out|sign[ -]?in|login|expired|invalid/i.test(text);
+}
+
 function extractUuid(value) {
   const text = String(value || "");
   const match =
@@ -1785,6 +1793,11 @@ async function validateSid(page, args) {
   const initUrl = buildSidInitUrl(args.sid);
   await page.goto(initUrl, { waitUntil: "domcontentloaded", timeout: args.timeoutMs });
   await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
+  await page.waitForFunction(
+    () => window.sessionData?.BasicProperties?.SID || "",
+    null,
+    { timeout: Math.min(Math.max(args.timeoutMs || 0, 15000), 60000) }
+  ).catch(() => {});
   await ensureWosJsOnPage(page, args);
   const status = await page.evaluate(() => ({
     href: location.href,
@@ -1878,6 +1891,9 @@ async function prepareWosSession(args, options = {}) {
         if (discarded) {
           report("All saved SIDs were invalid. Opening a WOS browser login to refresh authentication.");
         }
+      }
+      if (args.sidSource === "browser") {
+        throw new Error(`Browser-detected WOS SID could not be validated after reopening the WOS profile. ${error.message || error}`);
       }
       await loginForFreshSid(args, report);
       context = await launchWosPersistentContext(args, visible);
@@ -2463,14 +2479,25 @@ async function runParse(args) {
         refCount: recoveryQuery.ref_count,
       });
       if (recoveryQuery.error_code) {
-        console.error(`WOS recovery query returned error_code=${recoveryQuery.error_code}. Closing Playwright, invalidating the current SID, and restarting CLI.`);
+        if (isSidInvalidRecoveryErrorCode(recoveryQuery.error_code)) {
+          console.error(`WOS recovery query returned SID/session error_code=${recoveryQuery.error_code}. Closing Playwright, invalidating the current SID, and restarting CLI.`);
+          await forceCloseWosSession(session);
+          session = null;
+          discardActiveConfigSid(args, `WOS recovery query failed: ${recoveryQuery.error_code}`);
+          args.sid = "";
+          args.sidSource = "";
+          delete process.env.WOS_SID;
+          throw new CliRestartRequestedError(`WOS recovery query failed: ${recoveryQuery.error_code}`, { omitSidArgs: true });
+        }
+        console.error(`WOS recovery query returned inconclusive error_code=${recoveryQuery.error_code}. Closing Playwright, reconnecting with the current SID, and continuing parse.`);
+        appendProgress(paths, {
+          phase: "parse-recovery-build-query-inconclusive",
+          errorCode: recoveryQuery.error_code,
+          action: "reconnect-current-sid",
+        });
         await forceCloseWosSession(session);
         session = null;
-        discardActiveConfigSid(args, `WOS recovery query failed: ${recoveryQuery.error_code}`);
-        args.sid = "";
-        args.sidSource = "";
-        delete process.env.WOS_SID;
-        throw new CliRestartRequestedError(`WOS recovery query failed: ${recoveryQuery.error_code}`, { omitSidArgs: true });
+        session = await startParseSession("recovery-query-inconclusive");
       }
       consecutiveParseFailures = 0;
       appendProgress(paths, { phase: "parse-sid-reconnect-completed", sidSource: args.sidSource });
@@ -3404,6 +3431,7 @@ module.exports = {
   applyValidatedWosOrigin,
   isWosRootRecordRedirect,
   isSessionRecoveryError,
+  isSidInvalidRecoveryErrorCode,
   validateTask,
   clearTask,
   confirmAndClearTask,

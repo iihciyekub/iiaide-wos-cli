@@ -173,7 +173,7 @@ test("clears saved SID before browser-login repair", () => {
   assert.equal(readJson(path.join(root, "config.json")).baseUrl, "https://www.webofscience.com");
 });
 
-test("parse failure recovery probes buildQuery and restarts CLI on WOS query errors", () => {
+test("parse failure recovery probes buildQuery and restarts CLI only on SID query errors", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
   const match = source.match(/const refreshSidAfterConsecutiveFailures = async \(\) => \{[\s\S]*?\n  \};\n  try/);
   assert.ok(match, "parse SID recovery source should be present");
@@ -181,11 +181,14 @@ test("parse failure recovery probes buildQuery and restarts CLI on WOS query err
   assert.match(match[0], /await forceCloseWosSession\(session\)/);
   assert.match(match[0], /runWosRecoveryBuildQuery\(session\.page, args\)/);
   assert.match(match[0], /if \(recoveryQuery\.error_code\)/);
+  assert.match(match[0], /isSidInvalidRecoveryErrorCode\(recoveryQuery\.error_code\)/);
   assert.match(match[0], /await forceCloseWosSession\(session\)/);
   assert.match(match[0], /discardActiveConfigSid\(args/);
   assert.doesNotMatch(match[0], /clearSavedSidConfig\(args\)/);
   assert.match(match[0], /delete process\.env\.WOS_SID/);
   assert.match(match[0], /omitSidArgs: true/);
+  assert.match(match[0], /parse-recovery-build-query-inconclusive/);
+  assert.match(match[0], /startParseSession\("recovery-query-inconclusive"\)/);
   assert.doesNotMatch(match[0], /startParseSession\("consecutive-failures"\)/);
   assert.doesNotMatch(match[0], /loginForFreshSid/);
 });
@@ -212,6 +215,15 @@ test("SID recovery classifies parse errors for diagnostics only", () => {
   assert.equal(cli.isSessionRecoveryError(new Error("You’ve reached the query limit for your session.")), true);
   assert.equal(cli.isSessionRecoveryError(new Error("WOS returned a login page")), true);
   assert.equal(cli.isSessionRecoveryError(new Error("Target page, context or browser has been closed")), true);
+});
+
+test("SID recovery invalidates only explicit WOS session error codes", () => {
+  assert.equal(cli.isSidInvalidRecoveryErrorCode("unknown error"), false);
+  assert.equal(cli.isSidInvalidRecoveryErrorCode("failed to read current query page info"), false);
+  assert.equal(cli.isSidInvalidRecoveryErrorCode("failed to read query result page info"), false);
+  assert.equal(cli.isSidInvalidRecoveryErrorCode("You’ve reached the query limit for your session. Please close your session and start a new one."), true);
+  assert.equal(cli.isSidInvalidRecoveryErrorCode("session expired"), true);
+  assert.equal(cli.isSidInvalidRecoveryErrorCode("WOS returned a login page"), true);
 });
 
 test("parse browser restarts are disabled by default and reconnect through a query route when enabled", () => {
@@ -1723,6 +1735,7 @@ test("invalid SID can be replaced and immediately revalidated", async () => {
   const page = {
     async goto() {},
     async waitForLoadState() {},
+    async waitForFunction() {},
     async evaluate() {
       return { href: "https://www.webofscience.com/wos/", sid: args.sid === "fresh" ? "fresh" : "" };
     },

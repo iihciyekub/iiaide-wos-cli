@@ -201,11 +201,13 @@ Resume behavior is database-based:
   WOSID page parse failures close the entire Playwright context and reconnect
   with the current SID, then run
   `window.wos.query.buildQuery("AB=<random 4 letters>")`. If that WOS query
-  returns `error_code`, the CLI force-closes Playwright and treats the current
-  SID as invalid. Saved-pool SIDs are removed one at a time; `--sid` and
-  `WOS_SID` values are omitted from the restarted command without clearing the
-  saved pool. If the query does not return `error_code`, the consecutive
-  parse-failure counter resets and parsing continues.
+  returns an explicit SID/session `error_code`, the CLI force-closes Playwright
+  and treats the current SID as invalid. Saved-pool SIDs are removed one at a
+  time; `--sid` and `WOS_SID` values are omitted from the restarted command
+  without clearing the saved pool. Inconclusive browser-side results such as
+  `unknown error` reconnect with the current SID instead of deleting it. If the
+  query does not return `error_code`, the consecutive parse-failure counter
+  resets and parsing continues.
 
 Before the parse stage, WOSIDs already present in the global SQLite database are
 treated as completed and are skipped. After the parse stage, newly completed

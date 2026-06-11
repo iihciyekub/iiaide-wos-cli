@@ -363,13 +363,14 @@ Important distinction:
 - Fixed parse browser restarts are disabled by default so reusable WOS pages can
   keep collecting WOSID pages. Use `--browser-restart-every <n>` only when you
   explicitly want periodic Playwright context restarts.
-- If 10 full-record page parses fail consecutively, the CLI closes Playwright
+- If 12 full-record page parses fail consecutively, the CLI closes Playwright
   and reconnects with the current SID, then runs
   `window.wos.query.buildQuery("AB=<random 4 letters>")`. If that WOS query
-  returns `error_code`, the CLI force-closes Playwright and treats the current
-  SID as invalid. Saved-pool SIDs are removed one at a time; `--sid` and
-  `WOS_SID` values are omitted from the restarted command without clearing the
-  saved pool.
+  returns an explicit SID/session `error_code`, the CLI force-closes Playwright
+  and treats the current SID as invalid. Saved-pool SIDs are removed one at a
+  time; `--sid` and `WOS_SID` values are omitted from the restarted command
+  without clearing the saved pool. Inconclusive browser-side results such as
+  `unknown error` reconnect with the current SID instead of deleting it.
 - The UUID-specific WOSID index remains at
   `raw/<uuid>/full-record/<uuid>_wosid.csv` and is the input list for parse.
 - For `parse --csv`, the local CSV is normalized into

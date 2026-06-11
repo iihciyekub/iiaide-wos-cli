@@ -357,14 +357,18 @@ Parse failures do not directly invalidate the current SID. If the CLI sees 12
 consecutive WOSID page parse failures, it closes the entire current Playwright
 context, reconnects with the current SID, and runs
 `window.wos.query.buildQuery("AB=<random 4 letters>")` through `wos.js`. If WOS
-returns an `error_code`, the CLI force-closes Playwright and treats the current
-SID as invalid. If that SID came from the saved pool, only that pool value is
-removed. If it came from `--sid` or `WOS_SID`, the saved pool is preserved, the
-explicit SID source is omitted from the restarted command, and the next run can
-pick up SID pool values added from another terminal. If the current process
-inherited `WOS_SID`, that environment value is removed before restarting the
-child CLI process. If `buildQuery` does not return `error_code`, the consecutive
-parse-failure counter resets and the parse continues without changing SID.
+returns an explicit SID/session `error_code` such as a query-limit,
+expired-session, login, or invalid-SID message, the CLI force-closes Playwright
+and treats the current SID as invalid. If that SID came from the saved pool, only
+that pool value is removed. If it came from `--sid` or `WOS_SID`, the saved pool
+is preserved, the explicit SID source is omitted from the restarted command, and
+the next run can pick up SID pool values added from another terminal. If the
+current process inherited `WOS_SID`, that environment value is removed before
+restarting the child CLI process. Inconclusive browser-side query results such
+as `unknown error` force-close Playwright and reconnect with the current SID
+without deleting it. If `buildQuery` does not return `error_code`, the
+consecutive parse-failure counter resets and the parse continues without
+changing SID.
 
 Individual WOSID page failures are retried before becoming final failures. The
 default is up to 8 attempts per WOSID; lower it with `--parse-max-attempts <n>`.

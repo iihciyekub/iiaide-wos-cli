@@ -3,6 +3,17 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.36 - 2026-06-11
+
+- Classify parse recovery `buildQuery` errors before invalidating a SID.
+  Inconclusive browser-side results such as `unknown error` now force-close
+  Playwright and reconnect with the current SID instead of deleting it from the
+  pool; only explicit WOS session, SID, login, expired-session, or query-limit
+  messages discard the current SID.
+- Wait briefly for browser `sessionData.BasicProperties.SID` during SID
+  validation and avoid reopening the visible login prompt a second time when a
+  browser-detected SID still cannot validate in the reopened WOS profile.
+
 ## 0.4.35 - 2026-06-11
 
 - Retry failed WOSID page parses before recording final failures. Each WOSID now
@@ -10,7 +21,7 @@ authoritative CLI version.
   for a lower retry ceiling.
 - Use `buildQuery` as the SID/session judge after 12 consecutive WOSID parse
   failures: parse failures trigger diagnosis only, and the SID is invalidated
-  only when WOS returns `error_code`.
+  only when WOS returns an explicit SID/session `error_code`.
 - Force-close the whole Playwright context before parse recovery reconnects and
   before invalidating a SID on WOS `error_code`, ensuring the next SID starts in
   a fresh browser context.
