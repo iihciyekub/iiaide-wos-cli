@@ -58,7 +58,8 @@ Purpose:
 
 - Opens WOS with `Init=Yes`.
 - Confirms WOS accepts the SID.
-- Saves the SID in `tasks/config.json` after validation.
+- Saves the SID in the user-level global SID pool at
+  `~/.iiaide-wos/config.json` after validation.
 - Before request-based exports, the CLI then opens the target summary URL so
   the `saveToFile` request runs from an initialized same-origin WOS page.
 - The CLI uses the canonical initialization origin
@@ -401,7 +402,8 @@ They read or write local task artifacts:
 ```text
 tasks/index.json
 tasks/latest
-tasks/config.json
+tasks/config.json                 # workspace runtime/browser settings
+~/.iiaide-wos/config.json         # global SID pool
 tasks/<task-id>/manifest.json
 tasks/<task-id>/summary.json
 tasks/<task-id>/raw/<uuid-or-task-id>/full-record/<uuid-or-task-id>_wosid.csv

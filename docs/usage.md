@@ -383,7 +383,7 @@ Normal work should use the default `./tasks` directory.
 Commands that interact with WOS require a current SID:
 
 ```text
-explicit --sid -> WOS_SID -> tasks/config.json SID pool
+explicit --sid -> WOS_SID -> ~/.iiaide-wos/config.json SID pool
 ```
 
 Use `iiaide-wos check` when you want an explicit SID health check. It runs the
@@ -403,8 +403,9 @@ SID_THREE"
 
 `--add-sids` accepts spaces, newlines, or commas and de-duplicates values. In the
 interactive Settings menu, use `5.3 Add SID` for one value or `5.4 Batch add
-SIDs` for a multi-line paste. The dashboard shows the current SID and the active
-pool position/count.
+SIDs` for a multi-line paste. The SID pool is global per user, so values added
+from any working directory are available to every CLI run. The dashboard shows
+the current SID and the active pool position/count.
 
 WOS domain/origin selection is separate from SID selection. Use
 `--wos-domain <domain>` or `WOS_DOMAIN` when only the host changes. Use

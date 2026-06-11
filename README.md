@@ -185,7 +185,9 @@ SID_THREE"
 ```
 
 In an interactive terminal, iiaide-wos validates the SID with the canonical WOS
-initialization URL and saves it to the SID pool in `tasks/config.json`.
+initialization URL and saves it to the global SID pool in
+`~/.iiaide-wos/config.json`. SID pool values are user-level, so a SID added from
+one directory is available to CLI runs started from other directories.
 Commands that require WOS authentication use the same workspace Playwright profile at
 `tasks/.browser-profile` (profile name: `.browser-profile`); in menu mode the
 session stays open while the menu process is alive. Normal WOS work runs in
@@ -234,7 +236,7 @@ WOS_SID="YOUR_SID" iiaide-wos parse --task "demo-search"
 ```
 
 SID sources are checked in this order: explicit `--sid`, `WOS_SID`
-environment variable, then the saved SID pool in `tasks/config.json`. WOS domain
+environment variable, then the saved SID pool in `~/.iiaide-wos/config.json`. WOS domain
 sources use the same lightweight model: pass `--wos-domain access.example.edu`,
 set `WOS_DOMAIN`, or use the saved `wosDomain` in `tasks/config.json`.
 `--base-url` remains available when a full origin URL is needed.

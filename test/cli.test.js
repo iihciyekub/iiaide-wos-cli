@@ -15,7 +15,9 @@ const { normalizeBatchResult } = require("../src/lib/wos-browser-export");
 const { wosIdsEquivalent } = require("../src/lib/wos-ids");
 
 function temporaryDirectory() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "iiaide-wos-test-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "iiaide-wos-test-"));
+  process.env.IIAIDE_WOS_CONFIG = path.join(root, "global-config.json");
+  return root;
 }
 
 function seedWosDataRecord(dbPath, taskId, record, options = {}) {
@@ -782,7 +784,7 @@ test("settings command can add single and batch SID pool values", async () => {
   const result = JSON.parse(output);
   assert.equal(result.sidPoolCount, 3);
   assert.equal(result.added, 3);
-  assert.deepEqual(readJson(path.join(root, "config.json")).sids, ["one", "two", "three"]);
+  assert.deepEqual(readJson(cli.globalConfigPath()).sids, ["one", "two", "three"]);
 });
 
 test("runs WOS Playwright in background unless visible browser is requested", () => {
@@ -1393,6 +1395,7 @@ test("SID preparation prompts when missing and reuses saved config", async () =>
   assert.equal(entered, "prompted-sid");
   assert.equal(args.sidSource, "prompt");
 
+  fs.rmSync(cli.globalConfigPath(), { force: true });
   writeJson(path.join(root, "config.json"), { sid: "saved-sid" });
   const savedArgs = cli.parseArgs(["node", "cli", "sid", "--tasks-root", root]);
   const saved = await cli.ensureSid(
@@ -1430,13 +1433,16 @@ test("SID pool parses, deduplicates, and migrates legacy saved SID config", () =
   assert.deepEqual(cli.sidPoolFromConfig(readJson(path.join(root, "config.json"))).sids, ["one", "legacy"]);
 
   const saved = cli.addSidsToConfig(args, ["legacy two\nthree", "three,four"]);
-  const config = readJson(path.join(root, "config.json"));
+  const config = readJson(cli.globalConfigPath());
+  const workspaceConfig = readJson(path.join(root, "config.json"));
   assert.equal(saved.added, 3);
   assert.equal(saved.sidPoolCount, 5);
   assert.equal(config.sid, undefined);
   assert.deepEqual(config.sids, ["one", "legacy", "two", "three", "four"]);
   assert.equal(config.sidCursor, 1);
-  assert.equal(config.playwrightVisible, true);
+  assert.equal(workspaceConfig.sid, undefined);
+  assert.equal(workspaceConfig.sids, undefined);
+  assert.equal(workspaceConfig.playwrightVisible, true);
 
   const status = cli.workspaceStatus(args);
   assert.equal(status.sid, "legacy");
@@ -1445,9 +1451,26 @@ test("SID pool parses, deduplicates, and migrates legacy saved SID config", () =
   assert.equal(status.playwrightVisible, true);
 });
 
+test("SID pool is shared across task roots through global config", () => {
+  const firstRoot = temporaryDirectory();
+  const globalConfig = cli.globalConfigPath();
+  const firstArgs = cli.parseArgs(["node", "cli", "settings", "--tasks-root", firstRoot]);
+  cli.addSidsToConfig(firstArgs, ["one two"], { activate: true });
+
+  const secondRoot = temporaryDirectory();
+  process.env.IIAIDE_WOS_CONFIG = globalConfig;
+  const secondArgs = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", secondRoot]);
+  const status = cli.workspaceStatus(secondArgs);
+
+  assert.equal(status.sid, "one");
+  assert.equal(status.sidPoolCount, 2);
+  assert.equal(status.sidConfig, globalConfig);
+  assert.equal(readJson(path.join(secondRoot, "config.json"), {}).sids, undefined);
+});
+
 test("quick SID validation discards invalid config SIDs and tries the next pool value", async () => {
   const root = temporaryDirectory();
-  writeJson(path.join(root, "config.json"), { sids: ["bad", "good"], sidCursor: 0 });
+  writeJson(cli.globalConfigPath(), { sids: ["bad", "good"], sidCursor: 0 });
   const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
   const seen = [];
 
@@ -1478,15 +1501,15 @@ test("quick SID validation discards invalid config SIDs and tries the next pool 
   assert.equal(result.status, "valid");
   assert.equal(result.sid, "good");
   assert.equal(args.sid, "good");
-  assert.deepEqual(readJson(path.join(root, "config.json")).sids, ["good"]);
-  assert.equal(readJson(path.join(root, "config.json")).sidCursor, 0);
-  assert.equal(readJson(path.join(root, "config.json")).deadSids[0].sid, "bad");
+  assert.deepEqual(readJson(cli.globalConfigPath()).sids, ["good"]);
+  assert.equal(readJson(cli.globalConfigPath()).sidCursor, 0);
+  assert.equal(readJson(cli.globalConfigPath()).deadSids[0].sid, "bad");
   assert.equal(seen.length, 2);
 });
 
 test("unknown SID probe does not discard saved SID pool values", async () => {
   const root = temporaryDirectory();
-  writeJson(path.join(root, "config.json"), { sids: ["maybe", "later"], sidCursor: 0 });
+  writeJson(cli.globalConfigPath(), { sids: ["maybe", "later"], sidCursor: 0 });
   const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
 
   const result = await cli.quickValidateSid(args, {
@@ -1501,7 +1524,7 @@ test("unknown SID probe does not discard saved SID pool values", async () => {
   });
 
   assert.equal(result.status, "unknown");
-  assert.deepEqual(readJson(path.join(root, "config.json")).sids, ["maybe", "later"]);
+  assert.deepEqual(readJson(cli.globalConfigPath()).sids, ["maybe", "later"]);
 });
 
 test("SID preparation fails clearly outside an interactive terminal", async () => {
@@ -1514,7 +1537,7 @@ test("SID preparation fails clearly outside an interactive terminal", async () =
 
 test("quick SID validation classifies lightweight WOS responses", async () => {
   const root = temporaryDirectory();
-  writeJson(path.join(root, "config.json"), { sid: "saved-sid" });
+  writeJson(cli.globalConfigPath(), { sid: "saved-sid" });
   const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
   const valid = await cli.quickValidateSid(args, {
     fetchImpl: async () => ({
@@ -1682,8 +1705,8 @@ test("invalid SID can be replaced and immediately revalidated", async () => {
   assert.equal(status.sid, "fresh");
   assert.equal(args.sid, "fresh");
   assert.equal(args.sidSource, "prompt");
-  assert.deepEqual(readJson(path.join(root, "config.json")).sids, ["fresh"]);
-  assert.equal(readJson(path.join(root, "config.json")).sidCursor, 0);
+  assert.deepEqual(readJson(cli.globalConfigPath()).sids, ["fresh"]);
+  assert.equal(readJson(cli.globalConfigPath()).sidCursor, 0);
   assert.equal(readJson(path.join(root, "config.json")).playwrightVisible, true);
   assert.match(messages[0], /invalid or expired/);
 });

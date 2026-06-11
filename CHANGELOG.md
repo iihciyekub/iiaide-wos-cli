@@ -3,6 +3,15 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.34 - 2026-06-11
+
+- Move the saved SID pool from workspace `tasks/config.json` to the user-level
+  global config at `~/.iiaide-wos/config.json`, so SIDs added from any working
+  directory are available to every CLI run.
+- Migrate legacy workspace `sid`, `sids`, `sidCursor`, and `deadSids` values into
+  the global SID config on first use while keeping workspace browser/runtime
+  settings in `tasks/config.json`.
+
 ## 0.4.33 - 2026-06-11
 
 - Remove the `Dead SIDs` row from the interactive workspace dashboard. Invalid

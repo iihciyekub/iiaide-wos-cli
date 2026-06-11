@@ -1,4 +1,5 @@
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { spawn } = require("node:child_process");
 const { chromium } = require("playwright");
@@ -493,6 +494,11 @@ function configPath(tasksRoot) {
   return path.join(tasksRoot, "config.json");
 }
 
+function globalConfigPath() {
+  if (process.env.IIAIDE_WOS_CONFIG) return path.resolve(process.env.IIAIDE_WOS_CONFIG);
+  return path.join(os.homedir(), ".iiaide-wos", "config.json");
+}
+
 function taskDirectory(tasksRoot, taskId) {
   const root = path.resolve(tasksRoot);
   const target = path.resolve(root, taskId);
@@ -520,6 +526,10 @@ function readConfig(tasksRoot) {
   return readJson(configPath(tasksRoot), { version: 1 });
 }
 
+function readGlobalConfig() {
+  return readJson(globalConfigPath(), { version: 1 });
+}
+
 function applySavedRuntimeSettings(args) {
   const config = readConfig(args.tasksRoot);
   if (!args.headedSource && typeof config.playwrightVisible === "boolean") {
@@ -535,6 +545,15 @@ function writeConfig(tasksRoot, config) {
   fs.mkdirSync(tasksRoot, { recursive: true });
   writeJson(
     configPath(tasksRoot),
+    { version: 1, ...config, updatedAt: new Date().toISOString() },
+    { mode: 0o600, backup: true }
+  );
+}
+
+function writeGlobalConfig(config) {
+  fs.mkdirSync(path.dirname(globalConfigPath()), { recursive: true });
+  writeJson(
+    globalConfigPath(),
     { version: 1, ...config, updatedAt: new Date().toISOString() },
     { mode: 0o600, backup: true }
   );
@@ -575,10 +594,54 @@ function sidPoolFromConfig(config = {}) {
   };
 }
 
+function migrateLegacyWorkspaceSidConfig(args) {
+  const workspaceConfig = readConfig(args.tasksRoot);
+  const workspacePool = sidPoolFromConfig(workspaceConfig);
+  const hasWorkspaceSidConfig = Boolean(
+    workspaceConfig.sid ||
+    workspacePool.sids.length ||
+    Number.isSafeInteger(workspaceConfig.sidCursor) ||
+    Array.isArray(workspaceConfig.deadSids)
+  );
+  const globalConfig = readGlobalConfig();
+  if (!hasWorkspaceSidConfig) return globalConfig;
+
+  const globalPool = sidPoolFromConfig(globalConfig);
+  const mergedSids = dedupeSidValues([...globalPool.sids, ...workspacePool.sids]);
+  const activeSid = globalPool.activeSid || workspacePool.activeSid || mergedSids[0] || "";
+  const sidCursor = activeSid ? Math.max(0, mergedSids.indexOf(activeSid)) : 0;
+  const deadSids = [
+    ...(Array.isArray(globalConfig.deadSids) ? globalConfig.deadSids : []),
+    ...(Array.isArray(workspaceConfig.deadSids) ? workspaceConfig.deadSids : []),
+  ].slice(-50);
+  const { sid: _globalSid, ...globalRest } = globalConfig;
+  const nextGlobalConfig = {
+    ...globalRest,
+    sids: mergedSids,
+    sidCursor,
+    ...(deadSids.length ? { deadSids } : {}),
+  };
+  writeGlobalConfig(nextGlobalConfig);
+
+  const {
+    sid: _workspaceSid,
+    sids: _workspaceSids,
+    sidCursor: _workspaceSidCursor,
+    deadSids: _workspaceDeadSids,
+    ...workspaceRest
+  } = workspaceConfig;
+  writeConfig(args.tasksRoot, workspaceRest);
+  return nextGlobalConfig;
+}
+
+function readSidConfig(args) {
+  return migrateLegacyWorkspaceSidConfig(args);
+}
+
 function addSidsToConfig(args, values, options = {}) {
   const inputs = Array.isArray(values) ? values : [values];
   const incoming = dedupeSidValues(inputs.flatMap(parseSidValues));
-  const config = readConfig(args.tasksRoot);
+  const config = readSidConfig(args);
   const pool = sidPoolFromConfig(config);
   const merged = dedupeSidValues([...pool.sids, ...incoming]);
   const { sid: _sid, ...rest } = config;
@@ -586,7 +649,7 @@ function addSidsToConfig(args, values, options = {}) {
     ? (incoming[0] || pool.activeSid || merged[0] || "")
     : (pool.activeSid || incoming[0] || merged[0] || "");
   const sidCursor = activeSid ? Math.max(0, merged.indexOf(activeSid)) : 0;
-  writeConfig(args.tasksRoot, {
+  writeGlobalConfig({
     ...rest,
     sids: merged,
     sidCursor,
@@ -599,7 +662,7 @@ function addSidsToConfig(args, values, options = {}) {
   }
   return {
     ok: true,
-    config: configPath(args.tasksRoot),
+    config: globalConfigPath(),
     added: incoming.filter((sid) => !pool.sids.includes(sid)).length,
     sidPoolCount: merged.length,
     activeSid,
@@ -608,7 +671,7 @@ function addSidsToConfig(args, values, options = {}) {
 
 function discardActiveConfigSid(args, reason = "invalid") {
   if (args.sidSource !== "config" || !args.sid) return false;
-  const config = readConfig(args.tasksRoot);
+  const config = readSidConfig(args);
   const pool = sidPoolFromConfig(config);
   if (!pool.sids.length) return false;
   const removeIndex = pool.activeIndex >= 0 && pool.sids[pool.activeIndex] === args.sid
@@ -627,7 +690,7 @@ function discardActiveConfigSid(args, reason = "invalid") {
     },
   ].slice(-50);
   const { sid: _sid, ...rest } = config;
-  writeConfig(args.tasksRoot, {
+  writeGlobalConfig({
     ...rest,
     sids: nextSids,
     sidCursor: nextCursor,
@@ -645,8 +708,8 @@ function discardActiveConfigSid(args, reason = "invalid") {
 }
 
 function saveSidConfig(args, observedSid) {
-  const config = readConfig(args.tasksRoot);
-  const pool = sidPoolFromConfig(config);
+  const sidConfig = readSidConfig(args);
+  const pool = sidPoolFromConfig(sidConfig);
   const sidValue = String(observedSid || args.sid || "").trim();
   const nextSids = args.sidSource === "env" || !sidValue
     ? pool.sids
@@ -654,10 +717,14 @@ function saveSidConfig(args, observedSid) {
   const nextCursor = sidValue && nextSids.includes(sidValue)
     ? nextSids.indexOf(sidValue)
     : Math.max(0, pool.activeIndex);
-  const { sid: _sid, ...rest } = config;
-  writeConfig(args.tasksRoot, {
+  const { sid: _sid, ...rest } = sidConfig;
+  writeGlobalConfig({
     ...rest,
     ...(nextSids.length ? { sids: nextSids, sidCursor: nextCursor } : { sids: [], sidCursor: 0 }),
+  });
+  const config = readConfig(args.tasksRoot);
+  writeConfig(args.tasksRoot, {
+    ...config,
     wosDomain: args.wosDomain || urlDomain(args.baseUrl) || DEFAULT_WOS_DOMAIN,
     baseUrl: args.baseUrl,
   });
@@ -700,11 +767,11 @@ function setParseConcurrencySetting(args, value) {
 }
 
 function clearSavedSidConfig(args) {
-  const config = readConfig(args.tasksRoot);
+  const config = readSidConfig(args);
   const pool = sidPoolFromConfig(config);
   if (!config.sid && !pool.sids.length && !args.sid) return false;
   const { sid: _sid, sids: _sids, sidCursor: _sidCursor, deadSids: _deadSids, ...rest } = config;
-  writeConfig(args.tasksRoot, rest);
+  writeGlobalConfig(rest);
   args.sid = "";
   args.sidSource = "";
   args.sidPoolIndex = -1;
@@ -727,7 +794,8 @@ function loadSavedSid(args) {
     args.wosDomain = normalizeWosDomain(config.wosDomain);
     args.baseUrl = wosOriginFromDomain(args.wosDomain);
   }
-  const pool = sidPoolFromConfig(config);
+  const sidConfig = readSidConfig(args);
+  const pool = sidPoolFromConfig(sidConfig);
   args.sidPoolCount = pool.sids.length;
   args.sidPoolIndex = pool.activeIndex;
   if (pool.activeSid) {
@@ -1049,7 +1117,8 @@ function workspaceStatus(args, sidCheck = null) {
   const tasks = Array.isArray(index.tasks) ? index.tasks : [];
   const currentTask = readLatestTaskId(args.tasksRoot) || "";
   const config = readConfig(args.tasksRoot);
-  const pool = sidPoolFromConfig(config);
+  const sidConfig = readSidConfig(args);
+  const pool = sidPoolFromConfig(sidConfig);
   const sid = args.sid || process.env.WOS_SID || pool.activeSid || "";
   const sidSource = args.sidSource || (process.env.WOS_SID ? "env" : (pool.activeSid ? "config" : ""));
   const baseUrl = args.baseUrlSource ? args.baseUrl : (config.baseUrl || args.baseUrl || DEFAULT_BASE_URL);
@@ -1078,7 +1147,8 @@ function workspaceStatus(args, sidCheck = null) {
     sidSource,
     sidPoolCount: pool.sids.length,
     sidPoolIndex: pool.activeIndex,
-    deadSidCount: Array.isArray(config.deadSids) ? config.deadSids.length : 0,
+    sidConfig: globalConfigPath(),
+    deadSidCount: Array.isArray(sidConfig.deadSids) ? sidConfig.deadSids.length : 0,
     sidCheck,
     wosDataDb: wosDataDbStats(args.dbPath),
     tasks: tasks.map((task) => ({
@@ -2870,7 +2940,7 @@ async function validateAndSaveSid(args) {
     return {
       ok: true,
       sidSource: args.sidSource || "browser",
-      config: configPath(args.tasksRoot),
+      config: globalConfigPath(),
       href: status.href,
       sid: "[saved]",
     };
@@ -2895,7 +2965,7 @@ async function checkSid(args, dependencies = {}) {
       status: "valid",
       checkedWith: "http-probe",
       sidSource: quick.sidSource || args.sidSource || "",
-      config: configPath(args.tasksRoot),
+      config: globalConfigPath(),
       href: quick.href || "",
       sid: "[saved]",
       message: quick.message || "SID accepted by WOS",
@@ -3285,6 +3355,8 @@ module.exports = {
   clearSavedSidConfig,
   discardActiveConfigSid,
   addSidsToConfig,
+  globalConfigPath,
+  readGlobalConfig,
   parseSidValues,
   sidPoolFromConfig,
   buildSidInitUrl,
