@@ -191,6 +191,11 @@ Batch behavior:
   selected record range into 200-record TXT batch targets, and checks the target
   file path before each request. Existing batch files are parsed and skipped;
   missing batch files are fetched from WOS.
+- If a TXT export request fails for a missing batch, the CLI treats the active
+  SID as expired instead of retrying the same SID. It removes that saved SID,
+  waits for or selects the next saved SID, reopens WOS through the canonical SID
+  initialization URL, reloads the same UUID summary page, and requests the same
+  missing batch range again.
 - CLI parses WOS IDs only from top-level `UT` fields in the response text.
 - CLI writes a single WOSID CSV to
   `raw/<uuid>/full-record/<uuid>_wosid.csv` only after the selected raw TXT

@@ -44,8 +44,6 @@ const { version: VERSION } = require("../package.json");
 const DEFAULT_BATCH_SIZE = 200;
 const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_RECORD_TIMEOUT_MS = 20000;
-const DEFAULT_TXT_EXPORT_RETRIES = 3;
-const DEFAULT_TXT_EXPORT_RETRY_DELAY_MS = 2000;
 const DEFAULT_BROWSER_RESTART_EVERY = 600;
 const DEFAULT_PARSE_MEMORY_CHECK_EVERY = 200;
 const DEFAULT_PARSE_MAX_RSS_MB = 4096;
@@ -3018,13 +3016,14 @@ function pageContextUuid(context, fallbackUuid) {
 async function exportFromWos(args, paths) {
   const authSpinner = createSpinner("Validating WOS authentication");
   let session = null;
+  let page = null;
   const rows = [];
   let info = null;
   let batchProgress = null;
   let summarySpinner = null;
   try {
     session = await prepareWosSession(args);
-    const page = session.page;
+    page = session.page;
     authSpinner.succeed(authValidatedMessage(args));
     appendProgress(paths, { phase: "sid-validated" });
     const context = await prepareWosRequestContext(page, args);
@@ -3094,6 +3093,80 @@ async function exportFromWos(args, paths) {
       if (!isInteractive()) console.error(`export ${markFrom}-${markTo}: parsed ${ids.length} WOS IDs`);
       return { parsed: ids.length, saved: true };
     };
+    let sidSwitchCount = 0;
+    const switchSidAfterTxtExportFailure = async (missingBatch, error) => {
+      const failedSidMasked = maskSid(args.sid);
+      sidSwitchCount += 1;
+      appendProgress(paths, {
+        phase: "txt-export-sid-switch",
+        uuid: info.uuid,
+        markFrom: missingBatch.markFrom,
+        markTo: missingBatch.markTo,
+        switchCount: sidSwitchCount,
+        failedSid: failedSidMasked,
+        message: error?.message || String(error),
+      });
+      writeRuntimeNotice("WOS TXT export request failed", [
+        `records ${missingBatch.markFrom}-${missingBatch.markTo}`,
+        "Treating the current SID as expired and switching to the next saved SID.",
+        failedSidMasked ? `Failed SID: ${failedSidMasked}` : "",
+      ]);
+      await forceCloseWosSession(session);
+      session = null;
+      page = null;
+      const discarded = discardActiveConfigSid(args, `WOS TXT export failed for records ${missingBatch.markFrom}-${missingBatch.markTo}`, { force: true });
+      if (discarded?.sidPoolCount) {
+        console.error(`Saved SID was removed after TXT export failure; trying next saved SID (${discarded.sidPoolCount} left).`);
+        loadSavedSid(args);
+      } else {
+        args.sid = "";
+        args.sidSource = "";
+        if (!loadSavedSidFromConfig(args)) {
+          writeRuntimeNotice("WOS SID pool empty", [
+            "No saved SID remains after removing the failed SID.",
+            `Waiting for a new saved SID and checking again every ${Math.ceil(SID_POOL_WAIT_INTERVAL_MS / 1000)} seconds.`,
+          ]);
+          await waitForSavedSidPool(args, {
+            intervalMs: SID_POOL_WAIT_INTERVAL_MS,
+            report: console.error,
+            onPoll: ({ attempts, waitedMs, intervalMs, sidPoolCount }) => {
+              appendProgress(paths, {
+                phase: "txt-export-sid-pool-wait",
+                attempts,
+                waitedMs,
+                intervalMs,
+                sidPoolCount,
+              });
+            },
+          });
+        }
+      }
+      const switchSpinner = createSpinner("Validating WOS authentication after SID switch");
+      try {
+        session = await prepareWosSession(args);
+        page = session.page;
+        switchSpinner.succeed(authValidatedMessage(args));
+      } catch (switchError) {
+        switchSpinner.fail("WOS authentication failed after SID switch");
+        throw switchError;
+      }
+      appendProgress(paths, { phase: "txt-export-sid-switch-validated", sidSource: args.sidSource, sidPoolCount: args.sidPoolCount, sidPoolIndex: args.sidPoolIndex });
+      const refreshedContext = await prepareWosRequestContext(page, args);
+      const refreshedUuid = pageContextUuid(refreshedContext, info.uuid);
+      if (refreshedUuid !== info.uuid) {
+        throw new Error(`WOS UUID changed after SID switch: expected ${info.uuid}, got ${refreshedUuid || "(missing)"}`);
+      }
+      if (refreshedContext.expectedCount && refreshedContext.expectedCount !== info.expectedCount) {
+        throw new Error(`WOS record count changed after SID switch: expected ${info.expectedCount}, got ${refreshedContext.expectedCount}`);
+      }
+      appendProgress(paths, {
+        phase: "txt-export-sid-switch-context",
+        href: refreshedContext.href,
+        uuid: refreshedUuid,
+        countText: refreshedContext.countText,
+        expectedCount: refreshedContext.expectedCount,
+      });
+    };
     reportDownloadPlan(
       "WOS records",
       info.expectedCount,
@@ -3125,30 +3198,37 @@ async function exportFromWos(args, paths) {
         completedMissingBatches += 1;
         batchProgress.update(completedMissingBatches, `${markFrom}-${markTo}`);
       };
-      for (const missingBatch of resumePlan.missingBatches) {
+      const consumeExistingMissingBatch = (missingBatch, sourcePhase = "resume-raw-before-request") => {
         const targetRawPath = rawBatchPath(paths, info.uuid, missingBatch.markFrom, missingBatch.markTo);
-        if (fs.existsSync(targetRawPath)) {
-          const fileName = batchFileName(info.uuid, missingBatch.markFrom, missingBatch.markTo);
-          const parsedRows = parseExistingRawBatches(paths, info.uuid, {
-            files: [fileName],
-            startIndex: missingBatch.markFrom,
-            endIndex: missingBatch.markTo,
-          });
-          appendRows(rows, parsedRows);
-          appendProgress(paths, {
-            phase: "resume-raw-before-request",
-            uuid: info.uuid,
-            markFrom: missingBatch.markFrom,
-            markTo: missingBatch.markTo,
-            parsed: parsedRows.length,
-            rawPath: targetRawPath,
-          });
-          updateMissingProgress({ saved: true }, missingBatch.markFrom, missingBatch.markTo);
-          continue;
-        }
+        if (!fs.existsSync(targetRawPath)) return false;
+        const key = batchKey(missingBatch.markFrom, missingBatch.markTo);
+        if (persistedBatchKeys.has(key)) return true;
+        const fileName = batchFileName(info.uuid, missingBatch.markFrom, missingBatch.markTo);
+        const parsedRows = parseExistingRawBatches(paths, info.uuid, {
+          files: [fileName],
+          startIndex: missingBatch.markFrom,
+          endIndex: missingBatch.markTo,
+        });
+        appendRows(rows, parsedRows);
+        appendProgress(paths, {
+          phase: sourcePhase,
+          uuid: info.uuid,
+          markFrom: missingBatch.markFrom,
+          markTo: missingBatch.markTo,
+          parsed: parsedRows.length,
+          rawPath: targetRawPath,
+        });
+        updateMissingProgress({ saved: true }, missingBatch.markFrom, missingBatch.markTo);
+        return true;
+      };
+      for (const missingBatch of resumePlan.missingBatches) {
+        if (consumeExistingMissingBatch(missingBatch)) continue;
         let exportResult = null;
-        let lastError = null;
-        for (let attempt = 1; attempt <= DEFAULT_TXT_EXPORT_RETRIES; attempt += 1) {
+        for (;;) {
+          if (consumeExistingMissingBatch(missingBatch, "resume-raw-after-export-error")) {
+            exportResult = { batches: [] };
+            break;
+          }
           try {
             exportResult = await exportTxtBatchesViaWosJs(page, {
               uuid: info.uuid,
@@ -3171,30 +3251,16 @@ async function exportFromWos(args, paths) {
                   progressEvent.parsed = result.parsed;
                   updateMissingProgress(result, markFrom, markTo);
                 }
-                appendProgress(paths, { phase: "wosjs-export-progress", attempt, ...progressEvent });
+                appendProgress(paths, { phase: "wosjs-export-progress", sidSwitchCount, ...progressEvent });
               },
             });
-            lastError = null;
             break;
           } catch (error) {
-            lastError = error;
-            appendProgress(paths, {
-              phase: "txt-export-retry",
-              uuid: info.uuid,
-              markFrom: missingBatch.markFrom,
-              markTo: missingBatch.markTo,
-              attempt,
-              retries: DEFAULT_TXT_EXPORT_RETRIES,
-              message: error?.message || String(error),
-            });
-            if (attempt >= DEFAULT_TXT_EXPORT_RETRIES) break;
-            await sleep(DEFAULT_TXT_EXPORT_RETRY_DELAY_MS * attempt);
+            await switchSidAfterTxtExportFailure(missingBatch, error);
           }
         }
         if (!exportResult) {
-          throw new Error(
-            `Export request failed after ${DEFAULT_TXT_EXPORT_RETRIES} attempts for records ${missingBatch.markFrom}-${missingBatch.markTo}: ${lastError?.message || lastError || "unknown error"}`
-          );
+          throw new Error(`Export request failed for records ${missingBatch.markFrom}-${missingBatch.markTo}`);
         }
 
         for (const batch of exportResult.batches) {

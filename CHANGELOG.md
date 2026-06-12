@@ -3,6 +3,13 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.75 - 2026-06-12
+
+- Treat a full-record TXT export request failure as an expired SID signal
+  instead of retrying the same request on the same SID. The CLI now removes the
+  failed saved SID, switches to the next saved SID or waits for the SID pool to
+  refill, reopens WOS, and resumes the same missing batch range.
+
 ## 0.4.74 - 2026-06-12
 
 - Retry transient full-record TXT export failures for each missing batch before

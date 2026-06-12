@@ -316,7 +316,10 @@ same task first reads the WOS record count, converts the selected range into
 and downloads only the missing files. During long exports, each completed batch
 is written to disk immediately, so an interrupted browser session still leaves
 resumable raw TXT batches behind. The final `_wosid.csv` is written only after
-the selected TXT batch plan is complete.
+the selected TXT batch plan is complete. If WOS rejects a TXT export request for
+a missing batch, the CLI treats the active SID as expired, removes it from the
+saved pool, reopens WOS with the next saved SID, and requests that same missing
+batch again.
 
 ### 2B. Create A Task From A WOS UUID
 

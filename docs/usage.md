@@ -103,7 +103,11 @@ the browser, or the SSH session stops halfway through a long export, completed
 batch files stay on disk and the next run fills whichever planned batch files
 are still missing. Partial `_wosid.csv` files written from interrupted raw
 batches are not treated as completed downloads by `parse-pipeline`; completion
-is based on raw TXT coverage for the verified WOS record range.
+is based on raw TXT coverage for the verified WOS record range. If WOS rejects
+the request for a missing TXT batch, the CLI treats that as a SID-expired signal:
+it closes the current WOS session, removes the failed saved SID, waits for or
+selects the next saved SID, reopens the same UUID summary page, and retries the
+same missing batch range with the new SID.
 
 ## CSV Import Workflow
 
