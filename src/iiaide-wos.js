@@ -2010,6 +2010,11 @@ function parseExportText(text, batchStart, batchEnd) {
   return ids;
 }
 
+function appendRows(target, source) {
+  for (const row of source) target.push(row);
+  return target;
+}
+
 function isFailedTxtRunSummary(summary = {}) {
   return Boolean(summary?.ok === false && summary.method === "wos-js-export-fetchTxtBatches");
 }
@@ -2553,7 +2558,7 @@ function rawBatchPlanForRange(paths, uuid, startIndex = 1, endIndex = 0, batchSi
   const presentRanges = [];
   const missingBatches = [];
   const addMissing = (from, to) => {
-    missingBatches.push(...splitBatchRanges(from, to, batchSize));
+    appendRows(missingBatches, splitBatchRanges(from, to, batchSize));
   };
 
   for (const range of ranges) {
@@ -2598,7 +2603,7 @@ function parseExistingRawBatches(paths, uuid, options = {}) {
   for (const fileName of files) {
     const { batchStart, batchEnd } = parseRawBatchFileName(fileName);
     const text = fs.readFileSync(path.join(rawBatchDir(paths, uuid), fileName), "utf8");
-    rows.push(...parseExportText(text, batchStart, batchEnd).filter((row) => {
+    appendRows(rows, parseExportText(text, batchStart, batchEnd).filter((row) => {
       const recordIndex = batchStart + row.batchPosition - 1;
       if (recordIndex < startIndex) return false;
       if (endIndex && recordIndex > endIndex) return false;
@@ -3048,7 +3053,7 @@ async function exportFromWos(args, paths) {
     const resumePlan = rawBatchPlanForRange(paths, info.uuid, range.startIndex, range.endIndex, batchSize);
     const resumedCount = resumePlan.coveredCount;
     if (resumePlan.presentFiles.length) {
-      rows.push(...parseExistingRawBatches(paths, info.uuid, {
+      appendRows(rows, parseExistingRawBatches(paths, info.uuid, {
         files: resumePlan.presentFiles,
         startIndex: range.startIndex,
         endIndex: range.endIndex,
@@ -3077,7 +3082,7 @@ async function exportFromWos(args, paths) {
       const rawPath = rawBatchPath(paths, info.uuid, markFrom, markTo);
       writeFileAtomic(rawPath, String(batch.text || ""));
       const ids = parseExportText(batch.text, markFrom, markTo);
-      rows.push(...ids);
+      appendRows(rows, ids);
       persistedBatchKeys.add(key);
       appendProgress(paths, { phase: sourcePhase, markFrom, markTo, parsed: ids.length, rawPath });
       if (!isInteractive()) console.error(`export ${markFrom}-${markTo}: parsed ${ids.length} WOS IDs`);
@@ -3122,7 +3127,7 @@ async function exportFromWos(args, paths) {
             startIndex: missingBatch.markFrom,
             endIndex: missingBatch.markTo,
           });
-          rows.push(...parsedRows);
+          appendRows(rows, parsedRows);
           appendProgress(paths, {
             phase: "resume-raw-before-request",
             uuid: info.uuid,

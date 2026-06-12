@@ -2566,6 +2566,25 @@ test("raw batch plan identifies arbitrary missing TXT ranges", () => {
   ]);
 });
 
+test("raw batch parsing handles large existing files without spreading rows", () => {
+  const root = temporaryDirectory();
+  const paths = cli.getRunPaths(root);
+  const rawDir = path.join(paths.rawRoot, "query", "full-record");
+  fs.mkdirSync(rawDir, { recursive: true });
+  const lines = Array.from({ length: 150000 }, (_, index) => `UT WOS:${index + 1}`);
+  fs.writeFileSync(path.join(rawDir, "query_1_150000.txt"), `${lines.join("\n")}\n`);
+
+  const rows = cli.parseExistingRawBatches(paths, "query", {
+    files: ["query_1_150000.txt"],
+    startIndex: 1,
+    endIndex: 150000,
+  });
+
+  assert.equal(rows.length, 150000);
+  assert.equal(rows[0].wosid, "WOS:1");
+  assert.equal(rows.at(-1).wosid, "WOS:150000");
+});
+
 test("raw batch start infers default TXT resume range", () => {
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);

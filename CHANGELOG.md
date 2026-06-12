@@ -3,6 +3,13 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.73 - 2026-06-12
+
+- Fix large raw TXT resume parsing by avoiding spread calls with large parsed
+  WOSID arrays. Existing batch files with many `UT` rows no longer trigger
+  `RangeError: Maximum call stack size exceeded` before missing batches are
+  requested.
+
 ## 0.4.72 - 2026-06-12
 
 - Make full-record TXT resume completion depend on WOS total-derived raw batch

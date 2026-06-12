@@ -67,7 +67,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.72
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.73
 iiaide-wos install-browser
 iiaide-wos
 # or
