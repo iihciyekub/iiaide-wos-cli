@@ -186,6 +186,9 @@ curl "${WOS_BASE_URL}/api/wosnx/indic/export/saveToFile" \
 Batch behavior:
 
 - CLI writes raw batches to `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
+- Batch file ranges are inclusive. For an explicit `--from-index 400` range,
+  existing contiguous raw files such as `<uuid>_400_600.txt` are reused and the
+  next WOS export starts at `601`.
 - CLI parses `UT` fields from the response text.
 - CLI writes a single WOSID CSV to
   `raw/<uuid>/full-record/<uuid>_wosid.csv`.

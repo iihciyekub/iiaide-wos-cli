@@ -562,6 +562,13 @@ test("calculates bounded WOS record ranges before download planning", () => {
   assert.equal(cli.boundedRecordCount(800, 201, 200), 200);
   assert.equal(cli.boundedRecordCount(800, 701, 200), 100);
   assert.equal(cli.boundedRecordCount(800, 900, 200), 0);
+  assert.deepEqual(cli.selectedRecordRange(800, 400, 201), {
+    availableCount: 800,
+    startIndex: 400,
+    endIndex: 600,
+    selectedCount: 201,
+    bounded: true,
+  });
 });
 
 test("interactive task hints show only numbered task IDs", () => {
@@ -2482,6 +2489,33 @@ test("filters raw batches by UUID and rejects overlaps", () => {
 
   fs.writeFileSync(path.join(firstRawDir, "first_2_3.txt"), "UT WOS:C\n");
   assert.throws(() => cli.parseExistingRawBatches(paths, "first"), /Non-contiguous raw batches/);
+});
+
+test("raw batch coverage supports resume from an explicit WOS record range", () => {
+  const root = temporaryDirectory();
+  const paths = cli.getRunPaths(root);
+  const rawDir = path.join(paths.rawRoot, "query", "full-record");
+  fs.mkdirSync(rawDir, { recursive: true });
+  fs.writeFileSync(path.join(rawDir, "query_400_600.txt"), "UT WOS:400\nUT WOS:401\nUT WOS:600\n");
+
+  const coverage = cli.rawBatchCoverageFromStart(paths, "query", 400, 800);
+
+  assert.deepEqual(coverage.files, ["query_400_600.txt"]);
+  assert.equal(coverage.lastEnd, 600);
+  assert.deepEqual(
+    cli.parseExistingRawBatches(paths, "query", {
+      files: coverage.files,
+      startIndex: 400,
+      endIndex: coverage.lastEnd,
+    }).map((row) => row.wosid),
+    ["WOS:400", "WOS:401", "WOS:600"]
+  );
+  assert.equal(coverage.lastEnd + 1, 601);
+  fs.writeFileSync(path.join(rawDir, "query_800_900.txt"), "UT WOS:800\n");
+  assert.throws(
+    () => cli.rawBatchCoverageFromStart(paths, "query", 400, 1000),
+    /Non-contiguous raw batches/
+  );
 });
 
 test("validate does not create a missing task directory", () => {

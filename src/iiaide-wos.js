@@ -2025,6 +2025,31 @@ function boundedRecordCount(totalRecords, startIndex = 1, limit = 0) {
   return Math.max(0, end - start + 1);
 }
 
+function selectedRecordRange(totalRecords, startIndex = 1, limit = 0) {
+  const availableCount = Math.max(0, Number(totalRecords) || 0);
+  const start = Math.max(1, Number(startIndex) || 1);
+  if (!availableCount || start > availableCount) {
+    return {
+      availableCount,
+      startIndex: start,
+      endIndex: 0,
+      selectedCount: 0,
+      bounded: Boolean(Number(limit) || 0),
+    };
+  }
+  const bounded = Boolean(Number(limit) || 0);
+  const endIndex = bounded
+    ? Math.min(start + Math.max(0, Number(limit) || 0) - 1, availableCount)
+    : availableCount;
+  return {
+    availableCount,
+    startIndex: start,
+    endIndex,
+    selectedCount: Math.max(0, endIndex - start + 1),
+    bounded,
+  };
+}
+
 function reportDownloadPlan(label, availableCount, selectedCount, batchSize = DEFAULT_BATCH_SIZE) {
   const batches = downloadBatchCount(selectedCount, batchSize);
   console.error(`${label} available: ${availableCount}`);
@@ -2350,6 +2375,16 @@ function batchFileStart(fileName) {
   return Number(String(fileName || "").match(/_(\d+)_(\d+)\.[^.]+$/)?.[1] || 0);
 }
 
+function parseRawBatchFileName(fileName) {
+  const match = String(fileName || "").match(/_(\d+)_(\d+)\.txt$/);
+  if (!match) return null;
+  return {
+    fileName,
+    batchStart: Number(match[1]),
+    batchEnd: Number(match[2]),
+  };
+}
+
 function rawBatchFiles(paths, uuid) {
   if (!uuid) throw new Error("Missing raw batch UUID");
   const directory = rawBatchDir(paths, uuid);
@@ -2377,9 +2412,7 @@ function rawBatchCoverage(paths, uuid) {
   let previousEnd = 0;
   let firstStart = 0;
   for (const fileName of files) {
-    const match = fileName.match(/_(\d+)_(\d+)\.txt$/);
-    const batchStart = Number(match[1]);
-    const batchEnd = Number(match[2]);
+    const { batchStart, batchEnd } = parseRawBatchFileName(fileName);
     if (!firstStart) firstStart = batchStart;
     if (batchStart !== previousEnd + 1) {
       throw new Error(`Non-contiguous raw batches detected: ${fileName}`);
@@ -2392,23 +2425,67 @@ function rawBatchCoverage(paths, uuid) {
   return { files, firstStart, lastEnd: previousEnd };
 }
 
-function parseExistingRawBatches(paths, uuid) {
+function rawBatchCoverageFromStart(paths, uuid, startIndex = 1, endIndex = 0) {
+  const start = Math.max(1, Number(startIndex) || 1);
+  const end = Math.max(0, Number(endIndex) || 0);
+  if (end && start > end) return { files: [], firstStart: 0, lastEnd: start - 1, parsedUntil: start - 1 };
+
+  const ranges = rawBatchFiles(paths, uuid)
+    .map(parseRawBatchFileName)
+    .filter(Boolean)
+    .filter((range) => range.batchEnd >= start && (!end || range.batchStart <= end));
+
+  if (!ranges.length) return { files: [], firstStart: 0, lastEnd: start - 1, parsedUntil: start - 1 };
+
+  let previousEnd = start - 1;
+  let firstStart = 0;
+  const files = [];
+  for (const range of ranges) {
+    if (!files.length) {
+      if (range.batchStart > start) {
+        throw new Error(`Non-contiguous raw batches detected: ${range.fileName}`);
+      }
+      if (range.batchEnd < start) continue;
+    } else if (range.batchStart !== previousEnd + 1) {
+      throw new Error(`Non-contiguous raw batches detected: ${range.fileName}`);
+    }
+
+    if (range.batchEnd < range.batchStart) {
+      throw new Error(`Invalid raw batch range detected: ${range.fileName}`);
+    }
+    if (!firstStart) firstStart = range.batchStart;
+    files.push(range.fileName);
+    previousEnd = end ? Math.min(range.batchEnd, end) : range.batchEnd;
+    if (end && previousEnd >= end) break;
+  }
+
+  return { files, firstStart, lastEnd: previousEnd, parsedUntil: previousEnd };
+}
+
+function parseExistingRawBatches(paths, uuid, options = {}) {
   const rows = [];
-  const { files } = rawBatchCoverage(paths, uuid);
+  const files = options.files || rawBatchCoverage(paths, uuid).files;
+  const startIndex = Math.max(1, Number(options.startIndex) || 1);
+  const endIndex = Math.max(0, Number(options.endIndex) || 0);
   for (const fileName of files) {
-    const match = fileName.match(/_(\d+)_(\d+)\.txt$/);
-    const batchStart = Number(match[1]);
-    const batchEnd = Number(match[2]);
+    const { batchStart, batchEnd } = parseRawBatchFileName(fileName);
     const text = fs.readFileSync(path.join(rawBatchDir(paths, uuid), fileName), "utf8");
-    rows.push(...parseExportText(text, batchStart, batchEnd));
+    rows.push(...parseExportText(text, batchStart, batchEnd).filter((row) => {
+      const recordIndex = batchStart + row.batchPosition - 1;
+      if (recordIndex < startIndex) return false;
+      if (endIndex && recordIndex > endIndex) return false;
+      return true;
+    }));
   }
   return rows;
 }
 
-function canRepairWosIdsFromRaw(paths, uuid, expectedCount) {
+function canRepairWosIdsFromRaw(paths, uuid, expectedCount, startIndex = 1, endIndex = 0) {
   if (!uuid || !rawBatchFiles(paths, uuid).length || !expectedCount) return false;
-  const coverage = rawBatchCoverage(paths, uuid);
-  return Boolean(coverage.files.length && coverage.firstStart === 1 && coverage.lastEnd >= expectedCount);
+  const start = Math.max(1, Number(startIndex) || 1);
+  const end = Math.max(0, Number(endIndex) || 0) || start + Math.max(0, Number(expectedCount) || 0) - 1;
+  const coverage = rawBatchCoverageFromStart(paths, uuid, start, end);
+  return Boolean(coverage.files.length && coverage.lastEnd >= end);
 }
 
 function finalWosIdsCsvExists(paths, identifier) {
@@ -2828,52 +2905,100 @@ async function exportFromWos(args, paths) {
     summarySpinner.succeed(`Found ${info.expectedCount} records`);
     appendProgress(paths, { phase: "summary-info", ...info });
     const batchSize = DEFAULT_BATCH_SIZE;
+    const range = selectedRecordRange(info.expectedCount, args.fromIndex, args.limit);
+    if (!range.selectedCount) {
+      throw new Error(`WOS record range starts after available records: start=${range.startIndex} total=${range.availableCount}`);
+    }
+    const resumeCoverage = rawBatchCoverageFromStart(paths, info.uuid, range.startIndex, range.endIndex);
+    const resumedCount = resumeCoverage.files.length
+      ? Math.max(0, resumeCoverage.lastEnd - range.startIndex + 1)
+      : 0;
+    if (resumeCoverage.files.length) {
+      rows.push(...parseExistingRawBatches(paths, info.uuid, {
+        files: resumeCoverage.files,
+        startIndex: range.startIndex,
+        endIndex: resumeCoverage.lastEnd,
+      }));
+      appendProgress(paths, {
+        phase: "resume-raw",
+        uuid: info.uuid,
+        startIndex: range.startIndex,
+        lastEnd: resumeCoverage.lastEnd,
+        files: resumeCoverage.files.length,
+        parsed: rows.length,
+      });
+      if (!isInteractive()) {
+        console.error(`WOS records resumed from raw: ${range.startIndex}-${resumeCoverage.lastEnd}`);
+      }
+    }
+    const downloadStart = resumeCoverage.files.length
+      ? Math.min(resumeCoverage.lastEnd + 1, range.endIndex + 1)
+      : range.startIndex;
+    const remainingCount = downloadStart <= range.endIndex
+      ? range.endIndex - downloadStart + 1
+      : 0;
     const { batches: batchCount } = reportDownloadPlan(
       "WOS records",
       info.expectedCount,
-      info.expectedCount,
+      remainingCount,
       batchSize
     );
     appendProgress(paths, {
       phase: "download-plan",
       label: "WOS records",
       availableCount: info.expectedCount,
-      selectedCount: info.expectedCount,
+      selectedCount: range.selectedCount,
+      startIndex: range.startIndex,
+      endIndex: range.endIndex,
+      resumedCount,
+      downloadStart,
+      remainingCount,
       batchCount,
       batchSize,
     });
-    batchProgress = createProgress("Exporting records", batchCount);
-    const exportResult = await exportTxtBatchesViaWosJs(page, {
-      uuid: info.uuid,
-      markFrom: 1,
-      markTo: info.expectedCount,
-      batchSize,
-      sortBy: args.sortBy,
-      onProgress(event) {
-        appendProgress(paths, { phase: "wosjs-export-progress", ...event });
-        if (event.phase === "start" && event.totalBatches) {
-          batchProgress.setTotal(event.totalBatches);
-        }
-        if (event.phase === "batch") {
-          batchProgress.update(event.completedBatches || 0, `${event.current}-${event.batchEnd}`);
-        }
-      },
-    });
+    if (remainingCount) {
+      batchProgress = createProgress("Exporting records", batchCount);
+      const exportResult = await exportTxtBatchesViaWosJs(page, {
+        uuid: info.uuid,
+        markFrom: downloadStart,
+        markTo: range.endIndex,
+        batchSize,
+        sortBy: args.sortBy,
+        onProgress(event) {
+          appendProgress(paths, { phase: "wosjs-export-progress", ...event });
+          if (event.phase === "start" && event.totalBatches) {
+            batchProgress.setTotal(event.totalBatches);
+          }
+          if (event.phase === "batch") {
+            batchProgress.update(event.completedBatches || 0, `${event.current}-${event.batchEnd}`);
+          }
+        },
+      });
 
-    for (const batch of exportResult.batches) {
-      const rawPath = rawBatchPath(paths, info.uuid, batch.markFrom, batch.markTo);
-      let text = batch.text;
-      if (args.reuseRaw && fs.existsSync(rawPath)) {
-        text = fs.readFileSync(rawPath, "utf8");
-      } else {
-        writeFileAtomic(rawPath, text);
+      for (const batch of exportResult.batches) {
+        const rawPath = rawBatchPath(paths, info.uuid, batch.markFrom, batch.markTo);
+        writeFileAtomic(rawPath, batch.text);
+        const ids = parseExportText(batch.text, batch.markFrom, batch.markTo);
+        rows.push(...ids);
+        appendProgress(paths, { phase: "batch", markFrom: batch.markFrom, markTo: batch.markTo, parsed: ids.length, rawPath });
+        if (!isInteractive()) console.error(`export ${batch.markFrom}-${batch.markTo}: parsed ${ids.length} WOS IDs`);
       }
-      const ids = parseExportText(text, batch.markFrom, batch.markTo);
-      rows.push(...ids);
-      appendProgress(paths, { phase: "batch", markFrom: batch.markFrom, markTo: batch.markTo, parsed: ids.length, rawPath });
-      if (!isInteractive()) console.error(`export ${batch.markFrom}-${batch.markTo}: parsed ${ids.length} WOS IDs`);
+      batchProgress.stop("Export complete");
+      batchProgress = null;
+    } else if (!isInteractive()) {
+      console.error("WOS records already covered by raw batches; rebuilding WOS ID CSV.");
     }
-    batchProgress.stop("Export complete");
+    info = {
+      ...info,
+      availableCount: range.availableCount,
+      expectedCount: range.selectedCount,
+      selectedCount: range.selectedCount,
+      fromIndex: range.startIndex,
+      limit: args.limit || 0,
+      rangeStart: range.startIndex,
+      rangeEnd: range.endIndex,
+      resumedCount,
+    };
   } finally {
     authSpinner.stop();
     summarySpinner?.stop();
@@ -3644,32 +3769,50 @@ async function run(args) {
   let info = {
     uuid: args.uuid,
     expectedCount: priorSummary.expectedCount || 0,
+    availableCount: priorSummary.availableCount || priorSummary.expectedCount || 0,
+    selectedCount: priorSummary.selectedCount || priorSummary.expectedCount || 0,
+    fromIndex: priorSummary.fromIndex || args.fromIndex || 1,
+    limit: priorSummary.limit || args.limit || 0,
+    rangeStart: priorSummary.rangeStart || priorSummary.fromIndex || args.fromIndex || 1,
+    rangeEnd: priorSummary.rangeEnd || 0,
     href: priorSummary.summaryHref || args.url,
     rowText: priorSummary.rowText || "",
   };
   const rawUuid = args.uuid || priorSummary.uuid || "";
   if (args.reuseRaw && rawUuid && !info.expectedCount) {
-    const coverage = rawBatchCoverage(paths, rawUuid);
-    if (coverage.files.length && coverage.firstStart === 1) info.expectedCount = coverage.lastEnd;
+    const coverage = rawBatchCoverageFromStart(paths, rawUuid, info.rangeStart || 1);
+    if (coverage.files.length) {
+      info.expectedCount = coverage.lastEnd - (info.rangeStart || 1) + 1;
+      info.selectedCount = info.expectedCount;
+      info.rangeEnd = coverage.lastEnd;
+    }
+  }
+  if (!info.rangeEnd && info.expectedCount) {
+    info.rangeEnd = (info.rangeStart || 1) + info.expectedCount - 1;
   }
   const canRepairFromRaw = !args.force &&
     rawUuid &&
     !finalWosIdsCsvExists(paths, rawUuid) &&
-    canRepairWosIdsFromRaw(paths, rawUuid, info.expectedCount);
+    canRepairWosIdsFromRaw(paths, rawUuid, info.expectedCount, info.rangeStart, info.rangeEnd);
 
   if ((args.reuseRaw || canRepairFromRaw) && rawUuid && rawBatchFiles(paths, rawUuid).length) {
     info.uuid = rawUuid;
     if (!info.expectedCount) {
       throw new Error("Cannot reuse raw batches without a known WOS record count. Re-run without --reuse-raw to refresh from WOS.");
     }
-    const coverage = rawBatchCoverage(paths, rawUuid);
+    const coverage = rawBatchCoverageFromStart(paths, rawUuid, info.rangeStart || 1, info.rangeEnd || 0);
     if (!coverage.files.length) throw new Error(`No raw batches found for UUID: ${rawUuid}`);
-    if (coverage.firstStart !== 1 || coverage.lastEnd < info.expectedCount) {
+    const expectedEnd = info.rangeEnd || (info.rangeStart || 1) + info.expectedCount - 1;
+    if (coverage.lastEnd < expectedEnd) {
       throw new Error(
-        `Incomplete raw batches for UUID ${rawUuid}: have ${coverage.firstStart || 0}-${coverage.lastEnd || 0}, expected 1-${info.expectedCount}. Re-run without --reuse-raw to refresh from WOS.`
+        `Incomplete raw batches for UUID ${rawUuid}: have ${coverage.firstStart || 0}-${coverage.lastEnd || 0}, expected ${info.rangeStart || 1}-${expectedEnd}. Re-run without --reuse-raw to resume from WOS.`
       );
     }
-    rows = parseExistingRawBatches(paths, rawUuid);
+    rows = parseExistingRawBatches(paths, rawUuid, {
+      files: coverage.files,
+      startIndex: info.rangeStart || 1,
+      endIndex: expectedEnd,
+    });
     appendProgress(paths, {
       phase: canRepairFromRaw && !args.reuseRaw ? "repair-export-from-raw" : "reuse-raw",
       uuid: rawUuid,
@@ -3693,6 +3836,13 @@ async function run(args) {
     uuid: info.uuid || args.uuid,
     sortBy: args.sortBy,
     expectedCount: info.expectedCount || 0,
+    availableCount: info.availableCount || info.expectedCount || 0,
+    selectedCount: info.selectedCount || info.expectedCount || 0,
+    fromIndex: info.fromIndex || args.fromIndex || 1,
+    limit: info.limit || args.limit || 0,
+    rangeStart: info.rangeStart || args.fromIndex || 1,
+    rangeEnd: info.rangeEnd || info.expectedCount || 0,
+    resumedCount: info.resumedCount || 0,
     rowText: info.rowText || "",
     summaryHref: info.href || args.url,
     runDir: paths.runDir,
@@ -4488,6 +4638,7 @@ module.exports = {
   parseWosCount,
   downloadBatchCount,
   boundedRecordCount,
+  selectedRecordRange,
   reportDownloadPlan,
   isUserCancelledError,
   isUserQuitError,
@@ -4521,6 +4672,7 @@ module.exports = {
   withRawSource,
   cleanRunLayout,
   rawBatchFiles,
+  rawBatchCoverageFromStart,
   bibBatchFiles,
   parseExistingRawBatches,
   defaultWosBlacklistDbPath,

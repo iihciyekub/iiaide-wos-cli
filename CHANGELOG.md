@@ -3,6 +3,14 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.68 - 2026-06-12
+
+- Let full-record TXT downloads honor `--from-index` and `--limit` so UUID
+  tasks can export an explicit WOS record range.
+- Resume full-record TXT downloads from existing contiguous raw batches for the
+  requested range, so a saved `<uuid>_400_600.txt` continues from record `601`
+  instead of re-downloading the covered records.
+
 ## 0.4.67 - 2026-06-12
 
 - Merge the interactive Settings SID paste actions into `5.3 Add SIDs`, which
