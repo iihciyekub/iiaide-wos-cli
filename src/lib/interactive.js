@@ -336,6 +336,10 @@ function currentTaskSelection(workspace) {
   return { taskId, task: taskId ? findTask(workspace, taskId) : null };
 }
 
+function canResumeWosIdsToSqlTask(task = {}) {
+  return Number(task?.uniqueCount || 0) > 0;
+}
+
 function resolveTaskSelection(workspace, value, fallback = "", newTaskId = "") {
   const tasks = Array.isArray(workspace?.tasks) ? workspace.tasks : [];
   const raw = String(value || "").trim();
@@ -889,6 +893,15 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     }
 
     if (choice === "2") {
+      if (sid && canResumeWosIdsToSqlTask(task)) {
+        stdout.write(`${color("32", "SID ready:", stdout)} resuming current WOS IDs to SQL task.\n\n`);
+        const result = appendWosDataDbArg(
+          ["parse", "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot],
+          activeWorkspace
+        );
+        result.push("--sid", sid);
+        return result;
+      }
       const input = await askParameterOrCancel(
         rl,
         "CSV path, WOS URL, or UUID",
@@ -957,6 +970,7 @@ module.exports = {
   formatBytes,
   formatRuntime,
   currentTaskSelection,
+  canResumeWosIdsToSqlTask,
   isWosSourceLike,
   classifyWosIdsToSqlInput,
   askTaskSelection,

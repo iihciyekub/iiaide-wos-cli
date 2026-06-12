@@ -3,6 +3,13 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.80 - 2026-06-13
+
+- In the interactive `WOS IDs to SQL` flow, if a missing/invalid SID is repaired
+  by waiting for the saved SID pool and the current task already has WOS IDs,
+  resume `parse --task` immediately instead of prompting again for a CSV, WOS
+  URL, or UUID.
+
 ## 0.4.79 - 2026-06-13
 
 - Fix SID-pool refill notices by adding the missing runtime formatter used when

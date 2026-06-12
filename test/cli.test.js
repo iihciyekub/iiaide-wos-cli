@@ -10,7 +10,7 @@ const Database = require("better-sqlite3");
 const cli = require("../src/iiaide-wos");
 const playwrightInstall = require("../src/lib/playwright-install");
 const { readJson, writeJson } = require("../src/lib/io");
-const { askSidFromBrowserOrManual, classifyWosIdsToSqlInput, currentTaskSelection, formatBytes, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
+const { askSidFromBrowserOrManual, canResumeWosIdsToSqlTask, classifyWosIdsToSqlInput, currentTaskSelection, formatBytes, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
 const { createProgress, createSpinner } = require("../src/lib/terminal");
 const { normalizeBatchResult } = require("../src/lib/wos-browser-export");
 const { wosIdsEquivalent } = require("../src/lib/wos-ids");
@@ -842,6 +842,20 @@ test("interactive downloads use the current task selection", () => {
   const selection = currentTaskSelection(workspace);
   assert.equal(selection.taskId, "selected");
   assert.equal(selection.task.taskId, "selected");
+});
+
+test("interactive WOS IDs to SQL can auto-resume after SID refill", () => {
+  assert.equal(canResumeWosIdsToSqlTask({ uniqueCount: 113386 }), true);
+  assert.equal(canResumeWosIdsToSqlTask({ uniqueCount: 0 }), false);
+  assert.equal(canResumeWosIdsToSqlTask({}), false);
+
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
+  const branch = source.match(/if \(choice === "2"\) \{[\s\S]*?const input = await askParameterOrCancel/);
+  assert.ok(branch, "WOS IDs to SQL branch should be present");
+  assert.match(branch[0], /sid && canResumeWosIdsToSqlTask\(task\)/);
+  assert.match(branch[0], /SID ready:/);
+  assert.match(branch[0], /\["parse", "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot\]/);
+  assert.match(branch[0], /result\.push\("--sid", sid\)/);
 });
 
 test("interactive header shows WOS browser mode and profile name", () => {

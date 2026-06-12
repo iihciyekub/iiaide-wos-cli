@@ -559,6 +559,11 @@ account credentials into task artifacts, SQLite, or `~/.iiaide-wos/config.json`.
 Routine auth output masks SID values; use `sid-pool` to inspect masked pool
 state.
 
+In the interactive menu, item `2 WOS IDs to SQL` normally asks for a CSV, WOS
+URL, or UUID. If that flow first has to wait for the saved SID pool and the
+current task already has WOS IDs, the menu resumes `parse --task` automatically
+as soon as a SID is saved, instead of returning to the source prompt.
+
 `--add-sids` accepts spaces, newlines, or commas and de-duplicates values.
 `--add-sid` remains available as a single-value compatibility alias. In the
 interactive Settings menu, use `5.3 Add SIDs` for one value or a multi-line

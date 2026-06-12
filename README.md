@@ -253,6 +253,9 @@ background headless Playwright mode. Use `iiaide-wos settings
 browser mode in `tasks/config.json`; use `off` to return to background mode.
 Use `iiaide-wos settings --parse-concurrency 3` or menu item `5.2 Parse tabs`
 to save the default reusable WOS tab count for parse workflows.
+When menu item `2 WOS IDs to SQL` has to wait for the SID pool and the current
+task already has WOS IDs, the menu resumes `parse --task` automatically after a
+SID is saved instead of asking again for a CSV, WOS URL, or UUID.
 The `--headed` and `--headless` flags remain one-command overrides. If a saved
 SID is clearly invalid, the CLI removes that SID from the pool and tries the
 next saved SID. It opens a visible WOS browser window for login only after the
