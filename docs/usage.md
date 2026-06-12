@@ -386,8 +386,10 @@ actions:
 5 Settings
   5.1 Playwright visible
   5.2 Parse tabs
-  5.3 Add SID
-  5.4 Batch add SIDs
+  5.3 Add SIDs
+6 Auth producer
+  6.1 MUST login
+  6.2 MUST monitor
 c Check SID
 u Update
 B Back
@@ -483,7 +485,6 @@ only a short safe status message.
 Add one or many saved SID values without validating them immediately:
 
 ```bash
-iiaide-wos settings --add-sid "SID_ONE"
 iiaide-wos settings --add-sids "SID_ONE SID_TWO
 SID_THREE"
 ```
@@ -526,11 +527,14 @@ account credentials into task artifacts, SQLite, or `~/.iiaide-wos/config.json`.
 Routine auth output masks SID values; use `sid-pool` to inspect masked pool
 state.
 
-`--add-sids` accepts spaces, newlines, or commas and de-duplicates values. In the
-interactive Settings menu, use `5.3 Add SID` for one value or `5.4 Batch add
-SIDs` for a multi-line paste. The SID pool is global per user, so values added
-from any working directory are available to every CLI run. The dashboard shows
-the masked current SID and the active pool position/count.
+`--add-sids` accepts spaces, newlines, or commas and de-duplicates values.
+`--add-sid` remains available as a single-value compatibility alias. In the
+interactive Settings menu, use `5.3 Add SIDs` for one value or a multi-line
+paste. Use `6.1 MUST login` under `6 Auth producer` to run one short-lived MUST
+SSO login, or `6.2 MUST monitor` to keep the current CLI process running until
+you stop it with Ctrl-C. The SID pool is global per user, so values added from
+any working directory are available to every CLI run. The dashboard shows the
+masked current SID and the active pool position/count.
 `sid-pool` prints the same saved pool as JSON, with `sidPoolCount`,
 `sidPoolPosition`, a masked `activeSid`, and masked `sids` values.
 

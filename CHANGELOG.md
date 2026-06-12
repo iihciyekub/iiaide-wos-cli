@@ -3,6 +3,14 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.67 - 2026-06-12
+
+- Merge the interactive Settings SID paste actions into `5.3 Add SIDs`, which
+  accepts either one SID or a multi-line batch.
+- Add a separate interactive `6 Auth producer` group with `6.1 MUST login` and
+  `6.2 MUST monitor` so the menu can start the integrated MUST SID producer
+  without saving account credentials.
+
 ## 0.4.65 - 2026-06-12
 
 - Refresh authentication docs and SID setup messages so they consistently

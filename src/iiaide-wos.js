@@ -209,7 +209,7 @@ Export options:
   --playwright-visible <on|off>
                           Save whether WOS Playwright work opens a visible browser
   --parse-concurrency <n> Save default parse reusable WOS tabs. 1-10
-  --add-sid <SID>         Add one SID to the saved SID pool
+  --add-sid <SID>         Add one SID to the saved SID pool; compatibility alias
   --add-sids <text>       Add multiple SIDs separated by spaces, newlines, or commas
   --version               Show CLI version
   --help                  Show this help

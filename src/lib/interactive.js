@@ -520,8 +520,10 @@ async function askWorkflow(rl) {
   workflowGroup("5", "Settings");
   workflowItem("5.1", "Playwright visible", "Choose whether WOS browser work opens a visible window");
   workflowItem("5.2", "Parse tabs", "Set default reusable WOS tabs for WOSID parsing");
-  workflowItem("5.3", "Add SID", "Add one SID to the saved SID pool");
-  workflowItem("5.4", "Batch add SIDs", "Paste multiple SIDs separated by spaces or new lines");
+  workflowItem("5.3", "Add SIDs", "Paste one or more SIDs into the saved SID pool");
+  workflowGroup("6", "Auth producer");
+  workflowItem("6.1", "MUST login", "Run one MUST SSO login and save the produced SID");
+  workflowItem("6.2", "MUST monitor", "Keep this CLI running to refill the SID pool");
   shortcutRow([["c", "Check SID"], ["u", "Update"], ["B", "Back"], ["q", "Exit"]]);
   stdout.write("\n");
 
@@ -531,8 +533,8 @@ async function askWorkflow(rl) {
     if (isQuitInput(choice)) return CONTROL_QUIT;
     if (choice === "c") return "c";
     if (choice === "u") return "u";
-    if (["1.1", "1.2", "2", "2.1", "3.1", "3.2", "3.3", "4.1", "4.2", "4.3", "5.1", "5.2", "5.3", "5.4"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2, 2.1, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.1, 5.2, 5.3, 5.4, c to check SID, u to update, B to go back, or q to quit\n`);
+    if (["1.1", "1.2", "2", "2.1", "3.1", "3.2", "3.3", "4.1", "4.2", "4.3", "5.1", "5.2", "5.3", "6.1", "6.2"].includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2, 2.1, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.1, 5.2, 5.3, 6.1, 6.2, c to check SID, u to update, B to go back, or q to quit\n`);
   }
 }
 
@@ -828,32 +830,25 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     }
 
     if (choice === "5.3") {
-      const sid = await askParameterOrCancel(
-        rl,
-        "WOS SID",
-        "enter one WOS SID"
-      );
-      if (isBackResult(sid)) return { refresh: true };
-      if (isQuitResult(sid)) return null;
-      if (typeof helpers.addSids === "function") {
-        activeWorkspace = await helpers.addSids(sid);
-        stdout.write(`${color("32", "SID pool:", stdout)} added. Refreshing workspace panel.\n\n`);
-        return { refresh: true };
-      }
-      return { refresh: true };
-    }
-
-    if (choice === "5.4") {
       const sids = await promptBatchSids();
       if (isBackResult(sids)) return { refresh: true };
       if (isQuitResult(sids)) return null;
       if (!String(sids || "").trim()) return { refresh: true };
       if (typeof helpers.addSids === "function") {
         activeWorkspace = await helpers.addSids(sids);
-        stdout.write(`${color("32", "SID pool:", stdout)} batch added. Refreshing workspace panel.\n\n`);
+        stdout.write(`${color("32", "SID pool:", stdout)} added. Refreshing workspace panel.\n\n`);
         return { refresh: true };
       }
       return { refresh: true };
+    }
+
+    if (choice === "6.1") {
+      return ["auth", "login", "--provider", "must", "--tasks-root", activeWorkspace.tasksRoot];
+    }
+
+    if (choice === "6.2") {
+      stdout.write(`${color("33", "MUST auth monitor:", stdout)} this command keeps running until you stop it with Ctrl-C.\n\n`);
+      return ["auth", "monitor", "--provider", "must", "--tasks-root", activeWorkspace.tasksRoot];
     }
 
     let selection = currentTaskSelection(activeWorkspace);

@@ -25,6 +25,10 @@ at `min-sids + 1`. `--threshold` remains a compatibility alias.
 One account is enough to run the producer. Repeating account/password pairs is
 only for rotation; each refresh still adds one SID at a time.
 
+The interactive menu exposes the same commands in the separate `6 Auth producer`
+group as `6.1 MUST login` and `6.2 MUST monitor`. These shortcuts still use the
+normal credential input rules and do not save passwords.
+
 ## Boundaries
 
 - The producer uses its own short-lived Playwright browser context.

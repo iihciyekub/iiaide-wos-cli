@@ -741,8 +741,10 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(workflowMatch[0], /Settings/);
   assert.match(workflowMatch[0], /5\.1", "Playwright visible/);
   assert.match(workflowMatch[0], /5\.2", "Parse tabs/);
-  assert.match(workflowMatch[0], /5\.3", "Add SID/);
-  assert.match(workflowMatch[0], /5\.4", "Batch add SIDs/);
+  assert.match(workflowMatch[0], /5\.3", "Add SIDs/);
+  assert.match(workflowMatch[0], /Auth producer/);
+  assert.match(workflowMatch[0], /6\.1", "MUST login/);
+  assert.match(workflowMatch[0], /6\.2", "MUST monitor/);
   assert.match(workflowMatch[0], /shortcutRow/);
   assert.match(workflowMatch[0], /\["c", "Check SID"\]/);
   assert.match(workflowMatch[0], /\["u", "Update"\]/);
@@ -751,7 +753,7 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.doesNotMatch(workflowMatch[0], /Probe the saved SID/);
   assert.doesNotMatch(workflowMatch[0], /Install the latest release/);
   assert.doesNotMatch(workflowMatch[0], /Return to the workspace menu/);
-  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 2, 2\.1, 3\.1, 3\.2, 3\.3, 4\.1, 4\.2, 4\.3, 5\.1, 5\.2, 5\.3, 5\.4, c to check SID, u to update, B to go back/);
+  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 2, 2\.1, 3\.1, 3\.2, 3\.3, 4\.1, 4\.2, 4\.3, 5\.1, 5\.2, 5\.3, 6\.1, 6\.2, c to check SID, u to update, B to go back/);
   assert.doesNotMatch(workflowMatch[0], /Download WOS IDs/);
   assert.match(argsMatch[0], /choice === "c"/);
   assert.match(argsMatch[0], /return \["check", "--tasks-root", activeWorkspace\.tasksRoot\]/);
@@ -775,8 +777,11 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(argsMatch[0], /choice === "5\.2"/);
   assert.match(argsMatch[0], /helpers\.setParseConcurrency/);
   assert.match(argsMatch[0], /choice === "5\.3"/);
-  assert.match(argsMatch[0], /choice === "5\.4"/);
+  assert.match(argsMatch[0], /choice === "6\.1"/);
+  assert.match(argsMatch[0], /choice === "6\.2"/);
   assert.match(argsMatch[0], /helpers\.addSids/);
+  assert.match(argsMatch[0], /\["auth", "login", "--provider", "must", "--tasks-root", activeWorkspace\.tasksRoot\]/);
+  assert.match(argsMatch[0], /\["auth", "monitor", "--provider", "must", "--tasks-root", activeWorkspace\.tasksRoot\]/);
   assert.doesNotMatch(argsMatch[0], /SQL SELECT query/);
   assert.match(argsMatch[0], /Force overwrite existing SQL rows/);
   assert.match(argsMatch[0], /choice === "2\.1"/);

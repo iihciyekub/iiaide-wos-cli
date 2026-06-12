@@ -67,7 +67,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.65
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.67
 iiaide-wos install-browser
 iiaide-wos
 # or
@@ -205,10 +205,11 @@ iiaide-wos sid-pool
 Add saved SID pool values without validating them immediately:
 
 ```bash
-iiaide-wos settings --add-sid "SID_ONE"
 iiaide-wos settings --add-sids "SID_ONE SID_TWO
 SID_THREE"
 ```
+
+`--add-sid` remains available as a single-value compatibility alias.
 
 If you use a MUST institutional account, `auth login` can produce one fresh SID
 and write it to the same global pool:
@@ -273,12 +274,13 @@ Playwright validation before downloading. In menu mode, SID setup offers
 browser detection add the SID to the saved pool; SID pool waiting keeps checking
 until another process, such as `auth monitor`, adds one. The CLI then redraws
 the workspace dashboard so the refreshed authentication state is visible before
-the next workflow prompt. The Settings menu also provides `5.3 Add SID` for one
-value and `5.4 Batch add SIDs` for multiple values separated by spaces, newlines,
-or commas. Settings, SQLite, task management, and update workflows can be used
-while `Auth no` is shown. The dashboard shows a masked current SID, the active
-pool position/count, and `SID Producer` when an auth monitor heartbeat is
-available.
+the next workflow prompt. The Settings menu provides `5.3 Add SIDs` for one or
+more pasted values. The separate `6 Auth producer` group provides `6.1 MUST
+login` for one fresh MUST-produced SID and `6.2 MUST monitor` to keep the current
+CLI process refilling the pool. Settings, SQLite, task management, auth
+producer, and update workflows can be used while `Auth no` is shown. The
+dashboard shows a masked current SID, the active pool position/count, and `SID
+Producer` when an auth monitor heartbeat is available.
 `iiaide-wos check` first runs the lightweight SID probe; when the SID is
 missing, invalid, or cannot be confirmed, it tries the saved SID pool and, in an
 interactive terminal, uses the same SID setup choices. It prints only a short
@@ -590,8 +592,10 @@ The interactive workflow menu is grouped by command family:
 5 Settings
   5.1 Playwright visible
   5.2 Parse tabs
-  5.3 Add SID
-  5.4 Batch add SIDs
+  5.3 Add SIDs
+6 Auth producer
+  6.1 MUST login
+  6.2 MUST monitor
 c Check SID
 u Update
 B Back
