@@ -3,6 +3,31 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.59 - 2026-06-12
+
+- Change parse SID recovery so a query-limit style WOS session failure no longer
+  forces an immediate visible-login restart when the saved SID pool is emptied.
+  The current CLI now checks the global SID pool every 10 seconds and resumes
+  parsing automatically as soon as a new saved SID is added.
+
+## 0.4.58 - 2026-06-11
+
+- Fix browser-side full-record parsing so `Keywords Plus` links are captured
+  when WOS uses either `keywordPlus` or `keyWordsPlus`-style DOM ids instead of
+  dropping those values from the structured parsed record.
+
+## 0.4.57 - 2026-06-11
+
+- Add `iiaide-wos install-browser` so installed releases can download the exact
+  Chromium revision required by the bundled Playwright version without relying
+  on whatever `npx playwright` resolves in the current workspace.
+- Catch missing Playwright-browser launch failures before SID or WOS work
+  starts, offer the bundled browser install in interactive terminals, and print
+  the same repair command in non-interactive runs instead of the raw upstream
+  stack trace.
+- Update install and update docs to use `iiaide-wos install-browser`, including
+  the Linux `--with-deps` variant.
+
 ## 0.4.56 - 2026-06-11
 
 - Raise the default long-running parse browser restart interval from 100 to 600

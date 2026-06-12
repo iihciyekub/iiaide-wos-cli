@@ -6,6 +6,12 @@ const { spawn } = require("node:child_process");
 const { chromium } = require("playwright");
 const { readJson, writeFileAtomic, writeJson } = require("./lib/io");
 const { askSidFromBrowserOrManual, interactiveArgs, isBackResult, isQuitResult, isUserAbortError, promptConfirmationText, promptSid } = require("./lib/interactive");
+const {
+  PLAYWRIGHT_VERSION,
+  bundledPlaywrightInstallCommand,
+  installBundledPlaywrightBrowser,
+  isMissingPlaywrightBrowserError,
+} = require("./lib/playwright-install");
 const { color, createProgress, createSpinner, isInteractive } = require("./lib/terminal");
 const { updateCli } = require("./lib/update");
 const { exportBibBatchesViaWosJs, exportTxtBatchesViaWosJs } = require("./lib/wos-browser-export");
@@ -36,6 +42,7 @@ const DEFAULT_BROWSER_RESTART_EVERY = 600;
 const DEFAULT_PARSE_MEMORY_CHECK_EVERY = 200;
 const DEFAULT_PARSE_MAX_RSS_MB = 4096;
 const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 20;
+const SID_POOL_WAIT_INTERVAL_MS = 10000;
 const DEFAULT_PARSE_CONNECTIVITY_QUERY = "PY=2000";
 const DEFAULT_WOS_PROTOCOL = "https";
 const DEFAULT_WOS_DOMAIN = "www.webofscience.com";
@@ -95,6 +102,16 @@ class CliRestartRequestedError extends Error {
   }
 }
 
+class CliMessageError extends Error {
+  constructor(message, options = {}) {
+    super(message);
+    this.name = "CliMessageError";
+    this.code = options.code || "CLI_MESSAGE";
+    this.exitCode = Number.isInteger(options.exitCode) ? options.exitCode : 1;
+    this.showStack = false;
+  }
+}
+
 function isUserCancelledError(error) {
   return error?.code === "USER_CANCELLED" || error?.name === "UserCancelledError";
 }
@@ -107,6 +124,10 @@ function isCliRestartRequestedError(error) {
   return error?.code === "CLI_RESTART_REQUESTED" || error?.name === "CliRestartRequestedError";
 }
 
+function isCliMessageError(error) {
+  return error?.code === "CLI_MESSAGE" || error?.name === "CliMessageError" || error?.showStack === false;
+}
+
 function usage() {
   return `
 Usage:
@@ -117,6 +138,7 @@ Usage:
   iiaide-wos workspace [--tasks-root <dir>]
   iiaide-wos settings [--playwright-visible <on|off>] [--parse-concurrency <n>] [--add-sid <SID>] [--add-sids "<SID...>"] [--tasks-root <dir>]
   iiaide-wos update [--check]
+  iiaide-wos install-browser [--with-deps]
   iiaide-wos run [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
   iiaide-wos bib [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
   iiaide-wos parse-pipeline [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
@@ -172,6 +194,7 @@ Export options:
   --version               Show CLI version
   --help                  Show this help
   --check                 Check for an update without installing it
+  --with-deps             Install Playwright Linux system packages with Chromium
 
 Range options:
   --from-index <n>        Start from 1-based WOS record/WOSID index
@@ -254,6 +277,7 @@ function parseArgs(argv) {
     fromIndex: 1,
     cooldownMs: 250,
     checkOnly: false,
+    withDeps: false,
     help: false,
     version: false,
   };
@@ -340,6 +364,7 @@ function parseArgs(argv) {
     else if (arg === "--browser-restart-every" || arg === "--parse-restart-every" || arg === "--restart-every") args.browserRestartEvery = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--max-rss-mb" || arg === "--memory-restart-mb") args.maxRssMb = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--check") args.checkOnly = true;
+    else if (arg === "--with-deps") args.withDeps = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -848,6 +873,20 @@ function saveSidConfig(args, observedSid) {
   }
 }
 
+function loadSavedSidFromConfig(args) {
+  const sidConfig = readSidConfig(args);
+  rememberDeadConfigSids(args, sidConfig);
+  const pool = sidPoolFromConfig(sidConfig);
+  args.sidPoolCount = pool.sids.length;
+  args.sidPoolIndex = pool.activeIndex;
+  if (pool.activeSid) {
+    args.sid = pool.activeSid;
+    args.sidSource = "config";
+    return args.sid;
+  }
+  return "";
+}
+
 function setPlaywrightVisibleSetting(args, visible) {
   const config = readConfig(args.tasksRoot);
   const playwrightVisible = Boolean(visible);
@@ -907,15 +946,7 @@ function loadSavedSid(args) {
     args.wosDomain = normalizeWosDomain(config.wosDomain);
     args.baseUrl = wosOriginFromDomain(args.wosDomain);
   }
-  const sidConfig = readSidConfig(args);
-  rememberDeadConfigSids(args, sidConfig);
-  const pool = sidPoolFromConfig(sidConfig);
-  args.sidPoolCount = pool.sids.length;
-  args.sidPoolIndex = pool.activeIndex;
-  if (pool.activeSid) {
-    args.sid = pool.activeSid;
-    args.sidSource = "config";
-  }
+  loadSavedSidFromConfig(args);
   return args.sid;
 }
 
@@ -1255,6 +1286,58 @@ function wosBrowserLaunchOptions(args, visible = false) {
   };
 }
 
+function missingPlaywrightBrowserMessage(args, command = bundledPlaywrightInstallCommand()) {
+  const hint = args?.withDeps
+    ? ` If Linux is still missing shared libraries, rerun with ${bundledPlaywrightInstallCommand({ withDeps: true })}.`
+    : ` On Linux, if shared libraries are also missing, rerun with ${bundledPlaywrightInstallCommand({ withDeps: true })}.`;
+  return [
+    `Playwright Chromium for iiaide-wos is not installed for bundled Playwright ${PLAYWRIGHT_VERSION}.`,
+    `Run ${command} and then retry your WOS command.`,
+    hint.trim(),
+  ].join(" ");
+}
+
+async function ensurePlaywrightBrowserInstalledForLaunch(args, error, options = {}) {
+  if (!isMissingPlaywrightBrowserError(error)) return false;
+  const prompt = options.prompt || promptConfirmationText;
+  const report = options.report || console.error;
+  const install = options.install || installBundledPlaywrightBrowser;
+  const canPrompt = options.canPrompt || (() => process.stdin.isTTY && isInteractive(process.stdout));
+  const installCommand = bundledPlaywrightInstallCommand();
+
+  if (!canPrompt()) {
+    throw new CliMessageError(missingPlaywrightBrowserMessage(args, installCommand), { code: "PLAYWRIGHT_BROWSER_MISSING" });
+  }
+
+  const answer = await prompt(`Playwright Chromium is missing. Type install to run ${installCommand}, B back, or q quit`);
+  if (isQuitResult(answer)) throw new UserQuitError("Playwright browser install quit by user");
+  if (isBackResult(answer)) throw new UserCancelledError("Playwright browser install cancelled");
+  if (!/^install$/i.test(String(answer || "").trim())) {
+    throw new CliMessageError(missingPlaywrightBrowserMessage(args, installCommand), { code: "PLAYWRIGHT_BROWSER_MISSING" });
+  }
+
+  report(`Installing Playwright Chromium ${PLAYWRIGHT_VERSION} for iiaide-wos...`);
+  try {
+    install({ withDeps: Boolean(args?.withDeps) });
+  } catch (installError) {
+    const reason = installError?.message || String(installError);
+    throw new CliMessageError(`${missingPlaywrightBrowserMessage(args, installCommand)} Install failed: ${reason}`, {
+      code: "PLAYWRIGHT_BROWSER_INSTALL_FAILED",
+    });
+  }
+  report("Playwright Chromium install completed. Reopening the WOS browser...");
+  return true;
+}
+
+function installPlaywrightBrowserCommand(args, options = {}) {
+  const install = options.install || installBundledPlaywrightBrowser;
+  const report = options.report || console.error;
+  report(`Installing Playwright Chromium ${PLAYWRIGHT_VERSION} for iiaide-wos...`);
+  const result = install({ withDeps: Boolean(args.withDeps) });
+  report("Playwright Chromium install completed.");
+  return result;
+}
+
 async function hideWosWindow(page) {
   await page.evaluate((position) => {
     const [x, y] = position.split(",").map((item) => Number(item));
@@ -1264,7 +1347,14 @@ async function hideWosWindow(page) {
 
 async function launchWosPersistentContext(args, visible = false) {
   fs.mkdirSync(args.tasksRoot, { recursive: true });
-  const context = await chromium.launchPersistentContext(wosUserDataDir(args), wosBrowserLaunchOptions(args, visible));
+  let context = null;
+  try {
+    context = await chromium.launchPersistentContext(wosUserDataDir(args), wosBrowserLaunchOptions(args, visible));
+  } catch (error) {
+    const repaired = await ensurePlaywrightBrowserInstalledForLaunch(args, error);
+    if (!repaired) throw error;
+    context = await chromium.launchPersistentContext(wosUserDataDir(args), wosBrowserLaunchOptions(args, visible));
+  }
   context.setDefaultTimeout(args.timeoutMs);
   await injectWosJs(context, args);
   return context;
@@ -2022,6 +2112,43 @@ function runWosDataImport(args) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForSavedSidPool(args, options = {}) {
+  const intervalMs = Math.max(1, Number(options.intervalMs) || SID_POOL_WAIT_INTERVAL_MS);
+  const report = options.report || console.error;
+  const onPoll = typeof options.onPoll === "function" ? options.onPoll : null;
+  let attempts = 0;
+  let waitedMs = 0;
+  args.sid = "";
+  args.sidSource = "";
+
+  for (;;) {
+    const sid = loadSavedSidFromConfig(args);
+    if (sid) {
+      return {
+        sid,
+        sidSource: args.sidSource,
+        sidPoolCount: args.sidPoolCount,
+        sidPoolIndex: args.sidPoolIndex,
+        attempts,
+        waitedMs,
+      };
+    }
+    attempts += 1;
+    if (onPoll) {
+      await onPoll({
+        attempts,
+        waitedMs,
+        intervalMs,
+        sidPoolCount: args.sidPoolCount,
+        sidPoolIndex: args.sidPoolIndex,
+      });
+    }
+    report(`Saved SID pool is empty. Waiting ${Math.ceil(intervalMs / 1000)}s before checking again.`);
+    await sleep(intervalMs);
+    waitedMs += intervalMs;
+  }
 }
 
 async function runPool(items, concurrency, worker) {
@@ -3013,7 +3140,7 @@ async function runParse(args) {
         if (isSidInvalidRecoveryErrorCode(recoveryQuery.error_code)) {
           writeRuntimeNotice("WOS SID invalid", [
             `error_code: ${recoveryQuery.error_code}`,
-            "Closing Playwright, removing this SID, and restarting with the next saved SID.",
+            "Closing Playwright, removing this SID, and continuing with the next available saved SID.",
           ]);
           await forceCloseWosSession(session);
           session = null;
@@ -3021,8 +3148,42 @@ async function runParse(args) {
           if (discarded && !discarded.sidPoolCount) {
             writeRuntimeNotice("WOS SID pool empty", [
               "No saved SID remains after removing the invalid SID.",
-              "A visible WOS login window will be used on restart.",
+              `Waiting for a new saved SID and checking again every ${Math.ceil(SID_POOL_WAIT_INTERVAL_MS / 1000)} seconds.`,
             ]);
+            appendProgress(paths, {
+              phase: "parse-sid-pool-wait-start",
+              errorCode: recoveryQuery.error_code,
+              intervalMs: SID_POOL_WAIT_INTERVAL_MS,
+            });
+            const resumedSid = await waitForSavedSidPool(args, {
+              intervalMs: SID_POOL_WAIT_INTERVAL_MS,
+              report: console.error,
+              onPoll: ({ attempts, waitedMs, intervalMs, sidPoolCount }) => {
+                appendProgress(paths, {
+                  phase: "parse-sid-pool-wait",
+                  attempts,
+                  waitedMs,
+                  intervalMs,
+                  sidPoolCount,
+                });
+              },
+            });
+            writeRuntimeNotice("WOS SID pool refilled", [
+              `Detected a new saved SID after ${formatRuntime(resumedSid.waitedMs)}.`,
+              "Reopening WOS and continuing parse.",
+              sidBadge(args) ? `Current ${sidBadge(args)}` : "",
+            ]);
+            appendProgress(paths, {
+              phase: "parse-sid-pool-wait-completed",
+              waitedMs: resumedSid.waitedMs,
+              attempts: resumedSid.attempts,
+              sidPoolCount: resumedSid.sidPoolCount,
+              sidSource: resumedSid.sidSource,
+            });
+            session = await startParseSession("sid-pool-refilled");
+            consecutiveParseFailures = 0;
+            appendProgress(paths, { phase: "parse-sid-reconnect-completed", sidSource: args.sidSource });
+            return;
           }
           args.sid = "";
           args.sidSource = "";
@@ -3716,6 +3877,10 @@ async function executeCommand(args) {
     }
     return 0;
   }
+  if (args.command === "install-browser") {
+    installPlaywrightBrowserCommand(args);
+    return 0;
+  }
   if (args.command === "show") {
     showTask(args);
     return 0;
@@ -3855,6 +4020,11 @@ async function runParsedCommand(args, options = {}) {
       console.error("");
       return 130;
     }
+    if (isCliMessageError(error)) {
+      recordCommandFailure(args, error);
+      console.error(error.message || String(error));
+      return error.exitCode || 1;
+    }
     recordCommandFailure(args, error);
     console.error(error && error.stack ? error.stack : String(error));
     return 1;
@@ -3970,6 +4140,11 @@ async function main() {
       process.exitCode = 130;
       return;
     }
+    if (isCliMessageError(error)) {
+      console.error(error.message || String(error));
+      process.exitCode = error.exitCode || 1;
+      return;
+    }
     console.error(error && error.stack ? error.stack : String(error));
     process.exitCode = 1;
   }
@@ -4001,6 +4176,7 @@ module.exports = {
   clearSavedSidConfig,
   discardActiveConfigSid,
   addSidsToConfig,
+  waitForSavedSidPool,
   globalConfigPath,
   readGlobalConfig,
   parseSidValues,
@@ -4046,7 +4222,12 @@ module.exports = {
   isUserCancelledError,
   isUserQuitError,
   isCliRestartRequestedError,
+  isCliMessageError,
   isUserAbortError,
+  CliMessageError,
+  missingPlaywrightBrowserMessage,
+  ensurePlaywrightBrowserInstalledForLaunch,
+  installPlaywrightBrowserCommand,
   runPool,
   runPoolWithReusableRecordPages,
   chunkItemsByCount,

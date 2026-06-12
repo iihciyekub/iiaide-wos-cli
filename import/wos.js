@@ -1409,7 +1409,7 @@ class WosIdStore {
         );
 
         const keywordsPlus = uniq(
-            $$('a[id*="keywordPlus" i] span, a[id*="KeyWordPlus" i] span')
+            $$('a[id*="keywordPlus" i] span, a[id*="keywordsPlus" i] span')
                 .map(cleanText)
         );
 

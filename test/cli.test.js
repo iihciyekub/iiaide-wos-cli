@@ -8,6 +8,7 @@ const test = require("node:test");
 const Database = require("better-sqlite3");
 
 const cli = require("../src/iiaide-wos");
+const playwrightInstall = require("../src/lib/playwright-install");
 const { readJson, writeJson } = require("../src/lib/io");
 const { classifyWosIdsToSqlInput, currentTaskSelection, formatBytes, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
 const { createProgress, createSpinner } = require("../src/lib/terminal");
@@ -127,6 +128,14 @@ test("parses SID check tasks", () => {
   assert.equal(args.tasksRoot, root);
 });
 
+test("parses bundled browser install tasks", () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "install-browser", "--with-deps", "--tasks-root", root]);
+  assert.equal(args.command, "install-browser");
+  assert.equal(args.withDeps, true);
+  assert.equal(args.tasksRoot, root);
+});
+
 test("shows the saved SID pool with the active position", () => {
   const root = temporaryDirectory();
   const args = cli.parseArgs(["node", "cli", "sid-pool", "--tasks-root", root]);
@@ -146,6 +155,42 @@ test("package exposes iiw as the short CLI alias", () => {
   const pkg = require("../package.json");
   assert.equal(pkg.bin["iiaide-wos"], "bin/iiaide-wos.js");
   assert.equal(pkg.bin.iiw, "bin/iiaide-wos.js");
+});
+
+test("bundled playwright install helper resolves the packaged cli.js", () => {
+  const cliPath = playwrightInstall.bundledPlaywrightCliPath();
+  assert.equal(path.basename(cliPath), "cli.js");
+  assert.equal(fs.existsSync(cliPath), true);
+  assert.match(cliPath, /playwright/);
+});
+
+test("bundled playwright install helper composes the local browser installer", () => {
+  const calls = [];
+  const result = playwrightInstall.installBundledPlaywrightBrowser({
+    cliPath: "/tmp/playwright/cli.js",
+    withDeps: true,
+    run(command, argv, options) {
+      calls.push({ command, argv, options });
+      return { status: 0 };
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, process.execPath);
+  assert.deepEqual(calls[0].argv, ["/tmp/playwright/cli.js", "install", "--with-deps", "chromium"]);
+  assert.equal(calls[0].options.stdio, "inherit");
+  assert.equal(result.withDeps, true);
+  assert.equal(result.browser, "chromium");
+});
+
+test("detects Playwright missing-browser launch failures", () => {
+  assert.equal(
+    playwrightInstall.isMissingPlaywrightBrowserError(
+      new Error("browserType.launchPersistentContext: Executable doesn't exist at /root/.cache/ms-playwright/foo")
+    ),
+    true
+  );
+  assert.equal(playwrightInstall.isMissingPlaywrightBrowserError(new Error("WOS SID validation failed")), false);
 });
 
 test("parse browser restart interval is configurable", () => {
@@ -230,6 +275,49 @@ test("clears saved SID before browser-login repair", () => {
   assert.equal(args.sidSource, "");
   assert.equal(readJson(path.join(root, "config.json")).sid, undefined);
   assert.equal(readJson(path.join(root, "config.json")).baseUrl, "https://www.webofscience.com");
+});
+
+test("missing Playwright browser error becomes a friendly repair message without prompting", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
+
+  await assert.rejects(
+    () => cli.ensurePlaywrightBrowserInstalledForLaunch(
+      args,
+      new Error("browserType.launchPersistentContext: Executable doesn't exist at /root/.cache/ms-playwright/foo"),
+      { canPrompt: () => false }
+    ),
+    (error) => {
+      assert.equal(cli.isCliMessageError(error), true);
+      assert.match(error.message, /iiaide-wos install-browser/);
+      return true;
+    }
+  );
+});
+
+test("interactive missing Playwright browser repair runs bundled install before retry", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
+  const reports = [];
+  const installs = [];
+  const repaired = await cli.ensurePlaywrightBrowserInstalledForLaunch(
+    args,
+    new Error("Please run the following command to download new browsers"),
+    {
+      canPrompt: () => true,
+      prompt: async () => "install",
+      report(message) {
+        reports.push(message);
+      },
+      install(options) {
+        installs.push(options);
+      },
+    }
+  );
+
+  assert.equal(repaired, true);
+  assert.deepEqual(installs, [{ withDeps: false }]);
+  assert.match(reports.join("\n"), /Installing Playwright Chromium/);
 });
 
 test("parse failure recovery probes buildQuery and restarts CLI only on SID query errors", () => {
@@ -1070,6 +1158,14 @@ test("browser-side wos.js extracts full-record WOSID path segments without query
   assert.doesNotMatch(syncMethod[0], /href\.split\('\/'\)\.pop\(\)/);
 });
 
+test("browser-side wos.js matches both Keywords Plus id variants", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  const snippet = source.match(/const keywordsPlus = uniq\([\s\S]*?\n        \);/);
+  assert.ok(snippet, "keywordsPlus selector should be present");
+  assert.match(snippet[0], /id\*="keywordPlus" i/);
+  assert.match(snippet[0], /id\*="keywordsPlus" i/);
+});
+
 test("browser-side wos.js does not let stale full-record DOM satisfy another WOSID", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
   const waitMethod = source.match(/async #waitForFullRecordPageByWosId\(wosid\) \{[\s\S]*?\n    \}/);
@@ -1839,6 +1935,36 @@ test("forced SID discard removes the current SID from the saved pool for recover
   assert.deepEqual(args.invalidatedSids, ["stale"]);
   assert.equal(args.sid, "");
   assert.equal(args.sidSource, "");
+});
+
+test("waitForSavedSidPool keeps polling until a new saved SID is added", async () => {
+  const root = temporaryDirectory();
+  writeJson(cli.globalConfigPath(), { sids: [], sidCursor: 0 });
+  const args = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
+  const reports = [];
+
+  const result = await cli.waitForSavedSidPool(args, {
+    intervalMs: 5,
+    report(message) {
+      reports.push(message);
+    },
+    onPoll({ attempts }) {
+      if (attempts === 1) {
+        const addArgs = cli.parseArgs(["node", "cli", "settings", "--tasks-root", root]);
+        cli.addSidsToConfig(addArgs, ["fresh"], { activate: true });
+      }
+    },
+  });
+
+  assert.equal(result.sid, "fresh");
+  assert.equal(result.sidSource, "config");
+  assert.equal(result.sidPoolCount, 1);
+  assert.equal(result.attempts, 1);
+  assert.equal(result.waitedMs, 5);
+  assert.equal(args.sid, "fresh");
+  assert.equal(args.sidSource, "config");
+  assert.deepEqual(readJson(cli.globalConfigPath()).sids, ["fresh"]);
+  assert.match(reports[0], /Saved SID pool is empty/);
 });
 
 test("saved dead SIDs are rejected after a CLI restart", async () => {

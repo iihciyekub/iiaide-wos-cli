@@ -5,6 +5,8 @@
 iiaide-wos CLI is built around tasks rather than isolated command outputs.
 Installed releases expose both `iiaide-wos` and the short alias `iiw`; they run
 the same CLI entry point.
+Installed releases should download Chromium with `iiaide-wos install-browser`
+so the browser revision always matches the bundled Playwright version.
 For request-level equivalents of the WOS methods used by the CLI, see
 [`docs/curl.md`](curl.md).
 
@@ -169,6 +171,9 @@ canonicalization and loose-comparison boundary.
 For every successfully processed WOS ID it validates the parsed object, augments
 it with `wosid`, `url`, and `fetchedAt`, and writes it directly to
 `~/.iiaide-wos/wosdata.sqlite`.
+That stored page JSON preserves structured keyword sections from the WOS full
+record page, including `Keywords Plus` values when WOS exposes either
+`keywordPlus` or `keyWordsPlus`-style link ids.
 
 The parse workflow preserves the accession prefix found in the TXT or CSV input
 instead of forcing every record URL into `WOS:<id>`. During validation, the
@@ -242,12 +247,12 @@ Resume behavior is database-based:
   returns an explicit SID/session `error_code`, the CLI force-closes Playwright
   and treats the current SID as invalid. The active SID is removed from the
   saved pool even if it was detected from the persistent browser profile, and
-  the restarted command will not accept that same SID again. If no saved SID
-  remains, the CLI clears WOS browser auth state and opens a visible login
-  window. Inconclusive browser-side results such as `unknown error` reconnect
-  with the current SID instead of deleting it. If the query does not return
-  `error_code`, the consecutive parse-failure counter resets and parsing
-  continues.
+  the recovery flow will not accept that same SID again. If no saved SID
+  remains, the current CLI checks the global SID pool every 10 seconds and
+  resumes parsing automatically as soon as a new saved SID is added.
+  Inconclusive browser-side results such as `unknown error` reconnect with the
+  current SID instead of deleting it. If the query does not return `error_code`,
+  the consecutive parse-failure counter resets and parsing continues.
 - Authentication success output shows a masked active SID and pool position. Parse
   recovery output is printed as short multi-line notices with the reason and
   next action.
@@ -518,6 +523,10 @@ one parse command.
 Single-shot CLI commands close the browser process when they finish, but the
 next command reopens the same profile. Interactive menu runs keep the same
 profile session open across commands.
+If Chromium is missing for the installed Playwright version, interactive WOS
+commands offer to run `iiaide-wos install-browser` before retrying the launch.
+Non-interactive commands fail with the same repair instruction instead of
+printing the upstream Playwright executable-path stack trace.
 
 The shared Playwright context also injects the browser-side helper from
 `import/wos.js` before WOS navigation. That script exposes `window.wos`,

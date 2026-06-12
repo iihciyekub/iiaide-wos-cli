@@ -58,7 +58,7 @@ Requirements:
 
 - Node.js 20+
 - npm
-- A Playwright-supported Chromium browser
+- A Playwright Chromium download for this iiaide-wos release
 - A valid WOS session SID for operations that interact with WOS
 
 This is a private GitHub project. Authenticate an account that has repository
@@ -67,8 +67,8 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.48
-npx playwright install chromium
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.59
+iiaide-wos install-browser
 iiaide-wos
 # or
 iiw
@@ -86,8 +86,12 @@ npm run verify
 On Linux, Chromium system dependencies may also be required:
 
 ```bash
-npx playwright install --with-deps chromium
+iiaide-wos install-browser --with-deps
 ```
+
+If an interactive WOS command finds Chromium missing, the CLI now offers to run
+the bundled browser install for the matching Playwright version instead of
+crashing with the upstream `Executable doesn't exist` stack trace.
 
 Start the interactive navigator:
 
@@ -124,7 +128,7 @@ The updater installs only published GitHub Release tags, not arbitrary changes
 from the main branch. Private release checks automatically use `GH_TOKEN`,
 `GITHUB_TOKEN`, or credentials from `gh auth login`. The authenticated account
 must retain access to the repository. If a release changes the Playwright
-version, run `npx playwright install chromium` after updating.
+version, run `iiaide-wos install-browser` after updating.
 
 ## Uninstall
 
@@ -397,10 +401,11 @@ returns an explicit SID/session `error_code` such as a query-limit,
 expired-session, login, or invalid-SID message, the CLI force-closes Playwright
 and treats the current SID as invalid. The current SID is removed from the saved
 pool even if it was detected from the persistent browser profile, and that SID is
-not accepted again during the restart. If no saved SID remains, the restarted CLI
-clears the WOS browser auth state and opens a visible login window instead of
-silently reusing the old session. If the current process inherited `WOS_SID`,
-that environment value is removed before restarting the child CLI process.
+not accepted again during recovery. If no saved SID remains, the current CLI
+checks the global SID pool every 10 seconds and resumes parsing automatically as
+soon as a new saved SID is added. If another saved SID is already available, or
+if the current process inherited `WOS_SID`, the CLI still removes that
+environment value before restarting the child CLI process.
 Inconclusive browser-side query results such as `unknown error` force-close
 Playwright and reconnect with the current SID without deleting it. If
 `buildQuery` does not return `error_code`, the consecutive parse-failure counter

@@ -406,6 +406,10 @@ Important distinction:
   <file>` to choose another blacklist database. 20 consecutive final parse
   failures trigger the WOS `buildQuery` SID recovery diagnostic; blacklist
   writes do not reset this counter.
+- If that recovery query returns a session/query-limit style `error_code` and
+  removing the bad SID empties the saved pool, the current CLI keeps running,
+  checks the global SID pool every 10 seconds, and resumes parse automatically
+  as soon as a new saved SID is added.
 - SQLite aggregation is local-only and global to the user by default at
   `~/.iiaide-wos/wosdata.sqlite`. `iiaide-wos wosdata --merge-db` can merge
   another WOS SQLite database, `wosdata --wosid` can look up one saved WOSID,
