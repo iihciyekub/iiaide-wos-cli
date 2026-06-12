@@ -332,6 +332,8 @@ test("parse failure recovery probes buildQuery and restarts CLI only on SID quer
   assert.match(match[0], /await forceCloseWosSession\(session\)/);
   assert.match(match[0], /discardActiveConfigSid\(args[\s\S]*force: true/);
   assert.match(match[0], /waitForUsableWosSession\(args/);
+  assert.match(source, /runHook\("onSidLoaded", onSidLoaded, resumedSid\)/);
+  assert.match(source, /WOS SID supervisor \$\{name\} hook failed/);
   assert.match(match[0], /startParseSession\("sid-pool-refilled", 0, 0, \{ recoverSid: false \}\)/);
   assert.match(match[0], /parse-sid-pool-refill-validation-failed/);
   assert.match(match[0], /Removing that SID and waiting for another saved SID instead of returning to the menu/);
@@ -965,6 +967,10 @@ test("formats runtime for the interactive dashboard", () => {
   assert.equal(formatRuntime(9000), "9s");
   assert.equal(formatRuntime(65000), "1m 05s");
   assert.equal(formatRuntime(7380000), "2h 03m");
+  assert.equal(cli.formatRuntime(0), "0s");
+  assert.equal(cli.formatRuntime(9000), "9s");
+  assert.equal(cli.formatRuntime(65000), "1m 05s");
+  assert.equal(cli.formatRuntime(7380000), "2h 03m");
   assert.equal(formatBytes(0), "0 B");
   assert.equal(formatBytes(1536), "1.5 KiB");
 });

@@ -3,6 +3,15 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.79 - 2026-06-13
+
+- Fix SID-pool refill notices by adding the missing runtime formatter used when
+  a waiting parse/export detects a new saved SID. This prevents
+  `ReferenceError: formatRuntime is not defined` from returning the workflow to
+  the interactive menu.
+- Keep SID supervisor notification hooks non-fatal, so future progress/notice
+  formatting issues cannot interrupt the active SID wait-and-resume loop.
+
 ## 0.4.78 - 2026-06-13
 
 - Add a reusable WOS session supervisor for SID-pool handoff. TXT export SID

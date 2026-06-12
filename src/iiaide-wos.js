@@ -2374,6 +2374,16 @@ function currentProcessRssMb() {
   return rss > 0 ? Math.round(rss / (1024 * 1024)) : 0;
 }
 
+function formatRuntime(ms) {
+  const totalSeconds = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = Math.floor(totalSeconds % 60);
+  if (hours) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  if (minutes) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
+}
+
 function effectiveParseChunkSize(args) {
   const restartSize = Math.max(0, Number(args?.browserRestartEvery) || 0);
   const memoryCheckSize = Math.max(0, Number(args?.memoryCheckEvery) || 0);
@@ -2886,6 +2896,14 @@ async function waitForUsableWosSession(args, options = {}) {
   }));
   const validate = options.validate || (async (nextSession) => nextSession);
   const isFatal = typeof options.isFatal === "function" ? options.isFatal : () => false;
+  const runHook = async (name, hook, payload) => {
+    if (!hook) return;
+    try {
+      await hook(payload);
+    } catch (hookError) {
+      report(`WOS SID supervisor ${name} hook failed: ${hookError?.message || hookError}`);
+    }
+  };
 
   if (options.ignoreEnvSid !== false) delete process.env.WOS_SID;
 
@@ -2896,7 +2914,7 @@ async function waitForUsableWosSession(args, options = {}) {
         report,
         onPoll,
       });
-      if (onSidLoaded) await onSidLoaded(resumedSid);
+      await runHook("onSidLoaded", onSidLoaded, resumedSid);
     }
 
     let nextSession = null;
@@ -2908,15 +2926,13 @@ async function waitForUsableWosSession(args, options = {}) {
       await forceCloseWosSession(nextSession);
       if (isFatal(error)) throw error;
       const message = error?.message || String(error);
-      if (onValidationFailure) {
-        await onValidationFailure({
-          error,
-          message,
-          sidSource: args.sidSource,
-          sidPoolCount: args.sidPoolCount,
-          sidPoolIndex: args.sidPoolIndex,
-        });
-      }
+      await runHook("onValidationFailure", onValidationFailure, {
+        error,
+        message,
+        sidSource: args.sidSource,
+        sidPoolCount: args.sidPoolCount,
+        sidPoolIndex: args.sidPoolIndex,
+      });
       const discarded = discardActiveConfigSid(args, message || "WOS session could not be prepared", { force: true });
       if (discarded?.sidPoolCount) {
         report(`Saved SID could not reopen WOS and was removed; trying next saved SID (${discarded.sidPoolCount} left).`);
@@ -5059,6 +5075,7 @@ module.exports = {
   runPoolWithReusableRecordPages,
   chunkItemsByCount,
   currentProcessRssMb,
+  formatRuntime,
   effectiveParseChunkSize,
   shouldRestartParseForMemory,
   prepareWosRequestContext,
