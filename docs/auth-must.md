@@ -20,7 +20,9 @@ the global SID pool unless `--no-save` is supplied.
 `auth monitor` polls the current global SID pool and runs the same login/save
 step whenever `sidPoolCount <= min-sids`. `--min-sids` is a low-water mark, not
 a target count; because each refresh adds one SID, a quiet pool usually settles
-at `min-sids + 1`. `--threshold` remains a compatibility alias.
+at `min-sids + 1`. `--threshold` remains a compatibility alias. When a refresh
+login fails, the monitor stays alive, waits `--retry-delay-ms` milliseconds
+(default: 60000), and then checks the pool again.
 
 One account is enough to run the producer. Repeating account/password pairs is
 only for rotation; each refresh still adds one SID at a time.

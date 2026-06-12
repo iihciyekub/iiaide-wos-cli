@@ -253,11 +253,14 @@ Resume behavior is database-based:
 - If a full-record page opens but DOM extraction returns no usable record, parse
   falls back to the WOS single-record export API before counting the WOSID as
   failed.
-- Every WOSID finally reported as `parse FAIL` is written to the separate global
-  SQLite blacklist database and skipped by default on future parse runs. Use
-  `--retry-blacklist` to include them in a deliberate retry run.
-- 20 consecutive final parse failures trigger the WOS `buildQuery` SID recovery
-  diagnostic. Blacklist writes do not reset this counter.
+- Content-level WOSID failures reported as `parse FAIL` are written to the
+  separate global SQLite blacklist database and skipped by default on future
+  parse runs. Use `--retry-blacklist` to include them in a deliberate retry
+  run. Session-level failures are reported as deferred, trigger SID recovery,
+  and are not written to the blacklist.
+- A recognized session-level failure, or 20 consecutive final parse failures,
+  triggers the WOS `buildQuery` SID recovery diagnostic. Blacklist writes do
+  not reset this counter.
 - Use `wosdata --unblacklist <WOSID>` to remove one blacklist entry or
   `wosdata --clear-blacklist` to remove all blacklist entries.
 - Final failures are recorded at `raw/<uuid>/full-record/<uuid>_parse_failures.json`.
@@ -267,16 +270,18 @@ Resume behavior is database-based:
 - `--max-rss-mb <n>` restarts Playwright between parse chunks once the Node
   process RSS reaches that limit. The default is `4096`; use `0` to disable the
   memory-based recycle path.
-- Parse failures do not directly invalidate the current SID. 20 consecutive
-  WOSID page parse failures close the entire Playwright context and reconnect
-  with the current SID, then run
+- Content parse failures do not directly invalidate the current SID. A
+  session-level failure, or 20 consecutive WOSID page parse failures, closes
+  the entire Playwright context and reconnects with the current SID, then runs
   `window.wos.query.buildQuery("AB=<random 4 letters>")`. If that WOS query
   returns an explicit SID/session `error_code`, the CLI force-closes Playwright
   and treats the current SID as invalid. The active SID is removed from the
   saved pool even if it was detected from the persistent browser profile, and
   the recovery flow will not accept that same SID again. If no saved SID
   remains, the current CLI checks the global SID pool every 10 seconds and
-  resumes parsing automatically as soon as a new saved SID is added.
+  resumes parsing automatically as soon as a new saved SID is added and can
+  reopen WOS. If a newly added SID cannot reopen WOS, the CLI removes that SID
+  and keeps waiting instead of returning to the interactive menu.
   Inconclusive browser-side results such as `unknown error` reconnect with the
   current SID instead of deleting it. If the query does not return `error_code`,
   the consecutive parse-failure counter resets and parsing continues.
@@ -540,7 +545,9 @@ CLI prompts for the account and hides password input. `WOS_ACCOUNT` and
 `--password` because command-line arguments can be visible in shell history and
 process lists. `--min-sids` is the SID pool low-water mark: the monitor runs one
 login/save refresh whenever `sidPoolCount <= min-sids`. `--threshold` remains
-available as an alias for older scripts. While running, the monitor updates
+available as an alias for older scripts. If that refresh login fails, the
+monitor stays alive, waits `--retry-delay-ms` milliseconds, and then checks the
+pool again; the default delay is 60000. While running, the monitor updates
 `~/.iiaide-wos/auth-monitor.json`; the interactive/workspace dashboard reads
 that heartbeat and shows it as `SID Producer` next to the saved `SID Pool`.
 

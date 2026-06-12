@@ -174,6 +174,7 @@ Inputs:
   --interval-ms <n>       Auth monitor interval. Default: 3000
   --min-sids <n>          Auth monitor low-water mark; refresh when pool <= n. Default: 2
   --threshold <n>         Alias for --min-sids
+  --retry-delay-ms <n>    Auth monitor delay after a refresh failure. Default: 60000
   --max-checks <n>        Auth monitor stop after n checks. Default: 0 = infinite
   --quiet                 Auth commands: suppress progress lines
   --json                  Auth commands: print machine-readable JSON
@@ -311,6 +312,7 @@ function parseArgs(argv) {
     authRetries: 1,
     authIntervalMs: 3000,
     authMinSids: 2,
+    authRetryDelayMs: 60000,
     authMaxChecks: 0,
     authQuiet: false,
     json: false,
@@ -355,6 +357,7 @@ function parseArgs(argv) {
     else if (arg === "--retries") args.authRetries = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--interval-ms") args.authIntervalMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--min-sids" || arg === "--threshold") args.authMinSids = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--retry-delay-ms") args.authRetryDelayMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--max-checks") args.authMaxChecks = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--quiet") args.authQuiet = true;
     else if (arg === "--json") args.json = true;
@@ -445,6 +448,7 @@ function parseArgs(argv) {
   assertIntegerRange("--retries", args.authRetries, 0);
   assertIntegerRange("--interval-ms", args.authIntervalMs, 1000);
   assertIntegerRange("--min-sids", args.authMinSids, 0);
+  assertIntegerRange("--retry-delay-ms", args.authRetryDelayMs, 1000);
   assertIntegerRange("--max-checks", args.authMaxChecks, 0);
   assertIntegerRange("--record-timeout-ms", args.recordTimeoutMs, 5000);
   assertIntegerRange("--concurrency", args.concurrency, 1, 10);
@@ -2803,6 +2807,7 @@ async function prepareWosSession(args, options = {}) {
   const keepAlive = Boolean(options.keepAlive || args.keepWosSession);
   const report = options.report || console.error;
   const visible = Boolean(options.visible || args.headed);
+  const recoverSid = options.recoverSid !== false;
   if (keepAlive && sharedWosSession?.context) {
     const page = sharedWosSession.page || sharedWosSession.context.pages()[0] || await sharedWosSession.context.newPage();
     sharedWosSession.page = page;
@@ -2823,6 +2828,7 @@ async function prepareWosSession(args, options = {}) {
     let status = null;
     if (!args.sid) {
       await releaseWosContext(context);
+      if (!recoverSid) throw new Error("No saved SID is available for WOS session preparation.");
       report("No saved SID found. Choose manual SID input, wait for SID pool, or browser login to continue.");
       await acquireFreshSid(args, report);
       context = await launchWosPersistentContext(args, visible);
@@ -2847,6 +2853,7 @@ async function prepareWosSession(args, options = {}) {
       if (args.sidSource === "browser") {
         throw new Error(`Browser-detected WOS SID could not be validated after reopening the WOS profile. ${error.message || error}`);
       }
+      if (!recoverSid) throw error;
       report(`WOS SID validation failed. Choose manual SID input, wait for SID pool, or browser login to continue. ${error.message || error}`);
       await acquireFreshSid(args, report);
       context = await launchWosPersistentContext(args, visible);
@@ -2862,6 +2869,63 @@ async function prepareWosSession(args, options = {}) {
       return { context, page, status, close: async () => {} };
     }
     return { context, page, status, close: async () => releaseWosContext(context) };
+  }
+}
+
+async function waitForUsableWosSession(args, options = {}) {
+  const report = options.report || console.error;
+  const intervalMs = Math.max(1, Number(options.intervalMs) || SID_POOL_WAIT_INTERVAL_MS);
+  const onPoll = typeof options.onPoll === "function" ? options.onPoll : null;
+  const onSidLoaded = typeof options.onSidLoaded === "function" ? options.onSidLoaded : null;
+  const onValidationFailure = typeof options.onValidationFailure === "function" ? options.onValidationFailure : null;
+  const openSession = options.openSession || (() => prepareWosSession(args, {
+    report,
+    visible: options.visible,
+    keepAlive: options.keepAlive,
+    recoverSid: false,
+  }));
+  const validate = options.validate || (async (nextSession) => nextSession);
+  const isFatal = typeof options.isFatal === "function" ? options.isFatal : () => false;
+
+  if (options.ignoreEnvSid !== false) delete process.env.WOS_SID;
+
+  for (;;) {
+    if (!args.sid && !loadSavedSidFromConfig(args)) {
+      const resumedSid = await waitForSavedSidPool(args, {
+        intervalMs,
+        report,
+        onPoll,
+      });
+      if (onSidLoaded) await onSidLoaded(resumedSid);
+    }
+
+    let nextSession = null;
+    try {
+      nextSession = await openSession();
+      const value = await validate(nextSession);
+      return { session: nextSession, value };
+    } catch (error) {
+      await forceCloseWosSession(nextSession);
+      if (isFatal(error)) throw error;
+      const message = error?.message || String(error);
+      if (onValidationFailure) {
+        await onValidationFailure({
+          error,
+          message,
+          sidSource: args.sidSource,
+          sidPoolCount: args.sidPoolCount,
+          sidPoolIndex: args.sidPoolIndex,
+        });
+      }
+      const discarded = discardActiveConfigSid(args, message || "WOS session could not be prepared", { force: true });
+      if (discarded?.sidPoolCount) {
+        report(`Saved SID could not reopen WOS and was removed; trying next saved SID (${discarded.sidPoolCount} left).`);
+        loadSavedSidFromConfig(args);
+        continue;
+      }
+      args.sid = "";
+      args.sidSource = "";
+    }
   }
 }
 
@@ -3117,33 +3181,65 @@ async function exportFromWos(args, paths) {
       const discarded = discardActiveConfigSid(args, `WOS TXT export failed for records ${missingBatch.markFrom}-${missingBatch.markTo}`, { force: true });
       if (discarded?.sidPoolCount) {
         console.error(`Saved SID was removed after TXT export failure; trying next saved SID (${discarded.sidPoolCount} left).`);
-        loadSavedSid(args);
       } else {
         args.sid = "";
         args.sidSource = "";
-        if (!loadSavedSidFromConfig(args)) {
-          writeRuntimeNotice("WOS SID pool empty", [
-            "No saved SID remains after removing the failed SID.",
-            `Waiting for a new saved SID and checking again every ${Math.ceil(SID_POOL_WAIT_INTERVAL_MS / 1000)} seconds.`,
-          ]);
-          await waitForSavedSidPool(args, {
-            intervalMs: SID_POOL_WAIT_INTERVAL_MS,
-            report: console.error,
-            onPoll: ({ attempts, waitedMs, intervalMs, sidPoolCount }) => {
-              appendProgress(paths, {
-                phase: "txt-export-sid-pool-wait",
-                attempts,
-                waitedMs,
-                intervalMs,
-                sidPoolCount,
-              });
-            },
-          });
-        }
+        writeRuntimeNotice("WOS SID pool empty", [
+          "No saved SID remains after removing the failed SID.",
+          `Waiting for a new saved SID and checking again every ${Math.ceil(SID_POOL_WAIT_INTERVAL_MS / 1000)} seconds.`,
+        ]);
       }
       const switchSpinner = createSpinner("Validating WOS authentication after SID switch");
+      let refreshedContext = null;
+      let refreshedUuid = "";
       try {
-        session = await prepareWosSession(args);
+        const usable = await waitForUsableWosSession(args, {
+          intervalMs: SID_POOL_WAIT_INTERVAL_MS,
+          report: console.error,
+          onPoll: ({ attempts, waitedMs, intervalMs, sidPoolCount }) => {
+            appendProgress(paths, {
+              phase: "txt-export-sid-pool-wait",
+              attempts,
+              waitedMs,
+              intervalMs,
+              sidPoolCount,
+            });
+          },
+          onSidLoaded: (resumedSid) => {
+            writeRuntimeNotice("WOS SID pool refilled", [
+              `Detected a new saved SID after ${formatRuntime(resumedSid.waitedMs)}.`,
+              "Reopening WOS and resuming TXT export.",
+              sidBadge(args) ? `Current ${sidBadge(args)}` : "",
+            ]);
+          },
+          onValidationFailure: ({ message }) => {
+            appendProgress(paths, {
+              phase: "txt-export-sid-switch-validation-failed",
+              message,
+              sidSource: args.sidSource,
+            });
+            writeRuntimeNotice("WOS SID switch failed", [
+              "A saved SID was detected, but WOS could not resume TXT export with it.",
+              "Removing that SID and waiting for another saved SID.",
+              message,
+            ]);
+          },
+          validate: async (nextSession) => {
+            const nextContext = await prepareWosRequestContext(nextSession.page, args);
+            const nextUuid = pageContextUuid(nextContext, info.uuid);
+            if (nextUuid !== info.uuid) {
+              throw new Error(`WOS UUID changed after SID switch: expected ${info.uuid}, got ${nextUuid || "(missing)"}`);
+            }
+            if (nextContext.expectedCount && nextContext.expectedCount !== info.expectedCount) {
+              throw new Error(`WOS record count changed after SID switch: expected ${info.expectedCount}, got ${nextContext.expectedCount}`);
+            }
+            refreshedContext = nextContext;
+            refreshedUuid = nextUuid;
+            return nextContext;
+          },
+          isFatal: (nextError) => /^WOS (UUID|record count) changed after SID switch/.test(nextError?.message || String(nextError)),
+        });
+        session = usable.session;
         page = session.page;
         switchSpinner.succeed(authValidatedMessage(args));
       } catch (switchError) {
@@ -3151,14 +3247,6 @@ async function exportFromWos(args, paths) {
         throw switchError;
       }
       appendProgress(paths, { phase: "txt-export-sid-switch-validated", sidSource: args.sidSource, sidPoolCount: args.sidPoolCount, sidPoolIndex: args.sidPoolIndex });
-      const refreshedContext = await prepareWosRequestContext(page, args);
-      const refreshedUuid = pageContextUuid(refreshedContext, info.uuid);
-      if (refreshedUuid !== info.uuid) {
-        throw new Error(`WOS UUID changed after SID switch: expected ${info.uuid}, got ${refreshedUuid || "(missing)"}`);
-      }
-      if (refreshedContext.expectedCount && refreshedContext.expectedCount !== info.expectedCount) {
-        throw new Error(`WOS record count changed after SID switch: expected ${info.expectedCount}, got ${refreshedContext.expectedCount}`);
-      }
       appendProgress(paths, {
         phase: "txt-export-sid-switch-context",
         href: refreshedContext.href,
@@ -3648,32 +3736,37 @@ async function runParse(args) {
   let consecutiveParseFailures = 0;
   let sidRecovery = null;
   const failures = [];
-  const startParseSession = async (reason, chunkIndex = 0, chunksLength = 0) => {
-    const nextSession = await prepareWosSession(args, { report: console.error });
-    sessionGeneration += 1;
-    const warmup = await warmUpWosQueryPage(nextSession.page, args);
-    appendProgress(paths, {
-      phase: "parse-connectivity-query",
-      reason,
-      rowText: warmup.rowText,
-      href: warmup.href,
-      countText: warmup.countText,
-      status: warmup.status,
-      searchInfoReady: warmup.searchInfoReady,
-      chunk: chunkIndex || undefined,
-      chunks: chunksLength || undefined,
-    });
-    return nextSession;
+  const startParseSession = async (reason, chunkIndex = 0, chunksLength = 0, sessionOptions = {}) => {
+    const nextSession = await prepareWosSession(args, { report: console.error, ...sessionOptions });
+    try {
+      sessionGeneration += 1;
+      const warmup = await warmUpWosQueryPage(nextSession.page, args);
+      appendProgress(paths, {
+        phase: "parse-connectivity-query",
+        reason,
+        rowText: warmup.rowText,
+        href: warmup.href,
+        countText: warmup.countText,
+        status: warmup.status,
+        searchInfoReady: warmup.searchInfoReady,
+        chunk: chunkIndex || undefined,
+        chunks: chunksLength || undefined,
+      });
+      return nextSession;
+    } catch (error) {
+      await forceCloseWosSession(nextSession);
+      throw error;
+    }
   };
-  const refreshSidAfterConsecutiveFailures = async () => {
+  const refreshSidAfterConsecutiveFailures = async (reasonText = `${PARSE_RECOVERY_CONSECUTIVE_FAILURES} consecutive WOSID page parses failed.`) => {
     if (sidRecovery) return sidRecovery;
     sidRecovery = (async () => {
       writeRuntimeNotice("WOS parse recovery", [
-        `${PARSE_RECOVERY_CONSECUTIVE_FAILURES} consecutive WOSID page parses failed.`,
+        reasonText,
         "Closing Playwright and testing the current SID with a WOS query.",
         sidBadge(args) ? `Current ${sidBadge(args)}` : "",
       ]);
-      appendProgress(paths, { phase: "parse-sid-reconnect-start", consecutiveParseFailures });
+      appendProgress(paths, { phase: "parse-sid-reconnect-start", consecutiveParseFailures, reason: reasonText });
       await forceCloseWosSession(session);
       session = null;
       session = await prepareWosSession(args, { report: console.error });
@@ -3706,9 +3799,10 @@ async function runParse(args) {
               errorCode: recoveryQuery.error_code,
               intervalMs: SID_POOL_WAIT_INTERVAL_MS,
             });
-            const resumedSid = await waitForSavedSidPool(args, {
+            const usable = await waitForUsableWosSession(args, {
               intervalMs: SID_POOL_WAIT_INTERVAL_MS,
               report: console.error,
+              openSession: () => startParseSession("sid-pool-refilled", 0, 0, { recoverSid: false }),
               onPoll: ({ attempts, waitedMs, intervalMs, sidPoolCount }) => {
                 appendProgress(paths, {
                   phase: "parse-sid-pool-wait",
@@ -3718,20 +3812,34 @@ async function runParse(args) {
                   sidPoolCount,
                 });
               },
+              onSidLoaded: (resumedSid) => {
+                writeRuntimeNotice("WOS SID pool refilled", [
+                  `Detected a new saved SID after ${formatRuntime(resumedSid.waitedMs)}.`,
+                  "Reopening WOS and continuing parse.",
+                  sidBadge(args) ? `Current ${sidBadge(args)}` : "",
+                ]);
+                appendProgress(paths, {
+                  phase: "parse-sid-pool-wait-completed",
+                  waitedMs: resumedSid.waitedMs,
+                  attempts: resumedSid.attempts,
+                  sidPoolCount: resumedSid.sidPoolCount,
+                  sidSource: resumedSid.sidSource,
+                });
+              },
+              onValidationFailure: ({ message }) => {
+                appendProgress(paths, {
+                  phase: "parse-sid-pool-refill-validation-failed",
+                  sidSource: args.sidSource,
+                  message,
+                });
+                writeRuntimeNotice("WOS SID pool refill failed", [
+                  "A new saved SID was detected, but WOS could not reopen with it.",
+                  "Removing that SID and waiting for another saved SID instead of returning to the menu.",
+                  message,
+                ]);
+              },
             });
-            writeRuntimeNotice("WOS SID pool refilled", [
-              `Detected a new saved SID after ${formatRuntime(resumedSid.waitedMs)}.`,
-              "Reopening WOS and continuing parse.",
-              sidBadge(args) ? `Current ${sidBadge(args)}` : "",
-            ]);
-            appendProgress(paths, {
-              phase: "parse-sid-pool-wait-completed",
-              waitedMs: resumedSid.waitedMs,
-              attempts: resumedSid.attempts,
-              sidPoolCount: resumedSid.sidPoolCount,
-              sidSource: resumedSid.sidSource,
-            });
-            session = await startParseSession("sid-pool-refilled");
+            session = usable.session;
             consecutiveParseFailures = 0;
             appendProgress(paths, { phase: "parse-sid-reconnect-completed", sidSource: args.sidSource });
             return;
@@ -3809,7 +3917,7 @@ async function runParse(args) {
           }
         } catch (error) {
           const sessionRecoveryError = isSessionRecoveryError(error);
-          const blacklisted = true;
+          const blacklisted = !sessionRecoveryError;
           let blacklistError = "";
           if (blacklisted) {
             try {
@@ -3826,7 +3934,7 @@ async function runParse(args) {
               blacklistError = blacklistWriteError.message || String(blacklistWriteError);
             }
           }
-          recordProgressStatus = "failed";
+          recordProgressStatus = sessionRecoveryError ? "deferred" : "failed";
           consecutiveParseFailures += 1;
           appendProgress(paths, {
             phase: "parse-record",
@@ -3835,6 +3943,7 @@ async function runParse(args) {
             index,
             sessionRecoveryError,
             blacklisted,
+            deferred: sessionRecoveryError,
             blacklistError,
             consecutiveParseFailures,
             error: error.message || String(error),
@@ -3847,13 +3956,18 @@ async function runParse(args) {
             wosid,
             index,
             blacklisted,
+            deferred: sessionRecoveryError,
             blacklistError,
             error: error && error.stack ? error.stack : String(error),
             failedAt: new Date().toISOString(),
           };
           failures.push(failure);
-          if (consecutiveParseFailures >= PARSE_RECOVERY_CONSECUTIVE_FAILURES) {
-            await refreshSidAfterConsecutiveFailures();
+          if (sessionRecoveryError || consecutiveParseFailures >= PARSE_RECOVERY_CONSECUTIVE_FAILURES) {
+            await refreshSidAfterConsecutiveFailures(
+              sessionRecoveryError
+                ? `WOS session error while parsing ${wosid}.`
+                : `${PARSE_RECOVERY_CONSECUTIVE_FAILURES} consecutive WOSID page parses failed.`
+            );
           }
         }
         processed += 1;
@@ -4882,6 +4996,7 @@ module.exports = {
   quickValidateCurrentSid,
   validateSidWithRetry,
   prepareWosSession,
+  waitForUsableWosSession,
   clearSavedSidConfig,
   discardActiveConfigSid,
   addSidsToConfig,

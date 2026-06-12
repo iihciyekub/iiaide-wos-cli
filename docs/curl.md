@@ -393,10 +393,12 @@ Important distinction:
   saved pool even if it was detected from the persistent browser profile, and
   the restarted command will not accept that same SID again. If no saved SID
   remains during parse recovery, the CLI checks the global SID pool every 10
-  seconds and resumes automatically when another process adds a SID. In
-  interactive SID setup, the user can also choose manual input, SID pool wait,
-  or visible browser login. Inconclusive browser-side results such as `unknown
-  error` reconnect with the current SID instead of deleting it.
+  seconds and resumes automatically when another process adds a SID that can
+  reopen WOS. If a new saved SID fails that reopen step, the CLI removes it and
+  keeps waiting instead of returning to the interactive menu. In interactive SID
+  setup, the user can also choose manual input, SID pool wait, or visible
+  browser login. Inconclusive browser-side results such as `unknown error`
+  reconnect with the current SID instead of deleting it.
 - The UUID-specific WOSID index remains at
   `raw/<uuid>/full-record/<uuid>_wosid.csv` and is the input list for parse.
 - For `parse --csv`, the local CSV is normalized into
@@ -411,14 +413,16 @@ Important distinction:
   visits start. Color terminals highlight the left-hand field labels.
 - If DOM parsing of an opened full-record page produces no usable record, parse
   falls back to the WOS single-record export API before marking the WOSID failed.
-- Every WOSID finally reported as `parse FAIL` is written to the separate global
-  SQLite blacklist database `~/.iiaide-wos/wos-blacklist.sqlite` and skipped by
-  default on future runs. Use `parse --retry-blacklist` to deliberately retry
-  those WOSIDs, or `wosdata --unblacklist <WOSID>` / `wosdata
-  --clear-blacklist` to remove saved blacklist entries. Use `--blacklist-db
-  <file>` to choose another blacklist database. 20 consecutive final parse
-  failures trigger the WOS `buildQuery` SID recovery diagnostic; blacklist
-  writes do not reset this counter.
+- Content-level WOSIDs finally reported as `parse FAIL` are written to the
+  separate global SQLite blacklist database
+  `~/.iiaide-wos/wos-blacklist.sqlite` and skipped by default on future runs.
+  Use `parse --retry-blacklist` to deliberately retry those WOSIDs, or `wosdata
+  --unblacklist <WOSID>` / `wosdata --clear-blacklist` to remove saved
+  blacklist entries. Use `--blacklist-db <file>` to choose another blacklist
+  database. Recognized session-level failures are deferred, trigger SID
+  recovery, and are not written to the blacklist; a session-level failure or 20
+  consecutive final parse failures triggers the WOS `buildQuery` SID recovery
+  diagnostic.
 - If that recovery query returns a session/query-limit style `error_code` and
   removing the bad SID empties the saved pool, the current CLI keeps running,
   checks the global SID pool every 10 seconds, and resumes parse automatically

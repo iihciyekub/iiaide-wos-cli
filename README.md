@@ -231,10 +231,13 @@ workspace WOS browser profile used for export and parse work. Repeated
 interactive password input or `WOS_ACCOUNT` / `WOS_PASSWORD` over `--password`
 because command-line arguments can be visible in shell history and process
 lists. `--min-sids` is the SID pool low-water mark: the monitor refreshes when
-`sidPoolCount <= min-sids`. Routine auth output masks SID values; the full SID
-is only saved in `~/.iiaide-wos/config.json`. The monitor also writes a small
-heartbeat at `~/.iiaide-wos/auth-monitor.json`; the interactive/workspace
-dashboard shows this as `SID Producer` and marks it stale when updates stop.
+`sidPoolCount <= min-sids`. If a refresh login fails after reaching the
+low-water mark, the monitor waits `--retry-delay-ms` milliseconds before
+continuing; the default delay is 60000. Routine auth output masks SID values;
+the full SID is only saved in `~/.iiaide-wos/config.json`. The monitor also
+writes a small heartbeat at `~/.iiaide-wos/auth-monitor.json`; the
+interactive/workspace dashboard shows this as `SID Producer` and marks it stale
+when updates stop.
 
 In an interactive terminal, iiaide-wos validates the SID with the canonical WOS
 initialization URL and saves it to the global SID pool in
@@ -443,9 +446,11 @@ and treats the current SID as invalid. The current SID is removed from the saved
 pool even if it was detected from the persistent browser profile, and that SID is
 not accepted again during recovery. If no saved SID remains, the current CLI
 checks the global SID pool every 10 seconds and resumes parsing automatically as
-soon as a new saved SID is added. If another saved SID is already available, or
-if the current process inherited `WOS_SID`, the CLI still removes that
-environment value before restarting the child CLI process.
+soon as a new saved SID is added and can reopen WOS. If the newly added SID
+cannot reopen WOS, the CLI removes it and keeps waiting for another saved SID
+instead of returning to the interactive menu. If another saved SID is already
+available, or if the current process inherited `WOS_SID`, the CLI still removes
+that environment value before restarting the child CLI process.
 Inconclusive browser-side query results such as `unknown error` force-close
 Playwright and reconnect with the current SID without deleting it. If
 `buildQuery` does not return `error_code`, the consecutive parse-failure counter
@@ -455,15 +460,15 @@ The authentication success line includes a masked active SID and pool position, 
 parse recovery messages are printed as short multi-line notices so the running
 SID, recovery reason, and next action are easier to read.
 
-Individual WOSID page failures are recorded once with the real extraction or
-SQLite import error. They are not requeued for retry; 20 consecutive final
-parse failures still trigger the WOS `buildQuery` recovery diagnostic described
-above.
+Individual content-level WOSID page failures are recorded once with the real
+extraction or SQLite import error. They are not requeued for retry. Recognized
+session-level failures are reported as deferred, trigger SID recovery, and are
+not written to the blacklist.
 
 When a WOSID parse attempt is finally reported as `parse FAIL`, the CLI stores
 that WOSID in the separate global SQLite parse blacklist database and skips it
 by default on future parse runs. These blacklisted failures still contribute to
-the 20-failure SID recovery diagnostic counter. Use
+the SID recovery diagnostic counter. Use
 `iiaide-wos wosdata --blacklist` to inspect the list, `iiaide-wos wosdata
 --unblacklist <WOSID>` to remove one entry, or `iiaide-wos wosdata
 --clear-blacklist` to remove all entries. Add `--retry-blacklist` to a parse

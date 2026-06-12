@@ -322,7 +322,7 @@ test("interactive missing Playwright browser repair runs bundled install before 
 
 test("parse failure recovery probes buildQuery and restarts CLI only on SID query errors", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/const refreshSidAfterConsecutiveFailures = async \(\) => \{[\s\S]*?\n  \};\n  try/);
+  const match = source.match(/const refreshSidAfterConsecutiveFailures = async \([^)]*\) => \{[\s\S]*?\n  \};\n  try/);
   assert.ok(match, "parse SID recovery source should be present");
   assert.match(match[0], /WOS parse recovery/);
   assert.match(match[0], /await forceCloseWosSession\(session\)/);
@@ -331,6 +331,10 @@ test("parse failure recovery probes buildQuery and restarts CLI only on SID quer
   assert.match(match[0], /isSidInvalidRecoveryErrorCode\(recoveryQuery\.error_code\)/);
   assert.match(match[0], /await forceCloseWosSession\(session\)/);
   assert.match(match[0], /discardActiveConfigSid\(args[\s\S]*force: true/);
+  assert.match(match[0], /waitForUsableWosSession\(args/);
+  assert.match(match[0], /startParseSession\("sid-pool-refilled", 0, 0, \{ recoverSid: false \}\)/);
+  assert.match(match[0], /parse-sid-pool-refill-validation-failed/);
+  assert.match(match[0], /Removing that SID and waiting for another saved SID instead of returning to the menu/);
   assert.doesNotMatch(match[0], /clearSavedSidConfig\(args\)/);
   assert.match(match[0], /delete process\.env\.WOS_SID/);
   assert.match(match[0], /omitSidArgs: true/);
@@ -350,10 +354,11 @@ test("parse failures are recorded once without retrying individual WOSIDs", () =
   assert.doesNotMatch(source, /chunk\.push\(\{ \.\.\.item/);
   assert.match(source, /const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 20/);
   assert.match(match[0], /const sessionRecoveryError = isSessionRecoveryError\(error\)/);
-  assert.match(match[0], /const blacklisted = true/);
-  assert.match(match[0], /recordProgressStatus = "failed"/);
+  assert.match(match[0], /const blacklisted = !sessionRecoveryError/);
+  assert.match(match[0], /recordProgressStatus = sessionRecoveryError \? "deferred" : "failed"/);
+  assert.match(match[0], /deferred: sessionRecoveryError/);
   assert.match(match[0], /consecutiveParseFailures \+= 1/);
-  assert.match(match[0], /consecutiveParseFailures >= PARSE_RECOVERY_CONSECUTIVE_FAILURES/);
+  assert.match(match[0], /sessionRecoveryError \|\| consecutiveParseFailures >= PARSE_RECOVERY_CONSECUTIVE_FAILURES/);
   assert.match(match[0], /failures\.push\(failure\)/);
   assert.match(match[0], /processed \+= 1/);
 });
@@ -536,7 +541,7 @@ test("restart argv sanitization removes explicit SID values", () => {
 test("parse progress detail is completion-oriented for concurrent workers", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
   assert.match(source, /let recordProgressStatus = "ok"/);
-  assert.match(source, /recordProgressStatus = "failed"/);
+  assert.match(source, /recordProgressStatus = sessionRecoveryError \? "deferred" : "failed"/);
   assert.doesNotMatch(source, /consecutiveFailures \+= 1/);
   assert.match(source, /parseProgress\.update\(processed, `\$\{recordProgressStatus\} \$\{wosid\}`, failures\.length\)/);
   assert.doesNotMatch(source, /parseProgress\.update\(processed, `source \$\{index\}/);
@@ -1064,6 +1069,7 @@ test("auth command parses MUST login and monitor options", () => {
     "--password", "secret-two",
     "--min-sids", "3",
     "--interval-ms", "5000",
+    "--retry-delay-ms", "7000",
     "--max-checks", "4",
     "--quiet",
     "--tasks-root", root,
@@ -1073,6 +1079,7 @@ test("auth command parses MUST login and monitor options", () => {
   assert.deepEqual(monitorArgs.authPasswords, ["secret-one", "secret-two"]);
   assert.equal(monitorArgs.authMinSids, 3);
   assert.equal(monitorArgs.authIntervalMs, 5000);
+  assert.equal(monitorArgs.authRetryDelayMs, 7000);
   assert.equal(monitorArgs.authMaxChecks, 4);
   assert.equal(monitorArgs.authQuiet, true);
 });
@@ -1205,6 +1212,59 @@ test("auth monitor refreshes SID pool when count is at min-sids", async () => {
   assert.ok(fs.existsSync(cli.authMonitorStatusPath()));
   assert.equal(cli.readAuthMonitorStatus().status, "off");
   assert.match(output, /checks=1/);
+  assert.match(output, /triggered=1/);
+});
+
+test("auth monitor waits and keeps running after a refresh login failure", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs([
+    "node", "cli", "auth", "monitor",
+    "--account", "one@example.edu",
+    "--password", "secret-one",
+    "--min-sids", "2",
+    "--retries", "0",
+    "--max-checks", "2",
+    "--quiet",
+    "--tasks-root", root,
+  ]);
+  let loginCalls = 0;
+  const deps = {
+    ...cli.authDependencies(args),
+    login: async () => {
+      loginCalls += 1;
+      if (loginCalls === 1) {
+        throw new Error("Login succeeded but SID was not found. Final URL: chrome-error://chromewebdata/");
+      }
+      return { sid: "SIDMONITOR2", finalUrl: "https://www.webofscience.com/wos/" };
+    },
+  };
+  const sleeps = [];
+  const progress = [];
+
+  const originalLog = console.log;
+  let output = "";
+  console.log = (value = "") => {
+    output += `${value}\n`;
+  };
+  try {
+    assert.equal(await cli.executeAuthCommand(args, deps, {
+      canPrompt: () => false,
+      progress: (message) => progress.push(message),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      installSignalHandlers: false,
+    }), 0);
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.equal(loginCalls, 2);
+  assert.deepEqual(sleeps, [60000]);
+  assert.deepEqual(readJson(cli.globalConfigPath()).sids, ["SIDMONITOR2"]);
+  assert.match(progress.join("\n"), /refresh failed: Login succeeded but SID was not found/);
+  assert.match(progress.join("\n"), /waiting 1m before retrying/);
+  assert.match(output, /checks=2/);
   assert.match(output, /triggered=1/);
 });
 
@@ -2620,6 +2680,8 @@ test("TXT export switches SID on WOS batch request failures without logging the 
   assert.match(exportMethod[0], /switchSidAfterTxtExportFailure/);
   assert.match(exportMethod[0], /phase: "txt-export-sid-switch"/);
   assert.match(exportMethod[0], /discardActiveConfigSid\(args, `WOS TXT export failed for records/);
+  assert.match(exportMethod[0], /waitForUsableWosSession\(args/);
+  assert.match(exportMethod[0], /txt-export-sid-switch-validation-failed/);
   assert.match(exportMethod[0], /prepareWosRequestContext\(page, args\)/);
   assert.match(exportMethod[0], /missingBatchCount: resumePlan\.missingBatches\.length/);
   assert.match(exportMethod[0], /firstMissingBatch: resumePlan\.missingBatches\[0\] \|\| null/);

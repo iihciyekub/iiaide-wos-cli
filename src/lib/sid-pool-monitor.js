@@ -90,6 +90,12 @@ function formatMonitorSnapshot(snapshot) {
   return `sidPoolCount=${snapshot.sidPoolCount} activeSid=${snapshot.activeSid || "none"}`;
 }
 
+function formatDelay(ms) {
+  const seconds = Math.round(Number(ms || 0) / 1000);
+  if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
+
 async function monitorSidPool(args, dependencies, options = {}) {
   const progress = options.progress || createProgressLogger(args, options.stream || process.stderr);
   const sleepImpl = options.sleep || sleep;
@@ -121,9 +127,21 @@ async function monitorSidPool(args, dependencies, options = {}) {
 
       if (Number(snapshot.sidPoolCount || 0) <= args.authMinSids) {
         progress("progress auth monitor: SID pool low-water mark reached, refreshing SID");
-        await runAuthLogin(args, dependencies, { progress });
-        triggered += 1;
-        dependencies.writeMonitorStatus?.({ status: "running", checks, triggered });
+        try {
+          await runAuthLogin(args, dependencies, { progress });
+          triggered += 1;
+          dependencies.writeMonitorStatus?.({ status: "running", checks, triggered });
+        } catch (error) {
+          const message = error?.message || String(error);
+          progress(`progress auth monitor: refresh failed: ${message}`);
+          if (args.authMaxChecks && checks >= args.authMaxChecks) {
+            progress(`progress auth monitor: reached max checks ${args.authMaxChecks}`);
+            break;
+          }
+          progress(`progress auth monitor: waiting ${formatDelay(args.authRetryDelayMs)} before retrying`);
+          await sleepImpl(args.authRetryDelayMs);
+          continue;
+        }
       }
 
       if (args.authMaxChecks && checks >= args.authMaxChecks) {
@@ -154,6 +172,7 @@ async function monitorSidPool(args, dependencies, options = {}) {
 
 module.exports = {
   createProgressLogger,
+  formatDelay,
   formatMonitorSnapshot,
   loginWithRetries,
   monitorSidPool,

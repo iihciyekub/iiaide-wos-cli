@@ -3,6 +3,32 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.78 - 2026-06-13
+
+- Add a reusable WOS session supervisor for SID-pool handoff. TXT export SID
+  switches and parse recovery now validate that a replacement SID can actually
+  reopen WOS before continuing; unusable replacement SIDs are removed and the
+  current workflow keeps waiting for another saved SID instead of falling back
+  to the interactive menu.
+- Treat recognized session-level parse failures as deferred recovery events
+  instead of content failures. These errors now trigger SID recovery without
+  writing the affected WOSID to the parse blacklist.
+
+## 0.4.77 - 2026-06-12
+
+- Keep parse recovery in the SID-pool wait loop when a newly added saved SID
+  cannot reopen WOS. Instead of returning to the interactive menu after
+  detecting an unusable replacement SID, the CLI now removes that SID and waits
+  for another saved SID so the current parse can continue.
+
+## 0.4.76 - 2026-06-12
+
+- Keep `auth monitor --provider must` running after a failed low-water refresh
+  login. The monitor now logs the refresh failure, waits 60 seconds by default,
+  and then checks the SID pool again instead of exiting on transient browser or
+  WOS navigation failures such as `chrome-error://chromewebdata/`.
+- Add `--retry-delay-ms` to tune that auth monitor failure cooldown.
+
 ## 0.4.75 - 2026-06-12
 
 - Treat a full-record TXT export request failure as an expired SID signal
