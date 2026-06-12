@@ -12,10 +12,16 @@ const {
   installBundledPlaywrightBrowser,
   isMissingPlaywrightBrowserError,
 } = require("./lib/playwright-install");
+const {
+  monitorSidPool,
+  normalizeAuthCredentials,
+  runAuthLogin,
+} = require("./lib/sid-pool-monitor");
 const { color, createProgress, createSpinner, isInteractive } = require("./lib/terminal");
 const { updateCli } = require("./lib/update");
 const { exportBibBatchesViaWosJs, exportTxtBatchesViaWosJs } = require("./lib/wos-browser-export");
 const { normalizeWosId, reconcileWosId } = require("./lib/wos-ids");
+const { DEFAULT_MUST_LOGIN_URL, loginAndExtractMustSid } = require("./lib/wos-must-auth");
 const {
   defaultWosDataDbPath,
   defaultWosBlacklistDbPath,
@@ -134,6 +140,8 @@ Usage:
   iiaide-wos menu
   iiaide-wos init [--tasks-root <dir>]
   iiaide-wos check [--sid <SID> | --from-browser] [--tasks-root <dir>] [--wos-domain <domain>] [--base-url <url>] [--headed]
+  iiaide-wos auth login [--provider must] [--account <email>] [--password <secret>] [options]
+  iiaide-wos auth monitor [--provider must] [--account <email>] [--password <secret>] [options]
   iiaide-wos sid-pool [--tasks-root <dir>]
   iiaide-wos workspace [--tasks-root <dir>]
   iiaide-wos settings [--playwright-visible <on|off>] [--parse-concurrency <n>] [--add-sid <SID>] [--add-sids "<SID...>"] [--tasks-root <dir>]
@@ -157,6 +165,18 @@ Usage:
 Inputs:
   --sid <SID>             Web of Science SID. Interactive commands prompt when missing or expired
   --from-browser          Open a browser login window and auto-detect WOS SID
+  --provider <name>       Auth provider for auth commands. Default: must
+  --account <value>       MUST account email; repeat with --password for rotation
+  --password <value>      Matching MUST password; prefer prompt/env when possible
+  --auth-url <url>        Override the MUST SSO login URL
+  --no-save               Auth login only: do not save the captured SID
+  --retries <n>           Auth login retry count. Default: 1
+  --interval-ms <n>       Auth monitor interval. Default: 3000
+  --min-sids <n>          Auth monitor low-water mark; refresh when pool <= n. Default: 2
+  --threshold <n>         Alias for --min-sids
+  --max-checks <n>        Auth monitor stop after n checks. Default: 0 = infinite
+  --quiet                 Auth commands: suppress progress lines
+  --json                  Auth commands: print machine-readable JSON
   --url <summary-url>     WOS summary URL
   --uuid <uuid>           WOS result-set UUID; used when --url is not provided
   --csv <file>            Existing CSV containing a wosid/UT column or WOS IDs in its first column
@@ -224,9 +244,11 @@ Task directory layout:
 
 function parseArgs(argv) {
   const command = argv[2] && !argv[2].startsWith("--") ? argv[2] : "run";
-  const startIndex = command === "run" ? (argv[2] === "run" ? 3 : 2) : 3;
+  const authCommand = command === "auth" && argv[3] && !argv[3].startsWith("--") ? argv[3] : "login";
+  const startIndex = command === "run" ? (argv[2] === "run" ? 3 : 2) : (command === "auth" && argv[3] === authCommand ? 4 : 3);
   const args = {
     command,
+    authCommand,
     sid: "",
     sidSource: "",
     sidPoolIndex: -1,
@@ -278,9 +300,24 @@ function parseArgs(argv) {
     cooldownMs: 250,
     checkOnly: false,
     withDeps: false,
+    authProvider: "must",
+    authLoginUrl: process.env.WOS_LOGIN_URL || DEFAULT_MUST_LOGIN_URL,
+    authAccount: process.env.WOS_ACCOUNT || "",
+    authPassword: process.env.WOS_PASSWORD || "",
+    authAccounts: [],
+    authPasswords: [],
+    authSave: true,
+    authRetries: 1,
+    authIntervalMs: 3000,
+    authMinSids: 2,
+    authMaxChecks: 0,
+    authQuiet: false,
+    json: false,
     help: false,
     version: false,
   };
+  let sawAuthAccountArg = false;
+  let sawAuthPasswordArg = false;
 
   const readValue = (flag, index) => {
     const value = argv[index + 1];
@@ -297,6 +334,29 @@ function parseArgs(argv) {
       args.sidSource = "cli";
     }
     else if (arg === "--from-browser" || arg === "--browser-sid") args.fromBrowser = true;
+    else if (arg === "--provider") args.authProvider = readValue(arg, i++);
+    else if (arg === "--account") {
+      if (!sawAuthAccountArg) {
+        args.authAccounts = [];
+        sawAuthAccountArg = true;
+      }
+      args.authAccounts.push(readValue(arg, i++));
+    }
+    else if (arg === "--password") {
+      if (!sawAuthPasswordArg) {
+        args.authPasswords = [];
+        sawAuthPasswordArg = true;
+      }
+      args.authPasswords.push(readValue(arg, i++));
+    }
+    else if (arg === "--auth-url" || arg === "--login-url") args.authLoginUrl = readValue(arg, i++);
+    else if (arg === "--no-save") args.authSave = false;
+    else if (arg === "--retries") args.authRetries = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--interval-ms") args.authIntervalMs = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--min-sids" || arg === "--threshold") args.authMinSids = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--max-checks") args.authMaxChecks = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--quiet") args.authQuiet = true;
+    else if (arg === "--json") args.json = true;
     else if (arg === "--url") {
       args.url = readValue(arg, i++);
       args.urlHadProtocol = /^https?:\/\//i.test(args.url);
@@ -378,6 +438,10 @@ function parseArgs(argv) {
   if (!args.url && args.uuid) args.url = buildSummaryUrl(args.baseUrl, args.uuid, args.sortBy);
   assertIntegerRange("--batch-size", args.batchSize, 1, 500);
   assertIntegerRange("--timeout-ms", args.timeoutMs, 5000);
+  assertIntegerRange("--retries", args.authRetries, 0);
+  assertIntegerRange("--interval-ms", args.authIntervalMs, 1000);
+  assertIntegerRange("--min-sids", args.authMinSids, 0);
+  assertIntegerRange("--max-checks", args.authMaxChecks, 0);
   assertIntegerRange("--record-timeout-ms", args.recordTimeoutMs, 5000);
   assertIntegerRange("--concurrency", args.concurrency, 1, 10);
   if (args.parseConcurrencySetting !== null) assertIntegerRange("--parse-concurrency", args.parseConcurrencySetting, 1, 10);
@@ -606,6 +670,10 @@ function globalConfigPath() {
   return path.join(os.homedir(), ".iiaide-wos", "config.json");
 }
 
+function authMonitorStatusPath() {
+  return path.join(path.dirname(globalConfigPath()), "auth-monitor.json");
+}
+
 function taskDirectory(tasksRoot, taskId) {
   const root = path.resolve(tasksRoot);
   const target = path.resolve(root, taskId);
@@ -637,6 +705,47 @@ function readGlobalConfig() {
   return readJson(globalConfigPath(), { version: 1 });
 }
 
+function readAuthMonitorStatus(options = {}) {
+  const statusPath = authMonitorStatusPath();
+  const raw = readJson(statusPath, null);
+  if (!raw) {
+    return {
+      status: "off",
+      label: "off",
+      path: statusPath,
+    };
+  }
+  const provider = raw.provider || "must";
+  const updatedAt = raw.updatedAt || "";
+  const updatedMs = Date.parse(updatedAt);
+  const nowMs = Number(options.nowMs ?? Date.now());
+  const ageMs = Number.isFinite(updatedMs) ? Math.max(0, nowMs - updatedMs) : Number.MAX_SAFE_INTEGER;
+  const intervalMs = Math.max(0, Number(raw.intervalMs || 0));
+  const staleAfterMs = Math.max(intervalMs * 3, 15000);
+  const status = raw.status === "running" && ageMs <= staleAfterMs
+    ? "running"
+    : (raw.status === "running" ? "stale" : "off");
+  const minSids = Number(raw.minSids || 0);
+  const label = status === "running"
+    ? `${provider} monitor running, min-sids ${minSids}`
+    : (status === "stale" ? `${provider} monitor stale` : "off");
+  return {
+    status,
+    label,
+    provider,
+    minSids,
+    intervalMs,
+    staleAfterMs,
+    ageMs,
+    pid: raw.pid || 0,
+    checks: Number(raw.checks || 0),
+    triggered: Number(raw.triggered || 0),
+    startedAt: raw.startedAt || "",
+    updatedAt,
+    path: statusPath,
+  };
+}
+
 function applySavedRuntimeSettings(args) {
   const config = readConfig(args.tasksRoot);
   if (!args.headedSource && typeof config.playwrightVisible === "boolean") {
@@ -664,6 +773,28 @@ function writeGlobalConfig(config) {
     { version: 1, ...config, updatedAt: new Date().toISOString() },
     { mode: 0o600, backup: true }
   );
+}
+
+function writeAuthMonitorStatus(args, patch = {}) {
+  const now = new Date().toISOString();
+  const existing = readJson(authMonitorStatusPath(), {});
+  const status = patch.status || existing.status || "running";
+  const next = {
+    version: 1,
+    provider: args.authProvider || patch.provider || existing.provider || "must",
+    command: "auth monitor",
+    status,
+    pid: process.pid,
+    minSids: Number(args.authMinSids ?? patch.minSids ?? existing.minSids ?? 0),
+    intervalMs: Number(args.authIntervalMs ?? patch.intervalMs ?? existing.intervalMs ?? 0),
+    checks: Number(patch.checks ?? existing.checks ?? 0),
+    triggered: Number(patch.triggered ?? existing.triggered ?? 0),
+    startedAt: patch.startedAt || existing.startedAt || now,
+    updatedAt: now,
+  };
+  fs.mkdirSync(path.dirname(authMonitorStatusPath()), { recursive: true });
+  writeJson(authMonitorStatusPath(), next, { mode: 0o600, backup: true });
+  return next;
 }
 
 function parseSidValues(value) {
@@ -1585,6 +1716,7 @@ function workspaceStatus(args, sidCheck = null) {
     sidPoolCount: pool.sids.length,
     sidPoolIndex: pool.activeIndex,
     sidConfig: globalConfigPath(),
+    authMonitor: readAuthMonitorStatus(),
     deadSidCount: Array.isArray(sidConfig.deadSids) ? sidConfig.deadSids.length : 0,
     sidCheck: safeSidCheck,
     wosDataDb: wosDataDbStats(args.dbPath, args.blacklistDbPath),
@@ -2418,7 +2550,11 @@ async function chooseFreshSidInteractively(args, report = console.error, options
           args.sidSource = "";
           return (options.readBrowserSid || readSidFromBrowser)(args);
         },
-        () => (options.promptManualSid || promptSid)("Enter WOS SID manually")
+        () => (options.promptManualSid || promptSid)("Enter WOS SID manually"),
+        async () => {
+          const result = await waitForSavedSidPool(args, { report });
+          return result.sid;
+        }
       );
     } finally {
       rl?.close();
@@ -2473,7 +2609,7 @@ async function prepareWosSession(args, options = {}) {
     let status = null;
     if (!args.sid) {
       await releaseWosContext(context);
-      report("No saved SID found. Choose manual SID input or browser login to continue.");
+      report("No saved SID found. Choose manual SID input, wait for SID pool, or browser login to continue.");
       await acquireFreshSid(args, report);
       context = await launchWosPersistentContext(args, visible);
       page = context.pages()[0] || await context.newPage();
@@ -2491,13 +2627,13 @@ async function prepareWosSession(args, options = {}) {
           continue;
         }
         if (discarded) {
-          report("All saved SIDs were invalid. Choose manual SID input or browser login to refresh authentication.");
+          report("All saved SIDs were invalid. Choose manual SID input, wait for SID pool, or browser login to refresh authentication.");
         }
       }
       if (args.sidSource === "browser") {
         throw new Error(`Browser-detected WOS SID could not be validated after reopening the WOS profile. ${error.message || error}`);
       }
-      report(`WOS SID validation failed. Choose manual SID input or browser login to continue. ${error.message || error}`);
+      report(`WOS SID validation failed. Choose manual SID input, wait for SID pool, or browser login to continue. ${error.message || error}`);
       await acquireFreshSid(args, report);
       context = await launchWosPersistentContext(args, visible);
       page = context.pages()[0] || await context.newPage();
@@ -3732,6 +3868,125 @@ function printTaskPath(args) {
   console.log(task.taskDir);
 }
 
+async function promptLine(message) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(message)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+async function promptHidden(message) {
+  return new Promise((resolve, reject) => {
+    const input = process.stdin;
+    const output = process.stdout;
+    const wasRaw = Boolean(input.isRaw);
+    let value = "";
+
+    function cleanup() {
+      input.removeListener("data", onData);
+      if (input.isTTY) input.setRawMode(wasRaw);
+      output.write("\n");
+      input.pause();
+    }
+
+    function onData(chunk) {
+      const text = chunk.toString("utf8");
+      for (const char of text) {
+        if (char === "\r" || char === "\n") {
+          cleanup();
+          resolve(value.trim());
+          return;
+        }
+        if (char === "\u0003") {
+          cleanup();
+          reject(new Error("Password input cancelled."));
+          return;
+        }
+        if (char === "\u007f") {
+          value = value.slice(0, -1);
+          continue;
+        }
+        value += char;
+      }
+    }
+
+    output.write(message);
+    input.resume();
+    if (input.isTTY) input.setRawMode(true);
+    input.on("data", onData);
+  });
+}
+
+async function prepareAuthCredentials(args, options = {}) {
+  if (args.authAccounts.length || args.authPasswords.length) {
+    normalizeAuthCredentials(args);
+    return args;
+  }
+  if (args.authAccount && args.authPassword) {
+    normalizeAuthCredentials(args);
+    return args;
+  }
+  const canPrompt = options.canPrompt || (() => process.stdin.isTTY && process.stdout.isTTY);
+  if (!canPrompt()) {
+    normalizeAuthCredentials(args);
+    return args;
+  }
+  if (!args.authAccount) args.authAccount = await (options.promptLine || promptLine)("MUST account: ");
+  if (!args.authPassword) args.authPassword = await (options.promptHidden || promptHidden)("MUST password: ");
+  normalizeAuthCredentials(args);
+  return args;
+}
+
+function authDependencies(args) {
+  return {
+    login: loginAndExtractMustSid,
+    saveSid: (sid) => addSidsToConfig(args, [sid], { activate: true }),
+    currentSidPoolStatus: () => currentSidPoolStatus(args),
+    writeMonitorStatus: (patch) => writeAuthMonitorStatus(args, patch),
+    maskSid,
+  };
+}
+
+function safeAuthResult(result) {
+  const { sid, ...safe } = result || {};
+  return safe;
+}
+
+function formatAuthLoginResult(result) {
+  const saved = result.saved ? "saved" : "captured";
+  const pool = result.saved ? ` pool=${result.sidPoolCount}` : "";
+  return `Auth login ${saved}: SID ${result.sidMasked || "none"}${pool}`;
+}
+
+function formatAuthMonitorResult(result) {
+  return `Auth monitor stopped: checks=${result.checks} triggered=${result.triggered} sidPoolCount=${result.sidPool?.sidPoolCount ?? 0}`;
+}
+
+async function executeAuthCommand(args, dependencies = authDependencies(args), options = {}) {
+  if (!["login", "monitor"].includes(args.authCommand)) {
+    throw new CliMessageError(`Unknown auth command: ${args.authCommand}`);
+  }
+  if (args.authProvider !== "must") {
+    throw new CliMessageError(`Unsupported auth provider: ${args.authProvider}`);
+  }
+  if (args.authCommand === "monitor" && !args.authSave) {
+    throw new CliMessageError("auth monitor requires saving. Remove --no-save.");
+  }
+  await prepareAuthCredentials(args, options);
+  if (args.authCommand === "monitor") {
+    const result = await monitorSidPool(args, dependencies, options);
+    if (args.json) console.log(JSON.stringify(safeAuthResult(result), null, 2));
+    else console.log(formatAuthMonitorResult(result));
+    return 0;
+  }
+  const result = await runAuthLogin(args, dependencies, options);
+  if (args.json) console.log(JSON.stringify(safeAuthResult(result), null, 2));
+  else console.log(formatAuthLoginResult(result));
+  return 0;
+}
+
 async function validateAndSaveSid(args) {
   const spinner = createSpinner("Validating and saving WOS SID");
   let session = null;
@@ -3775,11 +4030,11 @@ async function checkSid(args, dependencies = {}) {
   }
 
   if (quick.status === "invalid") {
-    report("Saved SID is invalid. Choose manual SID input or browser login to refresh it.");
+    report("Saved SID is invalid. Choose manual SID input, wait for SID pool, or browser login to refresh it.");
   } else if (quick.status === "missing") {
-    report("No saved SID found. Choose manual SID input or browser login to create one.");
+    report("No saved SID found. Choose manual SID input, wait for SID pool, or browser login to create one.");
   } else {
-    report("SID could not be confirmed with the lightweight check. Choose manual SID input or browser login to continue validation.");
+    report("SID could not be confirmed with the lightweight check. Choose manual SID input, wait for SID pool, or browser login to continue validation.");
   }
 
   const repaired = await validateSidFlow(args);
@@ -3824,6 +4079,9 @@ async function executeCommand(args) {
     const result = await checkSid(args);
     console.log(formatCheckSidResult(result));
     return 0;
+  }
+  if (args.command === "auth") {
+    return executeAuthCommand(args);
   }
   if (args.command === "sid-pool") {
     console.log(JSON.stringify(currentSidPoolStatus(args), null, 2));
@@ -4058,6 +4316,10 @@ async function runInteractiveMenu(argv = process.argv) {
       const selectedArgs = await interactiveArgs(VERSION, workspaceStatus(menuArgs, sidCheck), {
         makeTaskId,
         readBrowserSid: () => readSidFromBrowser(menuArgs),
+        async waitForSidPool() {
+          const result = await waitForSavedSidPool(menuArgs);
+          return result.sid;
+        },
         async saveSid(sid) {
           addSidsToConfig(menuArgs, [sid], { activate: true });
           menuArgs.sid = "";
@@ -4167,6 +4429,14 @@ module.exports = {
   setCurrentTaskId,
   checkSid,
   formatCheckSidResult,
+  executeAuthCommand,
+  prepareAuthCredentials,
+  authDependencies,
+  formatAuthLoginResult,
+  formatAuthMonitorResult,
+  authMonitorStatusPath,
+  readAuthMonitorStatus,
+  writeAuthMonitorStatus,
   currentSidPoolStatus,
   ensureSid,
   quickValidateSid,

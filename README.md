@@ -67,7 +67,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.59
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.65
 iiaide-wos install-browser
 iiaide-wos
 # or
@@ -210,6 +210,31 @@ iiaide-wos settings --add-sids "SID_ONE SID_TWO
 SID_THREE"
 ```
 
+If you use a MUST institutional account, `auth login` can produce one fresh SID
+and write it to the same global pool:
+
+```bash
+iiaide-wos auth login --provider must
+```
+
+For long parses, run a separate monitor process that refills the pool when it
+gets low:
+
+```bash
+iiaide-wos auth monitor --provider must --min-sids 2 --interval-ms 3000
+```
+
+The auth commands use a short-lived Playwright browser that is separate from the
+workspace WOS browser profile used for export and parse work. Repeated
+`--account` and `--password` pairs rotate across multiple MUST accounts. Prefer
+interactive password input or `WOS_ACCOUNT` / `WOS_PASSWORD` over `--password`
+because command-line arguments can be visible in shell history and process
+lists. `--min-sids` is the SID pool low-water mark: the monitor refreshes when
+`sidPoolCount <= min-sids`. Routine auth output masks SID values; the full SID
+is only saved in `~/.iiaide-wos/config.json`. The monitor also writes a small
+heartbeat at `~/.iiaide-wos/auth-monitor.json`; the interactive/workspace
+dashboard shows this as `SID Producer` and marks it stale when updates stop.
+
 In an interactive terminal, iiaide-wos validates the SID with the canonical WOS
 initialization URL and saves it to the global SID pool in
 `~/.iiaide-wos/config.json`. SID pool values are user-level, so a SID added from
@@ -243,18 +268,21 @@ setup is requested only when you choose a WOS download or parse workflow that
 needs WOS network access. The left dashboard logo is highlighted in
 color-capable terminals, and the WOS origin URL appears under the left-side
 `iiaide-wos CLI` title. Export commands still run the stricter persistent
-Playwright validation before downloading. In menu mode, after a SID is entered
-manually or detected from a browser login, the CLI adds it to the saved pool and
-redraws the workspace dashboard so the refreshed authentication state is visible
-before the next workflow prompt. The Settings menu also provides `5.3 Add SID`
-for one value and `5.4 Batch add SIDs` for multiple values separated by spaces,
-newlines, or commas. Settings, SQLite, task management, and update workflows can
-be used while `Auth no` is shown. The dashboard shows a masked current SID and the
-active pool position/count.
+Playwright validation before downloading. In menu mode, SID setup offers
+`Manual input`, `Wait for SID pool`, and `Open browser login`. Manual entry and
+browser detection add the SID to the saved pool; SID pool waiting keeps checking
+until another process, such as `auth monitor`, adds one. The CLI then redraws
+the workspace dashboard so the refreshed authentication state is visible before
+the next workflow prompt. The Settings menu also provides `5.3 Add SID` for one
+value and `5.4 Batch add SIDs` for multiple values separated by spaces, newlines,
+or commas. Settings, SQLite, task management, and update workflows can be used
+while `Auth no` is shown. The dashboard shows a masked current SID, the active
+pool position/count, and `SID Producer` when an auth monitor heartbeat is
+available.
 `iiaide-wos check` first runs the lightweight SID probe; when the SID is
-missing, invalid, or cannot be confirmed, it tries the saved SID pool and then
-opens a visible WOS browser login if needed. It prints only a short safe status
-message.
+missing, invalid, or cannot be confirmed, it tries the saved SID pool and, in an
+interactive terminal, uses the same SID setup choices. It prints only a short
+safe status message.
 
 For scripts and CI, prompts are disabled. Supply authentication explicitly:
 
@@ -384,9 +412,9 @@ export, and parse warm-up pages less likely to stall behind either the
 full-banner or close-only cookie variant.
 
 When a saved SID is missing or fails browser validation in an interactive
-terminal, the CLI now offers a SID choice first: paste a SID manually or open a
-WOS browser login for auto-detection. It no longer forces the visible browser
-login path before giving you the manual SID option.
+terminal, the CLI now offers a SID choice first: paste a SID manually, wait for
+the saved SID pool, or open a WOS browser login for auto-detection. It no longer
+forces the visible browser login path before giving you the pool/manual options.
 
 WOSID parsing preserves the accession prefix found in the TXT or CSV input. The
 CLI no longer forces parsed IDs into a `WOS:<id>` shape; it validates the
@@ -538,7 +566,11 @@ At the `WOS summary URL or UUID` prompt, pressing Enter uses the shown saved
 source when one exists. Without a saved source, enter a source, press `B` to
 return to the menu, or press `q` to exit the CLI.
 Authentication status stays in the dashboard instead of being repeated inside
-each workflow prompt.
+each workflow prompt. When `auth monitor` is active, the same panel shows
+`SID Producer` beside `SID Pool` so you can see whether the background SID
+producer is running, stale, or off. If a WOS workflow needs authentication
+while the pool is empty, SID setup offers `Wait for SID pool` so the workflow can
+keep checking until an auth monitor or another terminal adds a SID.
 The interactive workflow menu is grouped by command family:
 
 ```text
@@ -546,6 +578,7 @@ The interactive workflow menu is grouped by command family:
   1.1 UUID - TXT format
   1.2 UUID - BIB format
 2 WOS IDs to SQL
+  2.1 Resume
 3 Task manager
   3.1 New
   3.2 Switch
@@ -567,10 +600,11 @@ q Exit
 
 Download workflows run directly in the current task marked with `*`. Use
 `c Check SID` when you want to validate the saved SID from the startup panel
-and fall back to browser login if the saved SID pool has no usable value.
+and enter SID setup choices if the saved SID pool has no usable value.
 Use `2 WOS IDs to SQL` to parse from either a local WOSID CSV or a WOS summary
 URL/UUID; `.csv` input runs the CSV path and URL/UUID input runs the WOS export
-path first.
+path first. Use `2.1 Resume` to run the current task's existing WOSID list into
+SQLite immediately without entering the source again.
 Use `4.1 Status` to inspect the global SQLite database, `4.2 Merge database`
 to merge another WOS SQLite database, and `4.3 Query WOSID` to enter one WOSID
 and print its SQLite record. Merge asks whether existing SQL rows should be
@@ -584,14 +618,16 @@ an existing task, and `3.3 Clear` to remove an existing managed task.
 
 - [Docs Guide](docs/README.md): what each document is for and when to update it
 - [Usage And Data Model](docs/usage.md): user workflows, task lifecycle, and output definitions
+- [MUST SID Producer Spec](docs/auth-must.md): integrated MUST SSO auth producer design
 - [WOS Curl Reference](docs/curl.md): request-level debugging and export method reference
 - [Changelog](CHANGELOG.md): versioned behavior changes
 
 ## Current Scope
 
-- The CLI interacts with WOS using a valid user session. It does not perform
-  account login or bypass WOS authentication, and it does not store usernames,
-  passwords, or SID values in `wosdata.sqlite`.
+- WOS export and parse workflows interact with WOS using a valid user session
+  SID. The optional `auth` commands can log into MUST SSO to produce fresh SIDs,
+  but task artifacts and `wosdata.sqlite` do not store account usernames,
+  passwords, or SID values.
 - URL/UUID exports use the WOS web export endpoint instead of scrolling the
   virtualized result list.
 - Imported CSV tasks do not contain raw WOS full-record export files until

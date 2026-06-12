@@ -10,7 +10,7 @@ const Database = require("better-sqlite3");
 const cli = require("../src/iiaide-wos");
 const playwrightInstall = require("../src/lib/playwright-install");
 const { readJson, writeJson } = require("../src/lib/io");
-const { classifyWosIdsToSqlInput, currentTaskSelection, formatBytes, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
+const { askSidFromBrowserOrManual, classifyWosIdsToSqlInput, currentTaskSelection, formatBytes, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
 const { createProgress, createSpinner } = require("../src/lib/terminal");
 const { normalizeBatchResult } = require("../src/lib/wos-browser-export");
 const { wosIdsEquivalent } = require("../src/lib/wos-ids");
@@ -727,6 +727,7 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(workflowMatch[0], /1\.1", "UUID - TXT format/);
   assert.match(workflowMatch[0], /1\.2", "UUID - BIB format/);
   assert.match(workflowMatch[0], /workflowTopItem\("2", "WOS IDs to SQL/);
+  assert.match(workflowMatch[0], /2\.1", "Resume/);
   assert.doesNotMatch(workflowMatch[0], /Parse"\)/);
   assert.doesNotMatch(workflowMatch[0], /2\.2/);
   assert.doesNotMatch(workflowMatch[0], /WOSID CSV/);
@@ -750,7 +751,7 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.doesNotMatch(workflowMatch[0], /Probe the saved SID/);
   assert.doesNotMatch(workflowMatch[0], /Install the latest release/);
   assert.doesNotMatch(workflowMatch[0], /Return to the workspace menu/);
-  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 2, 3\.1, 3\.2, 3\.3, 4\.1, 4\.2, 4\.3, 5\.1, 5\.2, 5\.3, 5\.4, c to check SID, u to update, B to go back/);
+  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 2, 2\.1, 3\.1, 3\.2, 3\.3, 4\.1, 4\.2, 4\.3, 5\.1, 5\.2, 5\.3, 5\.4, c to check SID, u to update, B to go back/);
   assert.doesNotMatch(workflowMatch[0], /Download WOS IDs/);
   assert.match(argsMatch[0], /choice === "c"/);
   assert.match(argsMatch[0], /return \["check", "--tasks-root", activeWorkspace\.tasksRoot\]/);
@@ -778,6 +779,8 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(argsMatch[0], /helpers\.addSids/);
   assert.doesNotMatch(argsMatch[0], /SQL SELECT query/);
   assert.match(argsMatch[0], /Force overwrite existing SQL rows/);
+  assert.match(argsMatch[0], /choice === "2\.1"/);
+  assert.match(argsMatch[0], /\["parse", "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot\]/);
   assert.match(argsMatch[0], /choice === "2"/);
   assert.match(argsMatch[0], /CSV path, WOS URL, or UUID/);
   assert.match(argsMatch[0], /classifyWosIdsToSqlInput\(input\)/);
@@ -845,6 +848,7 @@ test("interactive header shows WOS browser mode and profile name", () => {
       sid: "current-sid",
       sidPoolCount: 3,
       sidPoolIndex: 1,
+      authMonitor: { label: "must monitor running, min-sids 2" },
       sidCheck: { origin: "https://www.webofscience.com" },
     });
   } finally {
@@ -856,6 +860,7 @@ test("interactive header shows WOS browser mode and profile name", () => {
   assert.match(output, /Parse Tabs\s+1/);
   assert.match(output, /SID Value\s+curr...-sid/);
   assert.match(output, /SID Pool\s+2\/3/);
+  assert.match(output, /SID Producer\s+must monitor running, min-sids 2/);
   assert.doesNotMatch(output, /Dead SIDs/);
   assert.match(output, /Profile\s+\.browser-profile/);
   assert.match(output, /Task ID\s+TID20260610120000/);
@@ -890,7 +895,7 @@ test("interactive header shows WOS browser mode and profile name", () => {
   const panelRows = output
     .split(/\r?\n/)
     .filter((line) => /\|.*\|\s+\|.*\|/.test(line));
-  assert.equal(panelRows.length, 17);
+  assert.equal(panelRows.length, 18);
   assert.match(panelRows[0], /^\| {50}\|/);
   const logoRowIndex = panelRows.findIndex((line) => line.includes("[ W O S - C L I ]"));
   assert.ok(logoRowIndex > 0);
@@ -1016,6 +1021,179 @@ test("settings command can add single and batch SID pool values", async () => {
   assert.equal(result.sidPoolCount, 3);
   assert.equal(result.added, 3);
   assert.deepEqual(readJson(cli.globalConfigPath()).sids, ["one", "two", "three"]);
+});
+
+test("auth command parses MUST login and monitor options", () => {
+  const root = temporaryDirectory();
+  const loginArgs = cli.parseArgs([
+    "node", "cli", "auth", "login",
+    "--provider", "must",
+    "--account", "one@example.edu",
+    "--password", "secret-one",
+    "--auth-url", "https://login.example.test",
+    "--retries", "2",
+    "--json",
+    "--tasks-root", root,
+  ]);
+  assert.equal(loginArgs.command, "auth");
+  assert.equal(loginArgs.authCommand, "login");
+  assert.equal(loginArgs.authProvider, "must");
+  assert.deepEqual(loginArgs.authAccounts, ["one@example.edu"]);
+  assert.deepEqual(loginArgs.authPasswords, ["secret-one"]);
+  assert.equal(loginArgs.authLoginUrl, "https://login.example.test");
+  assert.equal(loginArgs.authRetries, 2);
+  assert.equal(loginArgs.json, true);
+
+  const monitorArgs = cli.parseArgs([
+    "node", "cli", "auth", "monitor",
+    "--account", "one@example.edu",
+    "--password", "secret-one",
+    "--account", "two@example.edu",
+    "--password", "secret-two",
+    "--min-sids", "3",
+    "--interval-ms", "5000",
+    "--max-checks", "4",
+    "--quiet",
+    "--tasks-root", root,
+  ]);
+  assert.equal(monitorArgs.authCommand, "monitor");
+  assert.deepEqual(monitorArgs.authAccounts, ["one@example.edu", "two@example.edu"]);
+  assert.deepEqual(monitorArgs.authPasswords, ["secret-one", "secret-two"]);
+  assert.equal(monitorArgs.authMinSids, 3);
+  assert.equal(monitorArgs.authIntervalMs, 5000);
+  assert.equal(monitorArgs.authMaxChecks, 4);
+  assert.equal(monitorArgs.authQuiet, true);
+});
+
+test("auth login saves captured MUST SID without printing the full value", async () => {
+  const root = temporaryDirectory();
+  const fullSid = "SIDSECRET1234567890";
+  const args = cli.parseArgs([
+    "node", "cli", "auth", "login",
+    "--account", "user@example.edu",
+    "--password", "secret",
+    "--quiet",
+    "--tasks-root", root,
+  ]);
+  const deps = {
+    ...cli.authDependencies(args),
+    login: async (loginArgs) => {
+      assert.equal(loginArgs.account, "user@example.edu");
+      assert.equal(loginArgs.password, "secret");
+      return { sid: fullSid, finalUrl: "https://www.webofscience.com/wos/" };
+    },
+  };
+
+  const originalLog = console.log;
+  let output = "";
+  console.log = (value = "") => {
+    output += `${value}\n`;
+  };
+  try {
+    assert.equal(await cli.executeAuthCommand(args, deps, { canPrompt: () => false, progress: () => {} }), 0);
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.deepEqual(readJson(cli.globalConfigPath()).sids, [fullSid]);
+  assert.doesNotMatch(output, new RegExp(fullSid));
+  assert.match(output, /SID/);
+  assert.match(output, /pool=1/);
+});
+
+test("auth monitor keeps threshold as a compatibility alias for min-sids", () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs([
+    "node", "cli", "auth", "monitor",
+    "--account", "one@example.edu",
+    "--password", "secret-one",
+    "--threshold", "4",
+    "--tasks-root", root,
+  ]);
+  assert.equal(args.authMinSids, 4);
+});
+
+test("auth monitor status heartbeat reports running, stale, and off", () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs([
+    "node", "cli", "auth", "monitor",
+    "--account", "one@example.edu",
+    "--password", "secret-one",
+    "--min-sids", "2",
+    "--interval-ms", "3000",
+    "--tasks-root", root,
+  ]);
+
+  assert.equal(cli.readAuthMonitorStatus().status, "off");
+
+  const running = cli.writeAuthMonitorStatus(args, {
+    status: "running",
+    checks: 1,
+    triggered: 0,
+  });
+  const runningMs = Date.parse(running.updatedAt);
+  const fresh = cli.readAuthMonitorStatus({ nowMs: runningMs + 1000 });
+  assert.equal(fresh.status, "running");
+  assert.equal(fresh.label, "must monitor running, min-sids 2");
+  assert.equal(fresh.checks, 1);
+  assert.equal(fresh.triggered, 0);
+
+  const stale = cli.readAuthMonitorStatus({ nowMs: runningMs + 20000 });
+  assert.equal(stale.status, "stale");
+  assert.equal(stale.label, "must monitor stale");
+
+  cli.writeAuthMonitorStatus(args, {
+    status: "stopped",
+    checks: 2,
+    triggered: 1,
+  });
+  const stopped = cli.readAuthMonitorStatus();
+  assert.equal(stopped.status, "off");
+  assert.equal(stopped.label, "off");
+});
+
+test("auth monitor refreshes SID pool when count is at min-sids", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs([
+    "node", "cli", "auth", "monitor",
+    "--account", "one@example.edu",
+    "--password", "secret-one",
+    "--min-sids", "2",
+    "--max-checks", "1",
+    "--quiet",
+    "--tasks-root", root,
+  ]);
+  let loginCalls = 0;
+  const deps = {
+    ...cli.authDependencies(args),
+    login: async () => {
+      loginCalls += 1;
+      return { sid: `SIDMONITOR${loginCalls}`, finalUrl: "https://www.webofscience.com/wos/" };
+    },
+  };
+
+  const originalLog = console.log;
+  let output = "";
+  console.log = (value = "") => {
+    output += `${value}\n`;
+  };
+  try {
+    assert.equal(await cli.executeAuthCommand(args, deps, {
+      canPrompt: () => false,
+      progress: () => {},
+      sleep: async () => {},
+      installSignalHandlers: false,
+    }), 0);
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.equal(loginCalls, 1);
+  assert.deepEqual(readJson(cli.globalConfigPath()).sids, ["SIDMONITOR1"]);
+  assert.ok(fs.existsSync(cli.authMonitorStatusPath()));
+  assert.equal(cli.readAuthMonitorStatus().status, "off");
+  assert.match(output, /checks=1/);
+  assert.match(output, /triggered=1/);
 });
 
 test("runs WOS Playwright in background unless visible browser is requested", () => {
@@ -1813,6 +1991,37 @@ test("interactive SID recovery can take a manually entered SID instead of forcin
   assert.equal(args.sidSource, "prompt");
 });
 
+test("interactive SID recovery can wait for the saved SID pool", async () => {
+  const originalWrite = process.stdout.write;
+  let output = "";
+  let waitCalls = 0;
+  process.stdout.write = (chunk, ...args) => {
+    output += String(chunk);
+    const callback = args.find((item) => typeof item === "function");
+    if (callback) callback();
+    return true;
+  };
+
+  try {
+    const sid = await askSidFromBrowserOrManual(
+      () => ({ question: async () => "3" }),
+      async () => assert.fail("browser login should not run"),
+      async () => assert.fail("manual SID prompt should not run"),
+      async () => {
+        waitCalls += 1;
+        return "pooled-sid";
+      }
+    );
+
+    assert.equal(sid, "pooled-sid");
+    assert.equal(waitCalls, 1);
+    assert.match(output, /Wait for SID pool/);
+    assert.match(output, /loaded from SID pool/);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+});
+
 test("SID recovery still falls back to browser login when no interactive terminal is available", async () => {
   const root = temporaryDirectory();
   const args = cli.parseArgs(["node", "cli", "run", "--task", "demo", "--tasks-root", root]);
@@ -2150,7 +2359,7 @@ test("checkSid refreshes an invalid SID through the browser validation flow", as
   assert.equal(result.status, "refreshed");
   assert.equal(result.checkedWith, "browser-validation");
   assert.equal(result.initialStatus, "invalid");
-  assert.match(messages.join("\n"), /Choose manual SID input or browser login/);
+  assert.match(messages.join("\n"), /Choose manual SID input, wait for SID pool, or browser login/);
 });
 
 test("masks SID values for dashboard display", () => {
@@ -2966,16 +3175,18 @@ test("interactive WOS workflows set up SID on demand and continue current flow",
   const interactiveSource = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
   const menuSource = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
   const sidBranch = interactiveSource.match(/let sid = ""[\s\S]*?const sourceFallback/);
-  const helperBranch = menuSource.match(/async saveSid\(sid\)[\s\S]*?setCurrentTask/);
+  const helperBranch = menuSource.match(/readBrowserSid: \(\) => readSidFromBrowser\(menuArgs\)[\s\S]*?setCurrentTask/);
   assert.ok(sidBranch, "interactive on-demand SID branch should be present");
   assert.ok(helperBranch, "interactive saveSid helper should be present");
   assert.match(sidBranch[0], /helpers\.saveSid/);
+  assert.match(sidBranch[0], /helpers\.waitForSidPool/);
   assert.match(sidBranch[0], /workspaceSidStatus\(activeWorkspace\) !== "valid"/);
   assert.match(sidBranch[0], /askSidFromBrowserOrManual/);
   assert.match(sidBranch[0], /saved\./);
   assert.doesNotMatch(sidBranch[0], /Refreshing workspace panel/);
   assert.doesNotMatch(sidBranch[0], /saved[\s\S]*?return \{ refresh: true \}/);
   assert.match(helperBranch[0], /addSidsToConfig\(menuArgs, \[sid\], \{ activate: true \}\)/);
+  assert.match(helperBranch[0], /waitForSavedSidPool\(menuArgs\)/);
   assert.match(helperBranch[0], /quickValidateSid\(menuArgs\)/);
   assert.match(helperBranch[0], /workspaceStatus\(menuArgs, refreshedSidCheck\)/);
 });

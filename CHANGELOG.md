@@ -3,6 +3,48 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.65 - 2026-06-12
+
+- Refresh authentication docs and SID setup messages so they consistently
+  describe `Manual input`, `Wait for SID pool`, and `Open browser login`.
+- Document the current auth producer, dashboard heartbeat, and WOS workflow
+  boundary across the README and docs.
+
+## 0.4.64 - 2026-06-12
+
+- Add `Wait for SID pool` to interactive SID setup so WOS workflows can wait
+  for a background auth monitor or another terminal to add a saved SID.
+
+## 0.4.63 - 2026-06-12
+
+- Show `SID Producer` in the interactive/workspace dashboard so auth monitor
+  state is visible next to the saved SID pool.
+- Persist a lightweight auth monitor heartbeat in the user config directory and
+  mark the producer as stale when the monitor stops updating it.
+
+## 0.4.62 - 2026-06-12
+
+- Add interactive `2.1 Resume` under `WOS IDs to SQL` so the current task can
+  restart WOSID-to-SQL parsing directly without re-entering a CSV path, URL, or
+  UUID.
+
+## 0.4.61 - 2026-06-12
+
+- Rename the recommended auth monitor low-water option to `--min-sids` so the
+  trigger rule is clearer: refresh when `sidPoolCount <= min-sids`.
+- Keep `--threshold` as a compatibility alias for existing auth monitor scripts.
+
+## 0.4.60 - 2026-06-12
+
+- Add `iiaide-wos auth login --provider must` to log into Web of Science
+  through MUST SSO in a short-lived Playwright browser, extract a fresh WOS SID,
+  and save it into the existing global SID pool without printing the full SID.
+- Add `iiaide-wos auth monitor --provider must` so a background process can
+  watch `sidPoolCount` and automatically refresh the saved SID pool when it
+  falls at or below a configured low-water mark.
+- Document the MUST SID producer boundary: auth commands produce saved SIDs,
+  while WOS export and parse workflows continue to consume only the SID pool.
+
 ## 0.4.59 - 2026-06-12
 
 - Change parse SID recovery so a query-limit style WOS session failure no longer

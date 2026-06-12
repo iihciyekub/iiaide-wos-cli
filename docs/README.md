@@ -12,6 +12,9 @@ This directory stays lightweight on purpose. Each file has one role.
 - `docs/curl.md`
   Request-level WOS reference for debugging, reproducing exports, and keeping
   CLI behavior aligned with the browser-side `wos.js` methods.
+- `docs/auth-must.md`
+  MUST SSO SID producer design, credential boundaries, monitor behavior, and
+  handoff into the global saved SID pool.
 - `CHANGELOG.md`
   Versioned behavior changes.
 - `AGENTS.md`
@@ -27,6 +30,9 @@ Update docs in the same change as code:
   behavior changes, update `docs/usage.md`.
 - If SID init, summary preparation, export endpoints, payload shape, or
   browser-side WOS method usage changes, update `docs/curl.md`.
+- If auth producer behavior, credential handling, monitor heartbeat, or SID pool
+  handoff changes, update `docs/auth-must.md` and the authentication section in
+  `docs/usage.md`.
 - If behavior changes in any user-visible way, add a concise `CHANGELOG.md`
   entry and bump `package.json` and `package-lock.json`.
 

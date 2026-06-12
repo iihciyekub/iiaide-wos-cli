@@ -152,6 +152,7 @@ function printHeader(version, workspace = {}) {
     kvLine("Auth", sidOkLabel(sidStatus)),
     kvLine("SID Value", sidValue || "none"),
     kvLine("SID Pool", sidPoolCount ? `${activeSidNumber}/${sidPoolCount}` : "0"),
+    kvLine("SID Producer", workspace.authMonitor?.label || "off"),
     "",
     kvLine("Playwright", workspace.wosBrowserMode || "background"),
     kvLine("Parse Tabs", String(workspace.parseConcurrency || 1)),
@@ -507,6 +508,7 @@ async function askWorkflow(rl) {
   workflowItem("1.1", "UUID - TXT format", "URL/UUID -> raw/<uuid>/full-record/*.txt and WOS IDs");
   workflowItem("1.2", "UUID - BIB format", "URL/UUID -> raw/<uuid>/bib/*.bib");
   workflowTopItem("2", "WOS IDs to SQL", "CSV path or URL/UUID -> WOS IDs -> SQLite");
+  workflowItem("2.1", "Resume", "Current task WOS IDs -> SQLite");
   workflowGroup("3", "Task manager");
   workflowItem("3.1", "New", "Create a fresh current task");
   workflowItem("3.2", "Switch", "Select an existing current task");
@@ -529,8 +531,8 @@ async function askWorkflow(rl) {
     if (isQuitInput(choice)) return CONTROL_QUIT;
     if (choice === "c") return "c";
     if (choice === "u") return "u";
-    if (["1.1", "1.2", "2", "3.1", "3.2", "3.3", "4.1", "4.2", "4.3", "5.1", "5.2", "5.3", "5.4"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.1, 5.2, 5.3, 5.4, c to check SID, u to update, B to go back, or q to quit\n`);
+    if (["1.1", "1.2", "2", "2.1", "3.1", "3.2", "3.3", "4.1", "4.2", "4.3", "5.1", "5.2", "5.3", "5.4"].includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2, 2.1, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.1, 5.2, 5.3, 5.4, c to check SID, u to update, B to go back, or q to quit\n`);
   }
 }
 
@@ -590,13 +592,15 @@ async function promptConfirmationText(message) {
   }
 }
 
-async function askSidFromBrowserOrManual(getRl, readBrowserSid, promptManualSid) {
+async function askSidFromBrowserOrManual(getRl, readBrowserSid, promptManualSid, waitForSidPool) {
   if (typeof readBrowserSid !== "function") return "";
+  const canWaitForSidPool = typeof waitForSidPool === "function";
 
   for (;;) {
     stdout.write(`${color("1", "SID setup", stdout)}\n`);
     option("1", "Manual input", "Paste a current WOS SID");
     option("2", "Open browser login", "Log in to WOS, then auto-detect SID");
+    if (canWaitForSidPool) option("3", "Wait for SID pool", "Keep checking until auth monitor adds a SID");
     option("B", "Back", "Return to workflow selection");
     option("q", "Exit", "Close without running a command");
     stdout.write("\n");
@@ -629,7 +633,22 @@ async function askSidFromBrowserOrManual(getRl, readBrowserSid, promptManualSid)
       stdout.write("Choose browser login again, or use manual input.\n\n");
       continue;
     }
-    stdout.write(`${color("33", "Required:", stdout)} choose 1, 2, B to go back, or q to quit\n`);
+    if (canWaitForSidPool && (action === "3" || action === "pool" || action === "wait")) {
+      stdout.write(`${color("32", "SID pool:", stdout)} waiting for a saved SID...\n`);
+      try {
+        const sid = await waitForSidPool();
+        if (sid) {
+          stdout.write(`${color("32", "SID:", stdout)} loaded from SID pool.\n\n`);
+          return sid;
+        }
+        stdout.write(`${color("33", "SID pool:", stdout)} no SID was returned.\n`);
+      } catch (error) {
+        stdout.write(`${color("33", "SID pool wait failed:", stdout)} ${error.message || error}\n`);
+      }
+      stdout.write("Choose SID pool wait again, browser login, or manual input.\n\n");
+      continue;
+    }
+    stdout.write(`${color("33", "Required:", stdout)} choose 1, 2${canWaitForSidPool ? ", 3" : ""}, B to go back, or q to quit\n`);
   }
 }
 
@@ -850,7 +869,7 @@ async function interactiveArgs(version, workspace, helpers = {}) {
 
     let sid = "";
     if (workspaceSidStatus(activeWorkspace) !== "valid") {
-      sid = await askSidFromBrowserOrManual(() => rl, helpers.readBrowserSid, promptManualSid);
+      sid = await askSidFromBrowserOrManual(() => rl, helpers.readBrowserSid, promptManualSid, helpers.waitForSidPool);
       if (isBackResult(sid)) return { refresh: true };
       if (isQuitResult(sid)) return null;
       if (!sid) return { refresh: true };
@@ -863,6 +882,15 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     const sourceFallback = [task?.url, task?.uuid].find(isWosSourceLike) || "";
     if (sourceFallback) {
       stdout.write(`${color("2", "Saved source:", stdout)} ${sourceFallback}\n`);
+    }
+
+    if (choice === "2.1") {
+      const result = appendWosDataDbArg(
+        ["parse", "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot],
+        activeWorkspace
+      );
+      if (sid) result.push("--sid", sid);
+      return result;
     }
 
     if (choice === "2") {
