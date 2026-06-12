@@ -2695,10 +2695,10 @@ class WosUuidStore {
         onBatch = null,
         fetchBatch = null,
     } = {}) {
-        const emitProgress = (payload = {}) => {
+        const emitProgress = async (payload = {}) => {
             if (typeof onProgress !== 'function') return;
             try {
-                onProgress(payload);
+                await onProgress(payload);
             } catch (error) {
                 console.warn('[WOS] batch export progress callback failed:', error);
             }
@@ -2708,7 +2708,7 @@ class WosUuidStore {
         if (!res || res.status === 'failed') {
             const message = 'Failed to retrieve UUID information.';
             console.error(message);
-            emitProgress({ phase: 'error', message });
+            await emitProgress({ phase: 'error', message });
             return null;
         }
         this.currentUuid = uuid;
@@ -2727,7 +2727,7 @@ class WosUuidStore {
         const totalBatches = totalRecords > 0 ? Math.ceil(totalRecords / batchSize) : 0;
         let completedBatches = 0;
 
-        emitProgress({
+        await emitProgress({
             phase: 'start',
             uuid: this.currentUuid,
             markFrom,
@@ -2754,7 +2754,7 @@ class WosUuidStore {
             if (text === null) {
                 const message = `Export request failed for records ${current}-${batchEnd}.`;
                 console.error(message);
-                emitProgress({
+                await emitProgress({
                     phase: 'error',
                     uuid: this.currentUuid,
                     message,
@@ -2771,7 +2771,7 @@ class WosUuidStore {
                 : {};
 
             completedBatches += 1;
-            emitProgress({
+            await emitProgress({
                 phase: 'batch',
                 uuid: this.currentUuid,
                 fieldList,
@@ -2786,7 +2786,7 @@ class WosUuidStore {
             current = batchEnd + 1;
         }
 
-        emitProgress({
+        await emitProgress({
             phase: 'complete',
             uuid: this.currentUuid,
             fieldList,
@@ -2874,7 +2874,7 @@ class WosUuidStore {
                     markTo: batchEnd,
                     text,
                 });
-                return { resultLength: batches.length };
+                return { resultLength: batches.length, text };
             },
         });
         if (!summary) return null;

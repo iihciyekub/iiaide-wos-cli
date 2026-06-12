@@ -2355,6 +2355,10 @@ function batchFileName(uuid, markFrom, markTo, extension = "txt") {
   return `${safeFilePart(uuid)}_${markFrom}_${markTo}.${extension}`;
 }
 
+function batchKey(markFrom, markTo) {
+  return `${markFrom}-${markTo}`;
+}
+
 function rawBatchDir(paths, uuid) {
   if (!uuid) throw new Error("Missing raw batch UUID");
   const safeUuid = safeFilePart(uuid);
@@ -2965,6 +2969,22 @@ async function exportFromWos(args, paths) {
     const remainingCount = downloadStart <= range.endIndex
       ? range.endIndex - downloadStart + 1
       : 0;
+    const persistedBatchKeys = new Set();
+    const persistTxtBatch = (batch, sourcePhase = "batch") => {
+      const markFrom = Number(batch.markFrom) || 0;
+      const markTo = Number(batch.markTo) || 0;
+      if (!markFrom || !markTo) return 0;
+      const key = batchKey(markFrom, markTo);
+      if (persistedBatchKeys.has(key)) return 0;
+      const rawPath = rawBatchPath(paths, info.uuid, markFrom, markTo);
+      writeFileAtomic(rawPath, String(batch.text || ""));
+      const ids = parseExportText(batch.text, markFrom, markTo);
+      rows.push(...ids);
+      persistedBatchKeys.add(key);
+      appendProgress(paths, { phase: sourcePhase, markFrom, markTo, parsed: ids.length, rawPath });
+      if (!isInteractive()) console.error(`export ${markFrom}-${markTo}: parsed ${ids.length} WOS IDs`);
+      return ids.length;
+    };
     const { batches: batchCount } = reportDownloadPlan(
       "WOS records",
       info.expectedCount,
@@ -2993,23 +3013,31 @@ async function exportFromWos(args, paths) {
         batchSize,
         sortBy: args.sortBy,
         onProgress(event) {
-          appendProgress(paths, { phase: "wosjs-export-progress", ...event });
-          if (event.phase === "start" && event.totalBatches) {
-            batchProgress.setTotal(event.totalBatches);
+          const { text, ...progressEvent } = event || {};
+          if (progressEvent.phase === "batch" && typeof text === "string") {
+            const markFrom = Number(progressEvent.current) || 0;
+            const markTo = Number(progressEvent.batchEnd) || 0;
+            const parsed = persistTxtBatch({
+              uuid: progressEvent.uuid || info.uuid,
+              markFrom,
+              markTo,
+              text,
+            }, "batch");
+            if (markFrom && markTo) progressEvent.rawPath = rawBatchPath(paths, info.uuid, markFrom, markTo);
+            progressEvent.parsed = parsed;
           }
-          if (event.phase === "batch") {
-            batchProgress.update(event.completedBatches || 0, `${event.current}-${event.batchEnd}`);
+          appendProgress(paths, { phase: "wosjs-export-progress", ...progressEvent });
+          if (progressEvent.phase === "start" && progressEvent.totalBatches) {
+            batchProgress.setTotal(progressEvent.totalBatches);
+          }
+          if (progressEvent.phase === "batch") {
+            batchProgress.update(progressEvent.completedBatches || 0, `${progressEvent.current}-${progressEvent.batchEnd}`);
           }
         },
       });
 
       for (const batch of exportResult.batches) {
-        const rawPath = rawBatchPath(paths, info.uuid, batch.markFrom, batch.markTo);
-        writeFileAtomic(rawPath, batch.text);
-        const ids = parseExportText(batch.text, batch.markFrom, batch.markTo);
-        rows.push(...ids);
-        appendProgress(paths, { phase: "batch", markFrom: batch.markFrom, markTo: batch.markTo, parsed: ids.length, rawPath });
-        if (!isInteractive()) console.error(`export ${batch.markFrom}-${batch.markTo}: parsed ${ids.length} WOS IDs`);
+        persistTxtBatch(batch, "batch");
       }
       batchProgress.stop("Export complete");
       batchProgress = null;

@@ -1365,6 +1365,17 @@ test("browser-side wos.js does not let stale full-record DOM satisfy another WOS
   assert.match(waitMethod[0], /throw new Error/);
 });
 
+test("browser-side wos.js streams TXT batch text through awaited progress", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  assert.match(source, /async #runBatchExportByUuid\(uuid,/);
+  assert.match(source, /const emitProgress = async/);
+  assert.match(source, /await onProgress\(payload\)/);
+  assert.match(source, /await emitProgress\(\{\s*phase: 'batch'/);
+  const txtMethod = source.match(/async fetchTxtBatches\(options = \{\}\) \{[\s\S]*?\n    \}/);
+  assert.ok(txtMethod, "fetchTxtBatches should be present");
+  assert.match(txtMethod[0], /return \{ resultLength: batches\.length, text \};/);
+});
+
 test("parse workers reuse one WOS page per worker", async () => {
   const pages = [];
   const context = {
@@ -2532,6 +2543,17 @@ test("raw batch start infers default TXT resume range", () => {
   const explicitArgs = cli.parseArgs(["node", "cli", "run", "--uuid", "query", "--from-index", "1", "--tasks-root", root]);
   assert.equal(explicitArgs.fromIndexSource, "cli");
   assert.equal(cli.inferTxtRangeStart(paths, "query", explicitArgs, explicitArgs.fromIndex), 1);
+});
+
+test("TXT export persists streamed batches before final export completion", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const exportMethod = source.match(/async function exportFromWos\(args, paths\) \{[\s\S]*?\n}\n\nasync function exportBibFromWos/);
+  assert.ok(exportMethod, "exportFromWos should be present");
+  assert.match(exportMethod[0], /const persistTxtBatch = \(batch, sourcePhase = "batch"\) => \{/);
+  assert.match(exportMethod[0], /const \{ text, \.\.\.progressEvent \} = event \|\| \{\};/);
+  assert.match(exportMethod[0], /progressEvent\.phase === "batch" && typeof text === "string"/);
+  assert.match(exportMethod[0], /persistTxtBatch\(\{\s*uuid: progressEvent\.uuid \|\| info\.uuid,/);
+  assert.match(exportMethod[0], /appendProgress\(paths, \{ phase: "wosjs-export-progress", \.\.\.progressEvent \}\)/);
 });
 
 test("validate does not create a missing task directory", () => {

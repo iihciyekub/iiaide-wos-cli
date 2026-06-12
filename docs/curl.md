@@ -185,7 +185,8 @@ curl "${WOS_BASE_URL}/api/wosnx/indic/export/saveToFile" \
 
 Batch behavior:
 
-- CLI writes raw batches to `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
+- CLI writes each completed raw batch immediately to
+  `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
 - Batch file ranges are inclusive. When no explicit range is provided, the CLI
   infers the selected range start from the first existing raw file. A task with
   `<uuid>_400_600.txt` as its first raw batch reuses records 400 through 600

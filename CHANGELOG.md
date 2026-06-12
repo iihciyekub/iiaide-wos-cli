@@ -3,6 +3,14 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.70 - 2026-06-12
+
+- Persist full-record TXT batches immediately as each WOS export batch
+  completes. Interrupted long exports now leave `<uuid>_<start>_<end>.txt`
+  files on disk so the next run can resume from the last completed batch.
+- Strip batch text from progress logs while preserving raw-path and parsed-count
+  diagnostics for each streamed batch.
+
 ## 0.4.69 - 2026-06-12
 
 - Infer the default full-record TXT resume start from existing raw batches when

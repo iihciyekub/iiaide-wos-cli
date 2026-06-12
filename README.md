@@ -67,7 +67,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.69
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.70
 iiaide-wos install-browser
 iiaide-wos
 # or
@@ -316,7 +316,8 @@ explicit range is provided, the CLI infers the selected range start from the
 first raw batch; for example, an existing `<uuid>_400_600.txt` covers records
 400 through 600, so the next request starts at record 601. Passing
 `--from-index` or `--limit` disables that inference and uses the requested
-range.
+range. During long exports, each completed batch is written to disk immediately,
+so an interrupted browser session still leaves resumable raw TXT batches behind.
 
 ### 2B. Create A Task From A WOS UUID
 

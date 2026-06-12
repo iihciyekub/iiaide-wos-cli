@@ -79,7 +79,8 @@ The `run` command:
    batch for the UUID.
 7. Calls the injected `window.wos.export.fetchTxtBatches` API only for the
    missing tail range.
-8. Stores every raw batch under `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
+8. Stores every completed raw batch immediately under
+   `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
 9. Parses the `UT` field into normalized WOS IDs.
 10. Writes the normalized WOSID CSV under `raw/<uuid>/full-record/`,
     plus metadata, logs, and a summary.
@@ -96,6 +97,10 @@ gaps fail fast so the task does not accumulate overlapping raw files. Passing
 `--from-index` or `--limit` disables raw-start inference and uses the requested
 range. Use `--force` to clean a managed task before a fresh WOS export, or
 choose a range that starts at the first existing raw batch.
+
+The CLI writes each TXT batch as soon as WOS returns that batch. If Playwright,
+the browser, or the SSH session stops halfway through a long export, completed
+batch files stay on disk and the next run resumes from the following record.
 
 ## CSV Import Workflow
 
