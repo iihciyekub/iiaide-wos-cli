@@ -67,7 +67,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.68
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.69
 iiaide-wos install-browser
 iiaide-wos
 # or
@@ -311,9 +311,12 @@ iiaide-wos run \
 The CLI downloads field-tagged full records and generates
 `tasks/demo-search/raw/<uuid>/full-record/<uuid>_wosid.csv`. Use
 `--from-index` and `--limit` to export a slice of WOS records. Re-running the
-same task resumes from contiguous raw TXT batches already present for that
-range; for example, an existing `<uuid>_400_600.txt` covers records 400 through
-600, so the next request starts at record 601.
+same task resumes from contiguous raw TXT batches already present. If no
+explicit range is provided, the CLI infers the selected range start from the
+first raw batch; for example, an existing `<uuid>_400_600.txt` covers records
+400 through 600, so the next request starts at record 601. Passing
+`--from-index` or `--limit` disables that inference and uses the requested
+range.
 
 ### 2B. Create A Task From A WOS UUID
 

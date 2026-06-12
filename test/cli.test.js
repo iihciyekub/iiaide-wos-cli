@@ -2518,6 +2518,22 @@ test("raw batch coverage supports resume from an explicit WOS record range", () 
   );
 });
 
+test("raw batch start infers default TXT resume range", () => {
+  const root = temporaryDirectory();
+  const paths = cli.getRunPaths(root);
+  const rawDir = path.join(paths.rawRoot, "query", "full-record");
+  fs.mkdirSync(rawDir, { recursive: true });
+  fs.writeFileSync(path.join(rawDir, "query_400_600.txt"), "UT WOS:400\n");
+
+  const defaultArgs = cli.parseArgs(["node", "cli", "run", "--uuid", "query", "--tasks-root", root]);
+  assert.equal(defaultArgs.fromIndexSource, "");
+  assert.equal(cli.inferTxtRangeStart(paths, "query", defaultArgs, defaultArgs.fromIndex), 400);
+
+  const explicitArgs = cli.parseArgs(["node", "cli", "run", "--uuid", "query", "--from-index", "1", "--tasks-root", root]);
+  assert.equal(explicitArgs.fromIndexSource, "cli");
+  assert.equal(cli.inferTxtRangeStart(paths, "query", explicitArgs, explicitArgs.fromIndex), 1);
+});
+
 test("validate does not create a missing task directory", () => {
   const root = temporaryDirectory();
   const tasksRoot = path.join(root, "tasks");

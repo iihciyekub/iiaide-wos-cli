@@ -3,6 +3,15 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.69 - 2026-06-12
+
+- Infer the default full-record TXT resume start from existing raw batches when
+  no explicit `--from-index` or `--limit` is provided. A task with only
+  `<uuid>_400_600.txt` now treats record `400` as the selected range start and
+  requests the next missing record from `601`.
+- Keep explicit record slices authoritative: passing `--from-index` or
+  `--limit` disables raw-start inference and uses the requested range.
+
 ## 0.4.68 - 2026-06-12
 
 - Let full-record TXT downloads honor `--from-index` and `--limit` so UUID

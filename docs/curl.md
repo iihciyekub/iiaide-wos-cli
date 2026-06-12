@@ -186,9 +186,11 @@ curl "${WOS_BASE_URL}/api/wosnx/indic/export/saveToFile" \
 Batch behavior:
 
 - CLI writes raw batches to `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
-- Batch file ranges are inclusive. For an explicit `--from-index 400` range,
-  existing contiguous raw files such as `<uuid>_400_600.txt` are reused and the
-  next WOS export starts at `601`.
+- Batch file ranges are inclusive. When no explicit range is provided, the CLI
+  infers the selected range start from the first existing raw file. A task with
+  `<uuid>_400_600.txt` as its first raw batch reuses records 400 through 600
+  and starts the next WOS export at `601`. Passing `--from-index` or `--limit`
+  disables raw-start inference and uses the requested range.
 - CLI parses `UT` fields from the response text.
 - CLI writes a single WOSID CSV to
   `raw/<uuid>/full-record/<uuid>_wosid.csv`.

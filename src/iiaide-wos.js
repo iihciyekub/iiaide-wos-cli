@@ -297,6 +297,7 @@ function parseArgs(argv) {
     maxRssMb: DEFAULT_PARSE_MAX_RSS_MB,
     limit: 0,
     fromIndex: 1,
+    fromIndexSource: "",
     cooldownMs: 250,
     checkOnly: false,
     withDeps: false,
@@ -418,7 +419,10 @@ function parseArgs(argv) {
       }
     }
     else if (arg === "--limit") args.limit = parseIntegerFlag(arg, readValue(arg, i++));
-    else if (arg === "--from-index") args.fromIndex = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--from-index") {
+      args.fromIndex = parseIntegerFlag(arg, readValue(arg, i++));
+      args.fromIndexSource = "cli";
+    }
     else if (arg === "--record-timeout-ms" || arg === "--record-timeout" || arg === "--page-timeout-ms") args.recordTimeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--cooldown-ms") args.cooldownMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--browser-restart-every" || arg === "--parse-restart-every" || arg === "--restart-every") args.browserRestartEvery = parseIntegerFlag(arg, readValue(arg, i++));
@@ -2396,6 +2400,24 @@ function rawBatchFiles(paths, uuid) {
     .sort((a, b) => batchFileStart(a) - batchFileStart(b));
 }
 
+function firstRawBatchRange(paths, uuid) {
+  if (!uuid) return null;
+  const firstFile = rawBatchFiles(paths, uuid)[0];
+  if (!firstFile) return null;
+  return parseRawBatchFileName(firstFile);
+}
+
+function shouldInferTxtRangeStartFromRaw(args = {}) {
+  return Boolean(!args.fromIndexSource && !args.limit);
+}
+
+function inferTxtRangeStart(paths, uuid, args = {}, fallbackStart = 1) {
+  const fallback = Math.max(1, Number(fallbackStart) || Number(args.fromIndex) || 1);
+  if (!shouldInferTxtRangeStartFromRaw(args)) return fallback;
+  const firstRange = firstRawBatchRange(paths, uuid);
+  return firstRange?.batchStart || fallback;
+}
+
 function bibBatchFiles(paths, uuid) {
   if (!uuid) throw new Error("Missing BibTeX batch UUID");
   const directory = bibBatchDir(paths, uuid);
@@ -2905,9 +2927,17 @@ async function exportFromWos(args, paths) {
     summarySpinner.succeed(`Found ${info.expectedCount} records`);
     appendProgress(paths, { phase: "summary-info", ...info });
     const batchSize = DEFAULT_BATCH_SIZE;
-    const range = selectedRecordRange(info.expectedCount, args.fromIndex, args.limit);
+    const firstRawRange = firstRawBatchRange(paths, info.uuid);
+    if (args.reuseRaw && !firstRawRange && shouldInferTxtRangeStartFromRaw(args)) {
+      console.error(`WOS raw resume: no TXT batches found in ${rawBatchDir(paths, info.uuid)}`);
+    }
+    const rangeStart = inferTxtRangeStart(paths, info.uuid, args, args.fromIndex);
+    const range = selectedRecordRange(info.expectedCount, rangeStart, args.limit);
     if (!range.selectedCount) {
       throw new Error(`WOS record range starts after available records: start=${range.startIndex} total=${range.availableCount}`);
+    }
+    if (range.startIndex !== args.fromIndex) {
+      console.error(`WOS record start inferred from raw batches: ${range.startIndex}`);
     }
     const resumeCoverage = rawBatchCoverageFromStart(paths, info.uuid, range.startIndex, range.endIndex);
     const resumedCount = resumeCoverage.files.length
@@ -2927,9 +2957,7 @@ async function exportFromWos(args, paths) {
         files: resumeCoverage.files.length,
         parsed: rows.length,
       });
-      if (!isInteractive()) {
-        console.error(`WOS records resumed from raw: ${range.startIndex}-${resumeCoverage.lastEnd}`);
-      }
+      console.error(`WOS records resumed from raw: ${range.startIndex}-${resumeCoverage.lastEnd}`);
     }
     const downloadStart = resumeCoverage.files.length
       ? Math.min(resumeCoverage.lastEnd + 1, range.endIndex + 1)
@@ -3766,19 +3794,22 @@ async function run(args) {
   });
 
   let rows = [];
+  const rawUuid = args.uuid || priorSummary.uuid || "";
+  const inferredRangeStart = priorSummary.rangeStart ||
+    priorSummary.fromIndex ||
+    inferTxtRangeStart(paths, rawUuid, args, args.fromIndex || 1);
   let info = {
     uuid: args.uuid,
     expectedCount: priorSummary.expectedCount || 0,
     availableCount: priorSummary.availableCount || priorSummary.expectedCount || 0,
     selectedCount: priorSummary.selectedCount || priorSummary.expectedCount || 0,
-    fromIndex: priorSummary.fromIndex || args.fromIndex || 1,
+    fromIndex: priorSummary.fromIndex || inferredRangeStart,
     limit: priorSummary.limit || args.limit || 0,
-    rangeStart: priorSummary.rangeStart || priorSummary.fromIndex || args.fromIndex || 1,
+    rangeStart: inferredRangeStart,
     rangeEnd: priorSummary.rangeEnd || 0,
     href: priorSummary.summaryHref || args.url,
     rowText: priorSummary.rowText || "",
   };
-  const rawUuid = args.uuid || priorSummary.uuid || "";
   if (args.reuseRaw && rawUuid && !info.expectedCount) {
     const coverage = rawBatchCoverageFromStart(paths, rawUuid, info.rangeStart || 1);
     if (coverage.files.length) {
@@ -4672,6 +4703,8 @@ module.exports = {
   withRawSource,
   cleanRunLayout,
   rawBatchFiles,
+  firstRawBatchRange,
+  inferTxtRangeStart,
   rawBatchCoverageFromStart,
   bibBatchFiles,
   parseExistingRawBatches,

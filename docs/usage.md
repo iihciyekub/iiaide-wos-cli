@@ -74,8 +74,9 @@ The `run` command:
    saved SID pool, accept manual input, or open a visible WOS login window.
 4. Opens the WOS summary page to prepare the same-origin request context.
 5. Reads and reports the result-set UUID and expected record count.
-6. Applies `--from-index` and `--limit` when a record slice is requested, then
-   checks existing raw TXT batches for that slice.
+6. Applies `--from-index` and `--limit` when a record slice is requested. When
+   no slice is requested, infers the range start from the first existing raw TXT
+   batch for the UUID.
 7. Calls the injected `window.wos.export.fetchTxtBatches` API only for the
    missing tail range.
 8. Stores every raw batch under `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
@@ -87,12 +88,14 @@ This is more reliable than scrolling the result list because WOS result pages
 are virtualized and may not render every card at once.
 
 Raw TXT batch names are inclusive ranges. If a task already has
-`<uuid>_400_600.txt` and the requested range starts at 400, the next TXT export
+`<uuid>_400_600.txt` as its first raw batch and no explicit range is requested,
+the CLI infers record 400 as the selected range start. The next TXT export
 starts at record 601 and then rebuilds the WOSID CSV from both existing and new
-raw batches. Existing raw batches must be contiguous from the requested start;
-gaps fail fast so the task does not accumulate overlapping raw files. Use
-`--force` to clean a managed task before a fresh WOS export, or choose a range
-that starts at the first existing raw batch.
+raw batches. Existing raw batches must be contiguous from the selected start;
+gaps fail fast so the task does not accumulate overlapping raw files. Passing
+`--from-index` or `--limit` disables raw-start inference and uses the requested
+range. Use `--force` to clean a managed task before a fresh WOS export, or
+choose a range that starts at the first existing raw batch.
 
 ## CSV Import Workflow
 
