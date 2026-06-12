@@ -187,14 +187,14 @@ Batch behavior:
 
 - CLI writes each completed raw batch immediately to
   `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
-- Batch file ranges are inclusive. When no explicit range is provided, the CLI
-  infers the selected range start from the first existing raw file. A task with
-  `<uuid>_400_600.txt` as its first raw batch reuses records 400 through 600
-  and starts the next WOS export at `601`. Passing `--from-index` or `--limit`
-  disables raw-start inference and uses the requested range.
+- Batch file ranges are inclusive. The CLI reads the WOS total, converts the
+  selected record range into 200-record TXT batch targets, and checks the target
+  file path before each request. Existing batch files are parsed and skipped;
+  missing batch files are fetched from WOS.
 - CLI parses WOS IDs only from top-level `UT` fields in the response text.
 - CLI writes a single WOSID CSV to
-  `raw/<uuid>/full-record/<uuid>_wosid.csv`.
+  `raw/<uuid>/full-record/<uuid>_wosid.csv` only after the selected raw TXT
+  batch plan is complete.
 
 ## 4. WOS BibTeX Export
 

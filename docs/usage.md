@@ -75,35 +75,35 @@ The `run` command:
 4. Opens the WOS summary page to prepare the same-origin request context.
 5. Reads and reports the result-set UUID and expected record count.
 6. Applies `--from-index` and `--limit` when a record slice is requested. When
-   no slice is requested, infers the range start from the first existing raw TXT
-   batch for the UUID.
-7. Calls the injected `window.wos.export.fetchTxtBatches` API only for the
-   missing tail range.
+   no slice is requested, the verified WOS count defines the full result range.
+7. Converts the selected range into 200-record raw TXT batch targets, parses
+   existing batch files, and calls the injected
+   `window.wos.export.fetchTxtBatches` API only for missing batch files.
 8. Stores every completed raw batch immediately under
    `raw/<uuid>/full-record/<uuid>_<start>_<end>.txt`.
 9. Parses the `UT` field into normalized WOS IDs.
 10. Writes the normalized WOSID CSV under `raw/<uuid>/full-record/`,
-    plus metadata, logs, and a summary.
+    plus metadata, logs, and a summary, after the selected TXT batch plan is
+    complete.
 
 This is more reliable than scrolling the result list because WOS result pages
 are virtualized and may not render every card at once.
 
-Raw TXT batch names are inclusive ranges. If a task already has
-`<uuid>_400_600.txt` as its first raw batch and no explicit range is requested,
-the CLI infers record 400 as the selected range start. The next TXT export
-starts at record 601 and then rebuilds the WOSID CSV from both existing and new
-raw batches. Existing raw batches must be contiguous from the selected start;
-gaps fail fast so the task does not accumulate overlapping raw files. Passing
-`--from-index` or `--limit` disables raw-start inference and uses the requested
-range. Use `--force` to clean a managed task before a fresh WOS export, or
-choose a range that starts at the first existing raw batch.
+Raw TXT batch names are inclusive ranges. For UUID downloads, the CLI reads the
+WOS total first, builds the expected 200-record batch plan, and marks which TXT
+files already exist. Immediately before requesting each missing batch, it checks
+the target file path again; if the file appeared, it parses that file and skips
+the request. This lets repeated runs fill arbitrary missing ranges rather than
+only continuing from the last contiguous batch. Passing `--from-index` or
+`--limit` narrows the selected range. Use `--force` to clean a managed task
+before a fresh WOS export.
 
 The CLI writes each TXT batch as soon as WOS returns that batch. If Playwright,
 the browser, or the SSH session stops halfway through a long export, completed
-batch files stay on disk and the next run resumes from the following record.
-Partial `_wosid.csv` files written from interrupted raw batches are not treated
-as completed downloads by `parse-pipeline`; the next run continues the WOS TXT
-export before parsing into SQLite.
+batch files stay on disk and the next run fills whichever planned batch files
+are still missing. Partial `_wosid.csv` files written from interrupted raw
+batches are not treated as completed downloads by `parse-pipeline`; completion
+is based on raw TXT coverage for the verified WOS record range.
 
 ## CSV Import Workflow
 
@@ -484,8 +484,7 @@ Normal work should use the default `./tasks` directory.
   SQLite database.
 - The CLI refuses to clean any directory without a `iiaide-wos` manifest.
 - `run --reuse-raw --force` preserves raw WOS batches and rebuilds derived
-  files only when the raw batch range is contiguous and covers the requested WOS
-  record range.
+  files only when existing raw batches cover the requested WOS record range.
 
 ## Authentication
 

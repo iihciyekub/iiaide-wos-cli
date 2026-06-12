@@ -3,6 +3,18 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.72 - 2026-06-12
+
+- Make full-record TXT resume completion depend on WOS total-derived raw batch
+  coverage instead of the presence of `_wosid.csv`. Partial WOSID CSV files no
+  longer make `run` or `parse-pipeline` skip the WOS download step.
+- Plan TXT downloads from the WOS record count and fill arbitrary missing raw
+  batch files. Each missing batch is checked on disk again immediately before
+  its request, so concurrent or interrupted resumes can skip files that already
+  appeared.
+- Stop inferring an unbounded WOS record count from partial raw TXT files alone;
+  raw-only rebuilds require a previously verified record count.
+
 ## 0.4.71 - 2026-06-12
 
 - Keep `parse-pipeline` resumable after an interrupted TXT export that already

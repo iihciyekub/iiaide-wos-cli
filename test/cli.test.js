@@ -2546,6 +2546,26 @@ test("raw batch coverage supports resume from an explicit WOS record range", () 
   );
 });
 
+test("raw batch plan identifies arbitrary missing TXT ranges", () => {
+  const root = temporaryDirectory();
+  const paths = cli.getRunPaths(root);
+  const rawDir = path.join(paths.rawRoot, "query", "full-record");
+  fs.mkdirSync(rawDir, { recursive: true });
+  fs.writeFileSync(path.join(rawDir, "query_1_200.txt"), "UT WOS:1\n");
+  fs.writeFileSync(path.join(rawDir, "query_401_600.txt"), "UT WOS:401\n");
+
+  const plan = cli.rawBatchPlanForRange(paths, "query", 1, 800, 200);
+
+  assert.equal(plan.plannedBatchCount, 4);
+  assert.equal(plan.complete, false);
+  assert.equal(plan.coveredCount, 400);
+  assert.deepEqual(plan.presentFiles, ["query_1_200.txt", "query_401_600.txt"]);
+  assert.deepEqual(plan.missingBatches, [
+    { markFrom: 201, markTo: 400 },
+    { markFrom: 601, markTo: 800 },
+  ]);
+});
+
 test("raw batch start infers default TXT resume range", () => {
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
@@ -2578,9 +2598,29 @@ test("failed TXT summaries do not short-circuit raw resume", () => {
   const runMethod = source.match(/async function run\(args\) \{[\s\S]*?\n}\n\nasync function runBib/);
   assert.ok(runMethod, "run should be present");
   assert.match(runMethod[0], /const priorRunFailed = isFailedTxtRunSummary\(samePriorSummary\);/);
-  assert.match(runMethod[0], /const priorSummary = priorRunFailed \? \{\} : samePriorSummary;/);
-  assert.match(runMethod[0], /args\.reuseRaw && !priorRunFailed && rawUuid && !info\.expectedCount/);
-  assert.match(runMethod[0], /\(\(args\.reuseRaw && !priorRunFailed\) \|\| canRepairFromRaw\)/);
+  assert.match(runMethod[0], /const priorRunUnverifiedPartial = isUnverifiedPartialTxtSummary\(samePriorSummary, args\);/);
+  assert.match(runMethod[0], /const priorSummary = \(priorRunFailed \|\| priorRunUnverifiedPartial\) \? \{\} : samePriorSummary;/);
+  assert.match(runMethod[0], /\(\(args\.reuseRaw && !priorRunFailed && !priorRunUnverifiedPartial\) \|\| canRepairFromRaw\)/);
+});
+
+test("unverified partial TXT summaries are not treated as completed", () => {
+  const summary = {
+    ok: true,
+    method: "wos-js-export-fetchTxtBatches",
+    uuid: "query",
+    expectedCount: 1400,
+    availableCount: 1400,
+    selectedCount: 1400,
+    fromIndex: 1,
+    limit: 0,
+    rangeStart: 1,
+    rangeEnd: 1400,
+    rowText: "",
+  };
+
+  assert.equal(cli.isUnverifiedPartialTxtSummary(summary, { uuid: "query" }), true);
+  assert.equal(cli.isUnverifiedPartialTxtSummary({ ...summary, rowText: "321,607 results" }, { uuid: "query" }), false);
+  assert.equal(cli.isUnverifiedPartialTxtSummary({ ...summary, limit: 1400 }, { uuid: "query" }), false);
 });
 
 test("validate does not create a missing task directory", () => {
@@ -2878,7 +2918,7 @@ test("reuse-raw preserves expected count and stores a relative task path", async
   assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].taskDir, "reuse");
 });
 
-test("tasks can append a different UUID without force", async () => {
+test("raw-only reuse requires a known WOS record count for a different UUID", async () => {
   const tasksRoot = temporaryDirectory();
   const args = cli.parseArgs([
     "node", "cli", "run", "--uuid", "new-query", "--task", "multi-uuid",
@@ -2906,13 +2946,11 @@ test("tasks can append a different UUID without force", async () => {
   fs.writeFileSync(path.join(oldRawDir, "old-query_1_1.txt"), "UT WOS:OLD\n");
   fs.writeFileSync(path.join(newRawDir, "new-query_1_1.txt"), "UT WOS:NEW\n");
 
-  const result = await cli.run(args);
-
-  assert.equal(result.uuid, "new-query");
-  assert.equal(result.expectedCount, 1);
-  assert.equal(result.uniqueCount, 1);
-  assert.deepEqual(cli.readWosIdsCsv(result.files.wosidsCsv), ["WOS:NEW"]);
-  assert.equal(result.files.wosidsCsv, path.join(newPaths.wosIdsDir, "new-query_wosid.csv"));
+  await assert.rejects(
+    () => cli.run(args),
+    /Cannot reuse raw batches without a known WOS record count/
+  );
+  assert.equal(fs.existsSync(path.join(newPaths.wosIdsDir, "new-query_wosid.csv")), false);
   assert.equal(fs.existsSync(path.join(oldRawDir, "old-query_1_1.txt")), true);
   assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].uuid, "new-query");
 });
@@ -2960,6 +2998,7 @@ test("completed WOS ID task is reused without refetching", async () => {
   writeJson(paths.manifest, { command: "iiaide-wos" });
   const csvPath = path.join(paths.dataDir, "query_wosid.csv");
   fs.writeFileSync(csvPath, "wosid\nWOS:A\n");
+  fs.writeFileSync(path.join(paths.dataDir, "query_1_1.txt"), "UT WOS:A\n");
   writeJson(paths.summary, {
     ok: true,
     method: "wos-js-export-fetchTxtBatches",
@@ -2967,6 +3006,9 @@ test("completed WOS ID task is reused without refetching", async () => {
     uuid: "query",
     expectedCount: 1,
     uniqueCount: 1,
+    rangeStart: 1,
+    rangeEnd: 1,
+    rowText: "1 result",
     files: { wosidsCsv: csvPath },
   });
 
@@ -2997,6 +3039,7 @@ test("completed WOS ID command returns before SID preparation", async () => {
   writeJson(paths.manifest, { command: "iiaide-wos" });
   const csvPath = path.join(paths.dataDir, "query_wosid.csv");
   fs.writeFileSync(csvPath, "wosid\nWOS:A\n");
+  fs.writeFileSync(path.join(paths.dataDir, "query_1_1.txt"), "UT WOS:A\n");
   writeJson(paths.summary, {
     ok: true,
     method: "wos-js-export-fetchTxtBatches",
@@ -3004,6 +3047,9 @@ test("completed WOS ID command returns before SID preparation", async () => {
     uuid: "query",
     expectedCount: 1,
     uniqueCount: 1,
+    rangeStart: 1,
+    rangeEnd: 1,
+    rowText: "1 result",
     files: { wosidsCsv: csvPath },
   });
 
@@ -3201,7 +3247,7 @@ test("failed runs are recorded as failed", () => {
   assert.equal(result.status, 1);
   const task = cli.readTaskIndex(tasksRoot).tasks.find((item) => item.taskId === "broken");
   assert.equal(task.status, "failed");
-  assert.match(task.lastError, /Non-contiguous raw batches/);
+  assert.match(task.lastError, /Overlapping raw batches/);
 });
 
 test("runParsedCommand handles Ctrl+C abort errors quietly", () => {

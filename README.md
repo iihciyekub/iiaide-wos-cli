@@ -67,7 +67,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.71
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.72
 iiaide-wos install-browser
 iiaide-wos
 # or
@@ -311,13 +311,12 @@ iiaide-wos run \
 The CLI downloads field-tagged full records and generates
 `tasks/demo-search/raw/<uuid>/full-record/<uuid>_wosid.csv`. Use
 `--from-index` and `--limit` to export a slice of WOS records. Re-running the
-same task resumes from contiguous raw TXT batches already present. If no
-explicit range is provided, the CLI infers the selected range start from the
-first raw batch; for example, an existing `<uuid>_400_600.txt` covers records
-400 through 600, so the next request starts at record 601. Passing
-`--from-index` or `--limit` disables that inference and uses the requested
-range. During long exports, each completed batch is written to disk immediately,
-so an interrupted browser session still leaves resumable raw TXT batches behind.
+same task first reads the WOS record count, converts the selected range into
+200-record TXT batch files, then skips any batch file already present on disk
+and downloads only the missing files. During long exports, each completed batch
+is written to disk immediately, so an interrupted browser session still leaves
+resumable raw TXT batches behind. The final `_wosid.csv` is written only after
+the selected TXT batch plan is complete.
 
 ### 2B. Create A Task From A WOS UUID
 
@@ -565,11 +564,12 @@ workspace panel as `Task ID`, and highlights it with a `*` marker in the task
 list.
 Before prompting for a task, the menu prints a short `Task selection:` hint so
 the available inputs are visible before the cursor waits for input.
-Interactive downloads reuse the current task by default. If the same UUID is
-already completed, iiaide-wos skips SID validation and WOS download, then prints
-the existing final artifact path. A different UUID can be appended to the same
-task; its raw batches are kept under separate `raw/<uuid>/` directories, while
-parsed page data is shared through the global SQLite database.
+Interactive downloads reuse the current task by default. If the same UUID has
+complete raw TXT coverage for its verified WOS record range, iiaide-wos skips
+SID validation and WOS download, then prints the existing final artifact path. A
+different UUID can be appended to the same task; its raw batches are kept under
+separate `raw/<uuid>/` directories, while parsed page data is shared through the
+global SQLite database.
 After showing the available record count and planned batch count, interactive
 TXT and BibTeX downloads start directly.
 At the `WOS summary URL or UUID` prompt, pressing Enter uses the shown saved
