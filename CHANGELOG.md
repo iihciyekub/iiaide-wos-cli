@@ -3,6 +3,14 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.74 - 2026-06-12
+
+- Retry transient full-record TXT export failures for each missing batch before
+  aborting the run. A single WOS export failure for a range such as
+  `189801-190000` no longer immediately returns to the menu.
+- Keep TXT download progress logs compact by recording the missing-batch count
+  and first missing range instead of embedding the full missing-batch plan.
+
 ## 0.4.73 - 2026-06-12
 
 - Fix large raw TXT resume parsing by avoiding spread calls with large parsed

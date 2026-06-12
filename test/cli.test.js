@@ -2609,7 +2609,20 @@ test("TXT export persists streamed batches before final export completion", () =
   assert.match(exportMethod[0], /const \{ text, \.\.\.progressEvent \} = event \|\| \{\};/);
   assert.match(exportMethod[0], /progressEvent\.phase === "batch" && typeof text === "string"/);
   assert.match(exportMethod[0], /persistTxtBatch\(\{\s*uuid: progressEvent\.uuid \|\| info\.uuid,/);
-  assert.match(exportMethod[0], /appendProgress\(paths, \{ phase: "wosjs-export-progress", \.\.\.progressEvent \}\)/);
+  assert.match(exportMethod[0], /appendProgress\(paths, \{ phase: "wosjs-export-progress", attempt, \.\.\.progressEvent \}\)/);
+});
+
+test("TXT export retries transient WOS batch failures without logging the full missing plan", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const exportMethod = source.match(/async function exportFromWos\(args, paths\) \{[\s\S]*?\n}\n\nasync function exportBibFromWos/);
+  assert.ok(exportMethod, "exportFromWos should be present");
+  assert.match(source, /const DEFAULT_TXT_EXPORT_RETRIES = 3;/);
+  assert.match(exportMethod[0], /attempt <= DEFAULT_TXT_EXPORT_RETRIES/);
+  assert.match(exportMethod[0], /phase: "txt-export-retry"/);
+  assert.match(exportMethod[0], /Export request failed after \$\{DEFAULT_TXT_EXPORT_RETRIES\} attempts/);
+  assert.match(exportMethod[0], /missingBatchCount: resumePlan\.missingBatches\.length/);
+  assert.match(exportMethod[0], /firstMissingBatch: resumePlan\.missingBatches\[0\] \|\| null/);
+  assert.doesNotMatch(exportMethod[0], /missingBatches: resumePlan\.missingBatches,/);
 });
 
 test("failed TXT summaries do not short-circuit raw resume", () => {

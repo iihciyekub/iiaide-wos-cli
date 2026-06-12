@@ -44,6 +44,8 @@ const { version: VERSION } = require("../package.json");
 const DEFAULT_BATCH_SIZE = 200;
 const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_RECORD_TIMEOUT_MS = 20000;
+const DEFAULT_TXT_EXPORT_RETRIES = 3;
+const DEFAULT_TXT_EXPORT_RETRY_DELAY_MS = 2000;
 const DEFAULT_BROWSER_RESTART_EVERY = 600;
 const DEFAULT_PARSE_MEMORY_CHECK_EVERY = 200;
 const DEFAULT_PARSE_MAX_RSS_MB = 4096;
@@ -2015,6 +2017,10 @@ function appendRows(target, source) {
   return target;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
 function isFailedTxtRunSummary(summary = {}) {
   return Boolean(summary?.ok === false && summary.method === "wos-js-export-fetchTxtBatches");
 }
@@ -3065,7 +3071,7 @@ async function exportFromWos(args, paths) {
         endIndex: range.endIndex,
         files: resumePlan.presentFiles.length,
         plannedBatches: resumePlan.plannedBatchCount,
-        missingBatches: resumePlan.missingBatches.length,
+        missingBatchCount: resumePlan.missingBatches.length,
         coveredCount: resumePlan.coveredCount,
         parsed: rows.length,
       });
@@ -3107,7 +3113,8 @@ async function exportFromWos(args, paths) {
       batchCount,
       plannedBatches: resumePlan.plannedBatchCount,
       presentBatches: resumePlan.presentFiles.length,
-      missingBatches: resumePlan.missingBatches,
+      missingBatchCount: resumePlan.missingBatches.length,
+      firstMissingBatch: resumePlan.missingBatches[0] || null,
       batchSize,
     });
     if (remainingCount) {
@@ -3139,30 +3146,56 @@ async function exportFromWos(args, paths) {
           updateMissingProgress({ saved: true }, missingBatch.markFrom, missingBatch.markTo);
           continue;
         }
-        const exportResult = await exportTxtBatchesViaWosJs(page, {
-          uuid: info.uuid,
-          markFrom: missingBatch.markFrom,
-          markTo: missingBatch.markTo,
-          batchSize,
-          sortBy: args.sortBy,
-          onProgress(event) {
-            const { text, ...progressEvent } = event || {};
-            if (progressEvent.phase === "batch" && typeof text === "string") {
-              const markFrom = Number(progressEvent.current) || 0;
-              const markTo = Number(progressEvent.batchEnd) || 0;
-              const result = persistTxtBatch({
-                uuid: progressEvent.uuid || info.uuid,
-                markFrom,
-                markTo,
-                text,
-              }, "batch");
-              if (markFrom && markTo) progressEvent.rawPath = rawBatchPath(paths, info.uuid, markFrom, markTo);
-              progressEvent.parsed = result.parsed;
-              updateMissingProgress(result, markFrom, markTo);
-            }
-            appendProgress(paths, { phase: "wosjs-export-progress", ...progressEvent });
-          },
-        });
+        let exportResult = null;
+        let lastError = null;
+        for (let attempt = 1; attempt <= DEFAULT_TXT_EXPORT_RETRIES; attempt += 1) {
+          try {
+            exportResult = await exportTxtBatchesViaWosJs(page, {
+              uuid: info.uuid,
+              markFrom: missingBatch.markFrom,
+              markTo: missingBatch.markTo,
+              batchSize,
+              sortBy: args.sortBy,
+              onProgress(event) {
+                const { text, ...progressEvent } = event || {};
+                if (progressEvent.phase === "batch" && typeof text === "string") {
+                  const markFrom = Number(progressEvent.current) || 0;
+                  const markTo = Number(progressEvent.batchEnd) || 0;
+                  const result = persistTxtBatch({
+                    uuid: progressEvent.uuid || info.uuid,
+                    markFrom,
+                    markTo,
+                    text,
+                  }, "batch");
+                  if (markFrom && markTo) progressEvent.rawPath = rawBatchPath(paths, info.uuid, markFrom, markTo);
+                  progressEvent.parsed = result.parsed;
+                  updateMissingProgress(result, markFrom, markTo);
+                }
+                appendProgress(paths, { phase: "wosjs-export-progress", attempt, ...progressEvent });
+              },
+            });
+            lastError = null;
+            break;
+          } catch (error) {
+            lastError = error;
+            appendProgress(paths, {
+              phase: "txt-export-retry",
+              uuid: info.uuid,
+              markFrom: missingBatch.markFrom,
+              markTo: missingBatch.markTo,
+              attempt,
+              retries: DEFAULT_TXT_EXPORT_RETRIES,
+              message: error?.message || String(error),
+            });
+            if (attempt >= DEFAULT_TXT_EXPORT_RETRIES) break;
+            await sleep(DEFAULT_TXT_EXPORT_RETRY_DELAY_MS * attempt);
+          }
+        }
+        if (!exportResult) {
+          throw new Error(
+            `Export request failed after ${DEFAULT_TXT_EXPORT_RETRIES} attempts for records ${missingBatch.markFrom}-${missingBatch.markTo}: ${lastError?.message || lastError || "unknown error"}`
+          );
+        }
 
         for (const batch of exportResult.batches) {
           const result = persistTxtBatch(batch, "batch");
