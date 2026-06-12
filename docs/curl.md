@@ -192,7 +192,7 @@ Batch behavior:
   `<uuid>_400_600.txt` as its first raw batch reuses records 400 through 600
   and starts the next WOS export at `601`. Passing `--from-index` or `--limit`
   disables raw-start inference and uses the requested range.
-- CLI parses `UT` fields from the response text.
+- CLI parses WOS IDs only from top-level `UT` fields in the response text.
 - CLI writes a single WOSID CSV to
   `raw/<uuid>/full-record/<uuid>_wosid.csv`.
 

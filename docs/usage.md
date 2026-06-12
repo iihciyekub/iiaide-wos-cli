@@ -101,6 +101,9 @@ choose a range that starts at the first existing raw batch.
 The CLI writes each TXT batch as soon as WOS returns that batch. If Playwright,
 the browser, or the SSH session stops halfway through a long export, completed
 batch files stay on disk and the next run resumes from the following record.
+Partial `_wosid.csv` files written from interrupted raw batches are not treated
+as completed downloads by `parse-pipeline`; the next run continues the WOS TXT
+export before parsing into SQLite.
 
 ## CSV Import Workflow
 

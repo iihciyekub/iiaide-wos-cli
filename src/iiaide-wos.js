@@ -1992,8 +1992,7 @@ function parseExportText(text, batchStart, batchEnd) {
   for (const line of String(text || "").split(/\r?\n/)) {
     const match =
       line.match(/^\s*UT\s+(.+?)\s*$/i) ||
-      line.match(/^\s*UT\s*[:=]\s*(.+?)\s*$/i) ||
-      line.match(/([A-Za-z][A-Za-z0-9]*\s*[:：]\s*[A-Za-z0-9][A-Za-z0-9._-]*)/);
+      line.match(/^\s*UT\s*[:=]\s*(.+?)\s*$/i);
     if (!match) continue;
     const raw = String(match[1] || "").trim();
     const wosid = normalizeWosId(raw);
@@ -2002,6 +2001,10 @@ function parseExportText(text, batchStart, batchEnd) {
     ids.push({ batchStart, batchEnd, batchPosition: ids.length + 1, wosid });
   }
   return ids;
+}
+
+function isFailedTxtRunSummary(summary = {}) {
+  return Boolean(summary?.ok === false && summary.method === "wos-js-export-fetchTxtBatches");
 }
 
 function parseBibEntryCount(text) {
@@ -3801,7 +3804,9 @@ async function run(args) {
     return completedSummary;
   }
   const priorSummaryRaw = readJson(initialPaths.summary, {});
-  const priorSummary = sameTaskUuid(priorSummaryRaw, args) ? priorSummaryRaw : {};
+  const samePriorSummary = sameTaskUuid(priorSummaryRaw, args) ? priorSummaryRaw : {};
+  const priorRunFailed = isFailedTxtRunSummary(samePriorSummary);
+  const priorSummary = priorRunFailed ? {} : samePriorSummary;
   const outputHasFiles = fs.existsSync(args.outDir) &&
     fs.readdirSync(args.outDir).some((name) => name !== ".DS_Store");
   if (args.force && !args.reuseRaw && outputHasFiles) {
@@ -3838,7 +3843,7 @@ async function run(args) {
     href: priorSummary.summaryHref || args.url,
     rowText: priorSummary.rowText || "",
   };
-  if (args.reuseRaw && rawUuid && !info.expectedCount) {
+  if (args.reuseRaw && !priorRunFailed && rawUuid && !info.expectedCount) {
     const coverage = rawBatchCoverageFromStart(paths, rawUuid, info.rangeStart || 1);
     if (coverage.files.length) {
       info.expectedCount = coverage.lastEnd - (info.rangeStart || 1) + 1;
@@ -3854,7 +3859,7 @@ async function run(args) {
     !finalWosIdsCsvExists(paths, rawUuid) &&
     canRepairWosIdsFromRaw(paths, rawUuid, info.expectedCount, info.rangeStart, info.rangeEnd);
 
-  if ((args.reuseRaw || canRepairFromRaw) && rawUuid && rawBatchFiles(paths, rawUuid).length) {
+  if (((args.reuseRaw && !priorRunFailed) || canRepairFromRaw) && rawUuid && rawBatchFiles(paths, rawUuid).length) {
     info.uuid = rawUuid;
     if (!info.expectedCount) {
       throw new Error("Cannot reuse raw batches without a known WOS record count. Re-run without --reuse-raw to refresh from WOS.");
@@ -4693,6 +4698,7 @@ module.exports = {
   omitSidArgs,
   makeTaskId,
   parseExportText,
+  isFailedTxtRunSummary,
   parseBibEntryCount,
   parseWosCount,
   downloadBatchCount,

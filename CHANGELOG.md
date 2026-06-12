@@ -3,6 +3,15 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.71 - 2026-06-12
+
+- Keep `parse-pipeline` resumable after an interrupted TXT export that already
+  wrote partial raw batches and a partial WOSID CSV. Failed TXT summaries no
+  longer make `--reuse-raw` treat partial raw batches as a completed task.
+- Restrict WOSID extraction from field-tagged TXT exports to `UT` lines so
+  referenced identifiers inside full records are not counted as downloaded
+  records.
+
 ## 0.4.70 - 2026-06-12
 
 - Persist full-record TXT batches immediately as each WOS export batch

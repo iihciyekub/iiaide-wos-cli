@@ -2422,8 +2422,25 @@ test("invalid SID can be replaced and immediately revalidated", async () => {
 });
 
 test("parses and deduplicates WOS IDs from field-tagged text", () => {
-  const rows = cli.parseExportText("UT WOS:ABC\nUT: WOS:DEF\nUT ALT:12-34\nUT WOS:ABC\n", 1, 4);
+  const rows = cli.parseExportText("UT WOS:ABC\nUT: WOS:DEF\nUT ALT:12-34\nDOI 10.1/example\nCR WOS:REF\nUT WOS:ABC\n", 1, 4);
   assert.deepEqual(rows.map((row) => row.wosid), ["WOS:ABC", "WOS:DEF", "ALT:1234"]);
+});
+
+test("failed TXT summaries do not make partial raw look complete", () => {
+  assert.equal(cli.isFailedTxtRunSummary({
+    ok: false,
+    method: "wos-js-export-fetchTxtBatches",
+    expectedCount: 1400,
+    rangeEnd: 1400,
+  }), true);
+  assert.equal(cli.isFailedTxtRunSummary({
+    ok: true,
+    method: "wos-js-export-fetchTxtBatches",
+  }), false);
+  assert.equal(cli.isFailedTxtRunSummary({
+    ok: false,
+    method: "imported-wosid-csv",
+  }), false);
 });
 
 test("normalizes accession IDs without forcing the WOS prefix", () => {
@@ -2554,6 +2571,16 @@ test("TXT export persists streamed batches before final export completion", () =
   assert.match(exportMethod[0], /progressEvent\.phase === "batch" && typeof text === "string"/);
   assert.match(exportMethod[0], /persistTxtBatch\(\{\s*uuid: progressEvent\.uuid \|\| info\.uuid,/);
   assert.match(exportMethod[0], /appendProgress\(paths, \{ phase: "wosjs-export-progress", \.\.\.progressEvent \}\)/);
+});
+
+test("failed TXT summaries do not short-circuit raw resume", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const runMethod = source.match(/async function run\(args\) \{[\s\S]*?\n}\n\nasync function runBib/);
+  assert.ok(runMethod, "run should be present");
+  assert.match(runMethod[0], /const priorRunFailed = isFailedTxtRunSummary\(samePriorSummary\);/);
+  assert.match(runMethod[0], /const priorSummary = priorRunFailed \? \{\} : samePriorSummary;/);
+  assert.match(runMethod[0], /args\.reuseRaw && !priorRunFailed && rawUuid && !info\.expectedCount/);
+  assert.match(runMethod[0], /\(\(args\.reuseRaw && !priorRunFailed\) \|\| canRepairFromRaw\)/);
 });
 
 test("validate does not create a missing task directory", () => {
