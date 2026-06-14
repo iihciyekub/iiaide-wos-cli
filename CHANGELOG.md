@@ -3,6 +3,12 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.89 - 2026-06-15
+
+- Make the interactive panel's `Batch UUID CSV - TXT` workflow pass
+  `--allow-large-export` by default so UUIDs over 200,000 records use the
+  two-sort large export window instead of being skipped from the panel flow.
+
 ## 0.4.88 - 2026-06-14
 
 - Add guarded large UUID TXT exports for result sets over 200,000 records using

@@ -1,6 +1,6 @@
 {
   "name": "iiaide-wos-cli",
-  "version": "0.4.88",
+  "version": "0.4.89",
   "private": true,
   "description": "Task-oriented CLI for interacting with Web of Science, exporting resumable raw TXT and BibTeX batches, and delivering reusable data packages.",
   "repository": {

@@ -796,7 +796,7 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     stdout.write(`${color("32", "Using task:", stdout)} ${taskId}\n\n`);
 
     if (choice === "1.3") {
-      return ["batch-run", "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot];
+      return ["batch-run", "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot, "--allow-large-export"];
     }
 
     const sourceFallback = [task?.url, task?.uuid].find(isWosSourceLike) || "";

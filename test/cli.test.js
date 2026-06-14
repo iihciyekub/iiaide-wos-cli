@@ -462,7 +462,7 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(argsMatch[0], /choice === "u"/);
   assert.match(argsMatch[0], /return \["update"\]/);
   assert.match(argsMatch[0], /choice === "1\.3"/);
-  assert.match(argsMatch[0], /return \["batch-run", "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot\]/);
+  assert.match(argsMatch[0], /return \["batch-run", "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot, "--allow-large-export"\]/);
   assert.match(argsMatch[0], /choice === "3\.1"/);
   assert.match(argsMatch[0], /mode: "new"/);
   assert.match(argsMatch[0], /choice === "3\.2"/);
