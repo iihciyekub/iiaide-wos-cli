@@ -266,6 +266,7 @@ function parseArgs(argv) {
     authRetryDelayMs: 60000,
     authMaxChecks: 0,
     authQuiet: false,
+    quiet: false,
     json: false,
     help: false,
     version: false,
@@ -310,7 +311,10 @@ function parseArgs(argv) {
     else if (arg === "--min-sids" || arg === "--threshold") args.authMinSids = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--retry-delay-ms") args.authRetryDelayMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--max-checks") args.authMaxChecks = parseIntegerFlag(arg, readValue(arg, i++));
-    else if (arg === "--quiet") args.authQuiet = true;
+    else if (arg === "--quiet") {
+      args.authQuiet = true;
+      args.quiet = true;
+    }
     else if (arg === "--json") args.json = true;
     else if (arg === "--url") {
       args.url = readValue(arg, i++);
@@ -543,6 +547,7 @@ function normalizeSummaryUrl(baseUrl, value, uuid, sortBy) {
 }
 
 function announceResolvedWosUuid(args, write = (message) => console.error(message)) {
+  if (args?.quiet) return false;
   if (!args?.uuid || typeof write !== "function") return false;
   write(`Resolved WOS UUID: ${args.uuid}`);
   return true;
@@ -552,6 +557,20 @@ async function prepareWosExport(args) {
   announceResolvedWosUuid(args);
   loadSavedSid(args);
   return args.sid;
+}
+
+function reportForArgs(args, write = console.error) {
+  return (message) => {
+    const text = String(message || "");
+    if (args?.quiet && /^WOS UUID changed from /.test(text)) return;
+    write(text);
+  };
+}
+
+function shortUuid(value) {
+  const text = String(value || "");
+  if (text.length <= 18) return text;
+  return `${text.slice(0, 8)}...${text.slice(-8)}`;
 }
 
 function formatTaskIdDate(date = new Date(), config = DEFAULT_TASK_ID_CONFIG) {
@@ -2142,8 +2161,12 @@ async function confirmLargeWosExport(args, totalRecords, windows, options = {}) 
   if (args.allowLargeExport) return true;
   const message = largeExportWarningLines(totalRecords, windows).join("\n");
   if (options.skipInsteadOfThrow) {
-    console.error(message);
-    console.error("Skipping this UUID. Re-run with --allow-large-export to download up to the 400,000-record maximum.");
+    if (options.quiet) {
+      console.error(`Skipping large UUID: ${totalRecords} records exceeds ${MAX_WOS_EXPORT_RECORDS}; re-run with --allow-large-export.`);
+    } else {
+      console.error(message);
+      console.error("Skipping this UUID. Re-run with --allow-large-export to download up to the 400,000-record maximum.");
+    }
     return false;
   }
   if (!process.stdin.isTTY || !isInteractive(process.stdout)) {
@@ -3099,14 +3122,15 @@ function pageContextUuid(context, fallbackUuid) {
 }
 
 async function exportFromWos(args, paths) {
-  const authSpinner = createSpinner(authValidationMessage(args));
+  const quiet = Boolean(args.quiet);
+  const authSpinner = createSpinner(authValidationMessage(args), { quiet });
   let session = null;
   let page = null;
   let info = null;
   let batchProgress = null;
   let summarySpinner = null;
   try {
-    session = await prepareWosSession(args);
+    session = await prepareWosSession(args, { report: reportForArgs(args) });
     page = session.page;
     authSpinner.succeed(authValidatedMessage(args));
     appendProgress(paths, { phase: "sid-validated" });
@@ -3118,7 +3142,7 @@ async function exportFromWos(args, paths) {
       inputUuid: args.uuid,
       countText: context.countText,
     });
-    summarySpinner = createSpinner("Reading WOS summary information");
+    summarySpinner = createSpinner("Reading WOS summary information", { quiet });
     info = await readSummaryInfo(page, args);
     if (!info.uuid || !info.expectedCount) {
       summarySpinner.fail("Could not read WOS summary information");
@@ -3128,7 +3152,7 @@ async function exportFromWos(args, paths) {
     appendProgress(paths, { phase: "summary-info", ...info });
     const batchSize = DEFAULT_BATCH_SIZE;
     const firstRawRange = firstRawBatchRange(paths, info.uuid);
-    if (args.reuseRaw && !firstRawRange && shouldInferTxtRangeStartFromRaw(args)) {
+    if (!quiet && args.reuseRaw && !firstRawRange && shouldInferTxtRangeStartFromRaw(args)) {
       console.error(`WOS raw resume: no TXT batches found in ${rawBatchDir(paths, info.uuid)}`);
     }
     const rangeStart = inferTxtRangeStart(paths, info.uuid, args, args.fromIndex);
@@ -3136,7 +3160,7 @@ async function exportFromWos(args, paths) {
     if (!range.selectedCount) {
       throw new Error(`WOS record range starts after available records: start=${range.startIndex} total=${range.availableCount}`);
     }
-    if (range.startIndex !== args.fromIndex) {
+    if (!quiet && range.startIndex !== args.fromIndex) {
       console.error(`WOS record start inferred from raw batches: ${range.startIndex}`);
     }
     const largeWindowPlan = range.selectedCount > MAX_WOS_EXPORT_RECORDS;
@@ -3189,7 +3213,7 @@ async function exportFromWos(args, paths) {
         coveredCount: resumedCount,
         exportWindows: exportWindowsForSummary,
       });
-      console.error(`WOS raw resume: ${presentBatchCount}/${plannedBatchCount} TXT batches present; ${missingBatchCount} missing`);
+      if (!quiet) console.error(`WOS raw resume: ${presentBatchCount}/${plannedBatchCount} TXT batches present; ${missingBatchCount} missing`);
     }
     const persistedBatchKeys = new Set();
     const persistTxtBatch = (batch, sourcePhase = "batch", sortOptions = {}) => {
@@ -3202,7 +3226,7 @@ async function exportFromWos(args, paths) {
       writeFileAtomic(rawPath, String(batch.text || ""));
       persistedBatchKeys.add(key);
       appendProgress(paths, { phase: sourcePhase, sortBy: sortOptions.sortBy || args.sortBy, markFrom, markTo, rawPath });
-      if (!isInteractive()) console.error(`export ${markFrom}-${markTo}: saved ${rawPath}`);
+      if (!quiet && !isInteractive()) console.error(`export ${markFrom}-${markTo}: saved ${rawPath}`);
       return { saved: true };
     };
     let sidSwitchCount = 0;
@@ -3303,12 +3327,14 @@ async function exportFromWos(args, paths) {
         expectedCount: refreshedContext.expectedCount,
       });
     };
-    reportDownloadPlan(
-      "WOS records",
-      info.expectedCount,
-      remainingCount,
-      batchSize
-    );
+    if (!quiet) {
+      reportDownloadPlan(
+        "WOS records",
+        info.expectedCount,
+        remainingCount,
+        batchSize
+      );
+    }
     const batchCount = missingBatchCount;
     appendProgress(paths, {
       phase: "download-plan",
@@ -3328,7 +3354,7 @@ async function exportFromWos(args, paths) {
       exportWindows: exportWindowsForSummary,
     });
     if (remainingCount) {
-      batchProgress = createProgress("Exporting records", batchCount);
+      batchProgress = createProgress("Exporting records", batchCount, { quiet });
       let completedMissingBatches = 0;
       const updateMissingProgress = (result, markFrom, markTo) => {
         if (!result.saved) return;
@@ -3412,7 +3438,7 @@ async function exportFromWos(args, paths) {
       }
       batchProgress.stop("Export complete");
       batchProgress = null;
-    } else if (!isInteractive()) {
+    } else if (!quiet && !isInteractive()) {
       console.error("WOS records already covered by raw batches; rebuilding WOS ID CSV.");
     }
     info = {
@@ -3654,7 +3680,7 @@ async function exportBibFromWos(args, paths) {
 
 async function inspectWosUuid(args) {
   await prepareWosExport(args);
-  const session = await prepareWosSession(args);
+  const session = await prepareWosSession(args, { report: reportForArgs(args) });
   try {
     const context = await prepareWosRequestContext(session.page, args);
     const info = await readSummaryInfo(session.page, args);
@@ -3753,7 +3779,7 @@ async function runBatchUuidTxt(args) {
   try {
     for (const [index, uuid] of uuids.entries()) {
       const step = `${index + 1}/${uuids.length}`;
-      progress.update(index, `${step} ${uuid}`);
+      progress.update(index, `${step} checking ${shortUuid(uuid)}`);
       const marker = readRawUuidCompleteMarker(paths, uuid);
       let meta = marker || {};
       let state = rawUuidDownloadState(paths, uuid, meta);
@@ -3762,7 +3788,7 @@ async function runBatchUuidTxt(args) {
       if (marker && state.complete) {
         skipped += 1;
         completed += 1;
-        progress.update(index + 1, `${step} skipped ${uuid}`);
+        progress.update(index + 1, `${step} skipped ${shortUuid(uuid)}`);
         appendProgress(paths, { phase: "batch-uuid-skip-complete", uuid, index: index + 1, total: uuids.length });
         results.push({ uuid, status: "skipped" });
         continue;
@@ -3776,14 +3802,15 @@ async function runBatchUuidTxt(args) {
           url: buildSummaryUrl(args.baseUrl, uuid, args.sortBy),
           force: false,
           outDir: args.outDir,
+          quiet: true,
         };
         meta = await inspectWosUuid(inspectArgs);
         if (meta.expectedCount > MAX_WOS_EXPORT_RECORDS && !args.allowLargeExport) {
           const windows = planWosExportWindows(meta.expectedCount, DEFAULT_BATCH_SIZE, { sortBy: args.sortBy });
-          await confirmLargeWosExport(args, meta.expectedCount, windows, { skipInsteadOfThrow: true });
+          await confirmLargeWosExport(args, meta.expectedCount, windows, { skipInsteadOfThrow: true, quiet: true });
           skipped += 1;
           completed += 1;
-          progress.update(index + 1, `${step} skipped-large ${uuid}`);
+          progress.update(index + 1, `${step} skipped-large ${shortUuid(uuid)}`);
           appendProgress(paths, {
             phase: "batch-uuid-skip-large-export",
             uuid,
@@ -3801,7 +3828,7 @@ async function runBatchUuidTxt(args) {
           writeRawUuidCompleteMarker(paths, { ...meta, uuid });
           skipped += 1;
           completed += 1;
-          progress.update(index + 1, `${step} verified ${uuid}`);
+          progress.update(index + 1, `${step} verified ${shortUuid(uuid)}`);
           appendProgress(paths, { phase: "batch-uuid-verified-complete", uuid, index: index + 1, total: uuids.length });
           results.push({ uuid, status: "skipped" });
           continue;
@@ -3816,12 +3843,14 @@ async function runBatchUuidTxt(args) {
         url: buildSummaryUrl(args.baseUrl, uuid, args.sortBy),
         force: false,
         outDir: args.outDir,
+        quiet: true,
       };
+      progress.update(index, `${step} downloading ${shortUuid(uuid)} (${meta.expectedCount || "?"})`);
       const summary = await run(runArgs);
       writeRawUuidCompleteMarker(paths, summary);
       completed += 1;
       if (hadRaw) resumed += 1;
-      progress.update(index + 1, `${step} done ${uuid}`);
+      progress.update(index + 1, `${step} done ${shortUuid(uuid)}`);
       appendProgress(paths, {
         phase: "batch-uuid-complete",
         uuid,
@@ -4021,7 +4050,7 @@ async function run(args) {
   const initialPaths = getRunPaths(args.outDir);
   const completedSummary = !args.force ? readCompletedRunSummary(initialPaths, args) : null;
   if (completedSummary) {
-    console.error("WOS raw TXT batches already exist; skipping download.");
+    if (!args.quiet) console.error("WOS raw TXT batches already exist; skipping download.");
     return completedSummary;
   }
   const priorSummaryRaw = readJson(initialPaths.summary, {});
@@ -4108,9 +4137,11 @@ async function run(args) {
       exportWindows: info.exportWindows,
     });
     if (!isInteractive()) {
-      console.error(args.reuseRaw
-        ? "WOS raw TXT batches already cover the selected range."
-        : "WOS raw TXT batches already exist; marking task complete from raw batches.");
+      if (!args.quiet) {
+        console.error(args.reuseRaw
+          ? "WOS raw TXT batches already cover the selected range."
+          : "WOS raw TXT batches already exist; marking task complete from raw batches.");
+      }
     }
   } else {
     await prepareWosExport(args);

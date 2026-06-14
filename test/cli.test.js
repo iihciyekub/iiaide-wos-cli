@@ -61,6 +61,9 @@ test("parses batch UUID TXT tasks", () => {
   assert.equal(args.command, "batch-run");
   assert.equal(args.outDir, path.join(root, "batch-demo"));
   assert.equal(args.searchRoot, process.cwd());
+  const quietArgs = cli.parseArgs(["node", "cli", "batch-run", "--task", "batch-demo", "--tasks-root", root, "--quiet"]);
+  assert.equal(quietArgs.quiet, true);
+  assert.equal(quietArgs.authQuiet, true);
 });
 
 test("parses SID check tasks", () => {
@@ -2196,6 +2199,19 @@ test("TXT export persists streamed batches before final export completion", () =
   assert.match(exportMethod[0], /progressEvent\.phase === "batch" && typeof text === "string"/);
   assert.match(exportMethod[0], /persistTxtBatch\(\{\s*uuid: progressEvent\.uuid \|\| info\.uuid,/);
   assert.match(exportMethod[0], /appendProgress\(paths, \{ phase: "wosjs-export-progress", sidSwitchCount, sortBy: window\.sortBy, \.\.\.progressEvent \}\)/);
+});
+
+test("batch UUID TXT runs per-UUID inspect and downloads quietly", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const batchMethod = source.match(/async function runBatchUuidTxt\(args\) \{[\s\S]*?\n}\n\nfunction combineBibFiles/);
+  const exportMethod = source.match(/async function exportFromWos\(args, paths\) \{[\s\S]*?\n}\n\nasync function exportBibFromWos/);
+  assert.ok(batchMethod, "runBatchUuidTxt should be present");
+  assert.ok(exportMethod, "exportFromWos should be present");
+  assert.match(batchMethod[0], /quiet: true,/);
+  assert.match(batchMethod[0], /shortUuid\(uuid\)/);
+  assert.match(exportMethod[0], /createSpinner\(authValidationMessage\(args\), \{ quiet \}\)/);
+  assert.match(exportMethod[0], /createProgress\("Exporting records", batchCount, \{ quiet \}\)/);
+  assert.match(exportMethod[0], /if \(!quiet\) \{\s*reportDownloadPlan/);
 });
 
 test("TXT export switches SID on WOS batch request failures without logging the full missing plan", () => {

@@ -91,17 +91,27 @@ function createProgress(label, total, options = {}) {
   let detail = "";
   let stopped = false;
 
+  const fitDetail = (value, baseLength) => {
+    const text = String(value || "");
+    const columns = Number(stream.columns) || 0;
+    if (!columns || !text) return text;
+    const available = Math.max(12, columns - baseLength - 2);
+    if (text.length <= available) return text;
+    return `${text.slice(0, Math.max(0, available - 3))}...`;
+  };
+
   const render = () => {
     if (!enabled || stopped) return;
     const ratio = totalSteps ? Math.min(1, completed / totalSteps) : 1;
     const filled = Math.round(width * ratio);
     const bar = `${"=".repeat(filled)}${" ".repeat(width - filled)}`;
     const failures = failed ? color("31", ` ${failed} failed`, stream) : "";
+    const prefix = `${color("36", label, stream)} [${bar}] ${completed}/${totalSteps}${failures}`;
+    const plainPrefix = `${label} [${bar}] ${completed}/${totalSteps}${failed ? ` ${failed} failed` : ""}`;
+    const fittedDetail = fitDetail(detail, plainPrefix.length);
     readline.clearLine(stream, 0);
     readline.cursorTo(stream, 0);
-    stream.write(
-      `${color("36", label, stream)} [${bar}] ${completed}/${totalSteps}${failures}${detail ? `  ${detail}` : ""}`
-    );
+    stream.write(`${prefix}${fittedDetail ? `  ${fittedDetail}` : ""}`);
   };
 
   if (!enabled && !options.quiet) stream.write(`${label}: 0/${totalSteps}\n`);

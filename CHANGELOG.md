@@ -3,6 +3,14 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.90 - 2026-06-15
+
+- Make batch UUID TXT output quieter and easier to read by suppressing normal
+  per-UUID inspect/export noise, shortening UUIDs in progress details, and
+  keeping detailed events in `logs/progress.jsonl`.
+- Truncate interactive progress details to the terminal width so long UUIDs do
+  not smear over the current progress line.
+
 ## 0.4.89 - 2026-06-15
 
 - Make the interactive panel's `Batch UUID CSV - TXT` workflow pass
