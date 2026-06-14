@@ -2017,6 +2017,101 @@ test("raw batch plan identifies arbitrary missing TXT ranges", () => {
   ]);
 });
 
+test("plans WOS large UUID exports with author sort windows", () => {
+  assert.deepEqual(
+    cli.planWosExportWindows(199999, 500, { sortBy: "relevance" }).map((window) => ({
+      sortBy: window.sortBy,
+      startIndex: window.startIndex,
+      endIndex: window.endIndex,
+      batchCount: window.batchCount,
+    })),
+    [{ sortBy: "relevance", startIndex: 1, endIndex: 199999, batchCount: 400 }]
+  );
+  assert.equal(cli.planWosExportWindows(200000, 500).length, 1);
+
+  const justOver = cli.planWosExportWindows(200001, 500);
+  assert.deepEqual(justOver.map((window) => [window.sortBy, window.endIndex, window.batchCount]), [
+    ["author-ascending", 200000, 400],
+    ["author-descending", 1000, 2],
+  ]);
+
+  const windows = cli.planWosExportWindows(350000, 500);
+  assert.deepEqual(windows.map((window) => [window.sortBy, window.endIndex, window.batchCount]), [
+    ["author-ascending", 200000, 400],
+    ["author-descending", 150500, 301],
+  ]);
+  assert.equal(cli.usesLargeExportWindows(windows), true);
+
+  const capped = cli.planWosExportWindows(400001, 500);
+  assert.deepEqual(capped.map((window) => [window.sortBy, window.endIndex, window.batchCount]), [
+    ["author-ascending", 200000, 400],
+    ["author-descending", 200000, 400],
+  ]);
+  assert.equal(capped[0].incompleteBeyondWosLimit, true);
+});
+
+test("raw TXT batch planning supports per-sort large export directories", () => {
+  const root = temporaryDirectory();
+  const paths = cli.getRunPaths(root);
+  const uuid = "query";
+  const ascDir = cli.rawBatchDir(paths, uuid, { sortBy: "author-ascending" });
+  const descDir = cli.rawBatchDir(paths, uuid, { sortBy: "author-descending" });
+  fs.mkdirSync(ascDir, { recursive: true });
+  fs.mkdirSync(descDir, { recursive: true });
+  fs.writeFileSync(path.join(ascDir, "query_1_500.txt"), "UT WOS:A\n");
+  fs.writeFileSync(path.join(descDir, "query_1_500.txt"), "UT WOS:Z\n");
+
+  const ascPlan = cli.rawBatchPlanForRange(paths, uuid, 1, 1000, 500, { sortBy: "author-ascending" });
+  const descPlan = cli.rawBatchPlanForRange(paths, uuid, 1, 500, 500, { sortBy: "author-descending" });
+
+  assert.deepEqual(ascPlan.presentFiles, ["query_1_500.txt"]);
+  assert.deepEqual(ascPlan.missingBatches, [{ markFrom: 501, markTo: 1000 }]);
+  assert.equal(descPlan.complete, true);
+  assert.deepEqual(cli.rawBatchFiles(paths, uuid), [
+    path.join("author-ascending", "query_1_500.txt"),
+    path.join("author-descending", "query_1_500.txt"),
+  ]);
+  assert.deepEqual(
+    cli.rawBatchPlanForRange(paths, uuid, 1, 500, 500).presentFiles,
+    [],
+    "flat resume planning should not treat sort-window batches as default-order batches"
+  );
+});
+
+test("large TXT completion markers preserve sort windows and write per-directory markers", () => {
+  const root = temporaryDirectory();
+  const paths = cli.getRunPaths(root);
+  const uuid = "query";
+  const windows = cli.planWosExportWindows(350000, 500);
+  for (const window of windows) {
+    const rawDir = cli.rawBatchDir(paths, uuid, { sortBy: window.sortBy });
+    fs.mkdirSync(rawDir, { recursive: true });
+    fs.writeFileSync(path.join(rawDir, `query_1_${window.sortBy === "author-ascending" ? 200000 : 150500}.txt`), "UT WOS:A\n");
+  }
+
+  cli.writeRawUuidCompleteMarker(paths, {
+    uuid,
+    expectedCount: 350000,
+    rangeStart: 1,
+    rangeEnd: 350000,
+    largeExport: true,
+    limitedByWosWindow: true,
+    exportWindows: windows,
+  });
+
+  const marker = cli.readRawUuidCompleteMarker(paths, uuid);
+  assert.equal(marker.largeExport, true);
+  assert.deepEqual(marker.exportWindows.map((window) => window.sortBy), ["author-ascending", "author-descending"]);
+  const windowDirs = cli.rawWindowDirs(paths, uuid, windows);
+  assert.equal(windowDirs.length, 2);
+  for (const entry of windowDirs) {
+    const sortMarker = JSON.parse(fs.readFileSync(entry.marker, "utf8"));
+    assert.equal(sortMarker.uuid, uuid);
+    assert.equal(sortMarker.sortBy, entry.sortBy);
+    assert.match(sortMarker.direction, /^(a-z|z-a)$/);
+  }
+});
+
 test("BibTeX batch plan identifies arbitrary missing ranges", () => {
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
@@ -2096,11 +2191,11 @@ test("TXT export persists streamed batches before final export completion", () =
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
   const exportMethod = source.match(/async function exportFromWos\(args, paths\) \{[\s\S]*?\n}\n\nasync function exportBibFromWos/);
   assert.ok(exportMethod, "exportFromWos should be present");
-  assert.match(exportMethod[0], /const persistTxtBatch = \(batch, sourcePhase = "batch"\) => \{/);
+  assert.match(exportMethod[0], /const persistTxtBatch = \(batch, sourcePhase = "batch", sortOptions = \{\}\) => \{/);
   assert.match(exportMethod[0], /const \{ text, \.\.\.progressEvent \} = event \|\| \{\};/);
   assert.match(exportMethod[0], /progressEvent\.phase === "batch" && typeof text === "string"/);
   assert.match(exportMethod[0], /persistTxtBatch\(\{\s*uuid: progressEvent\.uuid \|\| info\.uuid,/);
-  assert.match(exportMethod[0], /appendProgress\(paths, \{ phase: "wosjs-export-progress", sidSwitchCount, \.\.\.progressEvent \}\)/);
+  assert.match(exportMethod[0], /appendProgress\(paths, \{ phase: "wosjs-export-progress", sidSwitchCount, sortBy: window\.sortBy, \.\.\.progressEvent \}\)/);
 });
 
 test("TXT export switches SID on WOS batch request failures without logging the full missing plan", () => {
@@ -2114,8 +2209,8 @@ test("TXT export switches SID on WOS batch request failures without logging the 
   assert.match(exportMethod[0], /waitForUsableWosSession\(args/);
   assert.match(exportMethod[0], /txt-export-sid-switch-validation-failed/);
   assert.match(exportMethod[0], /prepareWosRequestContext\(page, args\)/);
-  assert.match(exportMethod[0], /missingBatchCount: resumePlan\.missingBatches\.length/);
-  assert.match(exportMethod[0], /firstMissingBatch: resumePlan\.missingBatches\[0\] \|\| null/);
+  assert.match(exportMethod[0], /missingBatchCount,/);
+  assert.match(exportMethod[0], /firstMissingBatch: firstMissingWindow\?\.plan\.missingBatches\[0\] \|\| null/);
   assert.doesNotMatch(exportMethod[0], /missingBatches: resumePlan\.missingBatches,/);
 });
 

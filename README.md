@@ -24,6 +24,8 @@ Every workflow is managed as a task under `tasks/<task-id>/`.
 ```text
 tasks/<task-id>/
   raw/<uuid>/full-record/   # <uuid>_<start>_<end>.txt raw WOS export batches
+  raw/<uuid>/full-record/author-ascending/   # large UUID A-Z window batches
+  raw/<uuid>/full-record/author-descending/  # large UUID Z-A window batches
   raw/<uuid>/bib/           # <uuid>_<start>_<end>.bib BibTeX export batches
   logs/progress.jsonl
   manifest.json
@@ -31,6 +33,15 @@ tasks/<task-id>/
 ```
 
 The task directory is the deliverable data package. It keeps raw inputs, progress, failures, and metadata together. For TXT and BibTeX downloads, the task is complete once the planned raw batch files are present for the selected WOS range.
+
+WOS UUID TXT exports are limited to 400 files per sort window, or 200,000
+records at the default 500-record batch size. If a UUID has more than 200,000
+records, `run` stops by default and asks before using `--allow-large-export`.
+Large TXT export mode downloads the first window as `author-ascending` and the
+tail window as `author-descending`, with one overlap batch. Those batches are
+kept in separate sort directories, and each directory contains an
+`_wos_export_window.json` marker so a resumed run does not confuse A-Z and Z-A
+files that share names such as `<uuid>_1_500.txt`.
 
 Artifact-producing commands print only the final artifact path on success: `run` prints the raw TXT batch directory, `bib` prints the raw BibTeX batch directory, and `import` prints the managed WOSID CSV path.
 

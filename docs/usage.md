@@ -27,6 +27,8 @@ The default task root is `./tasks`. Override it with `--tasks-root <dir>`.
 ```text
 tasks/<task-id>/
   raw/<uuid>/full-record/       # <uuid>_<start>_<end>.txt raw WOS export batches
+  raw/<uuid>/full-record/author-ascending/   # large UUID A-Z window batches
+  raw/<uuid>/full-record/author-descending/  # large UUID Z-A window batches
   raw/<uuid>/bib/               # <uuid>_<start>_<end>.bib raw BibTeX batches
   logs/progress.jsonl
   manifest.json
@@ -146,10 +148,15 @@ The batch UUID TXT workflow searches the current working directory recursively
 for `uuid.csv` files, reads the whole CSV text, extracts UUID-shaped values by
 regex, and de-duplicates them before downloading. Each UUID writes raw TXT
 batches under `raw/<uuid>/full-record/` and a `<uuid>_complete.json` marker
-when that UUID's planned 500-record batch coverage is complete. Future batch
-runs use the marker as a fast hint, but still validate the raw batch checklist
-before skipping a UUID; if files are missing, the UUID is resumed instead of
-being skipped.
+when that UUID's planned 500-record batch coverage is complete. UUIDs over
+200,000 records are skipped unless large export mode is allowed. Large UUID
+exports keep A-Z and Z-A windows under
+`raw/<uuid>/full-record/author-ascending/` and
+`raw/<uuid>/full-record/author-descending/`; each sort directory has an
+`_wos_export_window.json` marker. Future batch runs use the completion marker as
+a fast hint, but still validate the raw batch checklist for the recorded window
+plan before skipping a UUID; if files are missing, the UUID is resumed instead
+of being skipped.
 
 CLI form:
 

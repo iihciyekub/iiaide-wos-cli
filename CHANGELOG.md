@@ -3,6 +3,17 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.88 - 2026-06-14
+
+- Add guarded large UUID TXT exports for result sets over 200,000 records using
+  author ascending and author descending WOS sort windows.
+- Store large-export raw TXT batches under per-sort directories and write
+  `_wos_export_window.json` markers inside those directories so resume and
+  inspection can distinguish A-Z from Z-A batches with the same numeric range.
+- Preserve large-export window plans in TXT summaries and per-UUID completion
+  markers, and keep flat resume planning from treating sorted-window batches as
+  default-order batches.
+
 ## 0.4.87 - 2026-06-14
 
 - Refresh the user docs to match the current raw-batch-only download behavior:
