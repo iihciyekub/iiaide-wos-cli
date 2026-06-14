@@ -587,12 +587,17 @@ function batchOrdinalInRange(markTo, rangeStart, batchSize = DEFAULT_BATCH_SIZE)
   return Math.max(1, Math.ceil((end - start + 1) / size));
 }
 
-function formatBatchProgressDetail(currentBatch, totalBatches, detail = "") {
-  const total = Math.max(0, Number(totalBatches) || 0);
-  const current = Math.max(0, Math.min(total || Infinity, Number(currentBatch) || 0));
-  const remaining = total ? Math.max(0, total - current) : 0;
+function formatDownloadWindowDetail(currentWindow, totalWindows, detail = "") {
+  const total = Math.max(0, Number(totalWindows) || 0);
+  const current = Math.max(0, Math.min(total || Infinity, Number(currentWindow) || 0));
   const suffix = detail ? ` ${detail}` : "";
-  return `batch ${current}/${total}, ${remaining} left${suffix}`;
+  return `download ${current}/${total}${suffix}`;
+}
+
+function formatUuidRemainingDetail(completedUuids, totalUuids) {
+  const total = Math.max(0, Number(totalUuids) || 0);
+  const completed = Math.max(0, Math.min(total || Infinity, Number(completedUuids) || 0));
+  return `uuids ${completed}/${total} done, ${Math.max(0, total - completed)} left`;
 }
 
 function formatTaskIdDate(date = new Date(), config = DEFAULT_TASK_ID_CONFIG) {
@@ -3377,23 +3382,24 @@ async function exportFromWos(args, paths) {
     });
     if (remainingCount) {
       const useWindowProgress = useSortWindowDirs;
-      let batchProgressTotal = batchCount;
       if (!useWindowProgress) {
-        batchProgress = createProgress("Exporting records", batchProgressTotal, { quiet });
+        batchProgress = createProgress("Exporting records", batchCount, { quiet });
       }
       let completedMissingBatches = 0;
       let currentWindowStartIndex = 1;
+      let currentDownloadWindow = 1;
+      const downloadWindowCount = windowPlans.filter((window) => window.plan.missingBatches.length).length || 1;
       const updateMissingProgress = (result, markFrom, markTo) => {
         if (!result.saved) return;
         if (useWindowProgress) {
           const currentBatch = batchOrdinalInRange(markTo, currentWindowStartIndex, batchSize);
-          batchProgress?.update(currentBatch, formatBatchProgressDetail(currentBatch, batchProgressTotal, `${markFrom}-${markTo}`));
+          batchProgress?.update(
+            currentBatch,
+            formatDownloadWindowDetail(currentDownloadWindow, downloadWindowCount, `${markFrom}-${markTo}`)
+          );
         } else {
           completedMissingBatches += 1;
-          batchProgress.update(
-            completedMissingBatches,
-            formatBatchProgressDetail(completedMissingBatches, batchProgressTotal, `${markFrom}-${markTo}`)
-          );
+          batchProgress.update(completedMissingBatches, formatDownloadWindowDetail(1, 1, `${markFrom}-${markTo}`));
         }
       };
       const consumeExistingMissingBatch = (missingBatch, sortOptions = {}, sourcePhase = "resume-raw-before-request") => {
@@ -3412,17 +3418,24 @@ async function exportFromWos(args, paths) {
         updateMissingProgress({ saved: true }, missingBatch.markFrom, missingBatch.markTo);
         return true;
       };
+      let downloadWindowIndex = 0;
       for (const window of windowPlans) {
         const windowLabel = txtExportProgressLabel(window.sortBy);
         if (useWindowProgress && window.plan.missingBatches.length) {
+          downloadWindowIndex += 1;
+          currentDownloadWindow = downloadWindowIndex;
           currentWindowStartIndex = window.startIndex || 1;
           const firstMissing = window.plan.missingBatches[0];
           const resumeOrdinal = firstMissing
             ? batchOrdinalInRange(firstMissing.markFrom - 1, currentWindowStartIndex, batchSize)
             : 0;
-          batchProgressTotal = window.plan.plannedBatchCount;
-          batchProgress = createProgress(windowLabel, batchProgressTotal, { quiet });
-          if (resumeOrdinal) batchProgress.update(resumeOrdinal, formatBatchProgressDetail(resumeOrdinal, batchProgressTotal, "resume"));
+          batchProgress = createProgress(windowLabel, window.plan.plannedBatchCount, { quiet });
+          if (resumeOrdinal) {
+            batchProgress.update(
+              resumeOrdinal,
+              formatDownloadWindowDetail(currentDownloadWindow, downloadWindowCount, "resume")
+            );
+          }
         }
         for (const missingBatch of window.plan.missingBatches) {
           if (consumeExistingMissingBatch(missingBatch, window.sortOptions)) continue;
@@ -3619,10 +3632,9 @@ async function exportBibFromWos(args, paths) {
       batchSize,
     });
     if (remainingCount) {
-      const progressTotal = totalBatches || resumePlan.missingBatches.length || 1;
       progress = createProgress(
         "Downloading WOS BibTeX",
-        progressTotal
+        totalBatches || resumePlan.missingBatches.length || 1
       );
       const persistBibBatch = (batch) => {
         const entryCount = parseBibEntryCount(batch.text);
@@ -3650,10 +3662,7 @@ async function exportBibFromWos(args, paths) {
           entries: entryCount,
           bibPath,
         });
-        progress.update(
-          completedBatches,
-          formatBatchProgressDetail(completedBatches, progressTotal, `${batch.markFrom}-${markTo}: ${entryCount} entries`)
-        );
+        progress.update(completedBatches, `${batch.markFrom}-${markTo}: ${entryCount} entries`);
         if (!isInteractive()) console.error(`bib export ${batch.markFrom}-${markTo}: ${entryCount} entries -> ${bibPath}`);
         return true;
       };
@@ -3674,10 +3683,7 @@ async function exportBibFromWos(args, paths) {
           markTo: missingBatch.markTo,
           bibPath: targetPath,
         });
-        progress.update(
-          completedBatches,
-          formatBatchProgressDetail(completedBatches, progressTotal, `${missingBatch.markFrom}-${missingBatch.markTo}`)
-        );
+        progress.update(completedBatches, `${missingBatch.markFrom}-${missingBatch.markTo}`);
         return true;
       };
       for (const missingBatch of resumePlan.missingBatches) {
@@ -3692,11 +3698,7 @@ async function exportBibFromWos(args, paths) {
           onProgress(event) {
             appendProgress(paths, { phase: "wosjs-bib-progress", ...event });
             if (event.phase === "batch") {
-              const currentBatch = completedBatches + (event.completedBatches || 0);
-              progress.update(
-                currentBatch,
-                formatBatchProgressDetail(currentBatch, progressTotal, `${event.current}-${event.batchEnd}`)
-              );
+              progress.update(completedBatches + (event.completedBatches || 0), `${event.current}-${event.batchEnd}`);
             }
           },
         });
@@ -3775,7 +3777,7 @@ function plannedTxtRangeFromMeta(meta = {}) {
   return { rangeStart, rangeEnd };
 }
 
-function rawUuidDownloadState(paths, uuid, meta = {}) {
+function rawUuidDownloadState(paths, uuid, meta = {}, options = {}) {
   if (Array.isArray(meta.exportWindows) && meta.exportWindows.length) {
     const plans = meta.exportWindows.map((window) => {
       const sortOptions = isLargeExportSort(window.sortBy) ? { sortBy: window.sortBy } : {};
@@ -3795,10 +3797,22 @@ function rawUuidDownloadState(paths, uuid, meta = {}) {
       },
     };
   }
+  if (Number(meta.expectedCount) > MAX_WOS_EXPORT_RECORDS) {
+    const windows = planWosExportWindows(Number(meta.expectedCount), DEFAULT_BATCH_SIZE, { sortBy: options.sortBy || meta.sortBy || "relevance" });
+    return rawUuidDownloadState(paths, uuid, { ...meta, exportWindows: windows }, options);
+  }
   const { rangeStart, rangeEnd } = plannedTxtRangeFromMeta(meta);
   if (!uuid || !rangeEnd) return { complete: false, rangeStart, rangeEnd, plan: null };
   const plan = rawBatchPlanForRange(paths, uuid, rangeStart, rangeEnd, DEFAULT_BATCH_SIZE);
   return { complete: plan.complete, rangeStart, rangeEnd, plan };
+}
+
+function downloadWindowCountForState(state) {
+  if (!state || state.complete) return 0;
+  if (Array.isArray(state.plan?.exportWindows)) {
+    return state.plan.exportWindows.filter((window) => window.plan?.missingBatches?.length).length;
+  }
+  return state.plan?.missingBatches?.length ? 1 : 0;
 }
 
 async function runBatchUuidTxt(args) {
@@ -3833,25 +3847,28 @@ async function runBatchUuidTxt(args) {
   upsertTaskIndex(args, { status: "batch-running", lastError: "" });
   appendProgress(paths, { phase: "batch-uuid-discovered", searchRoot: args.searchRoot, csvFiles, totalUuids: uuids.length });
 
-  const progress = createProgress("Batch UUID TXT", uuids.length);
+  const prepareProgress = createProgress("Batch UUID TXT prepare", uuids.length);
   const results = [];
   let completed = 0;
   let skipped = 0;
   let resumed = 0;
+  const jobs = [];
+  let progress = null;
+  let totalDownloadBatches = 0;
 
   try {
     for (const [index, uuid] of uuids.entries()) {
       const step = `${index + 1}/${uuids.length}`;
-      progress.update(index, formatBatchProgressDetail(index + 1, uuids.length, `${step} checking ${shortUuid(uuid)}`));
+      prepareProgress.update(index, `checking ${shortUuid(uuid)}`);
       const marker = readRawUuidCompleteMarker(paths, uuid);
       let meta = marker || {};
-      let state = rawUuidDownloadState(paths, uuid, meta);
+      let state = rawUuidDownloadState(paths, uuid, meta, { sortBy: args.sortBy });
       appendProgress(paths, { phase: "batch-uuid-start", uuid, index: index + 1, total: uuids.length, marker: Boolean(marker) });
 
       if (marker && state.complete) {
         skipped += 1;
         completed += 1;
-        progress.update(index + 1, formatBatchProgressDetail(index + 1, uuids.length, `${step} skipped ${shortUuid(uuid)}`));
+        prepareProgress.update(index + 1, `skipped ${shortUuid(uuid)}`);
         appendProgress(paths, { phase: "batch-uuid-skip-complete", uuid, index: index + 1, total: uuids.length });
         results.push({ uuid, status: "skipped" });
         continue;
@@ -3873,7 +3890,7 @@ async function runBatchUuidTxt(args) {
           await confirmLargeWosExport(args, meta.expectedCount, windows, { skipInsteadOfThrow: true, quiet: true });
           skipped += 1;
           completed += 1;
-          progress.update(index + 1, formatBatchProgressDetail(index + 1, uuids.length, `${step} skipped-large ${shortUuid(uuid)}`));
+          prepareProgress.update(index + 1, `skipped-large ${shortUuid(uuid)}`);
           appendProgress(paths, {
             phase: "batch-uuid-skip-large-export",
             uuid,
@@ -3886,12 +3903,12 @@ async function runBatchUuidTxt(args) {
           results.push({ uuid, status: "skipped-large", expectedCount: meta.expectedCount });
           continue;
         }
-        state = rawUuidDownloadState(paths, uuid, meta);
+        state = rawUuidDownloadState(paths, uuid, meta, { sortBy: args.sortBy });
         if (state.complete) {
           writeRawUuidCompleteMarker(paths, { ...meta, uuid });
           skipped += 1;
           completed += 1;
-          progress.update(index + 1, formatBatchProgressDetail(index + 1, uuids.length, `${step} verified ${shortUuid(uuid)}`));
+          prepareProgress.update(index + 1, `verified ${shortUuid(uuid)}`);
           appendProgress(paths, { phase: "batch-uuid-verified-complete", uuid, index: index + 1, total: uuids.length });
           results.push({ uuid, status: "skipped" });
           continue;
@@ -3899,6 +3916,21 @@ async function runBatchUuidTxt(args) {
       }
 
       const hadRaw = rawBatchFiles(paths, uuid).length > 0;
+      const downloadWindowCount = downloadWindowCountForState(state);
+      jobs.push({ uuid, meta, hadRaw, downloadWindowCount, index });
+      prepareProgress.update(index + 1, `${downloadWindowCount} batch ${shortUuid(uuid)}`);
+    }
+    prepareProgress.stop("Batch UUID TXT prepare complete");
+
+    totalDownloadBatches = jobs.reduce((total, job) => total + job.downloadWindowCount, 0);
+    appendProgress(paths, { phase: "batch-uuid-download-plan", totalDownloadBatches, jobs: jobs.length });
+    if (totalDownloadBatches) progress = createProgress("Batch UUID TXT", totalDownloadBatches);
+    let completedDownloadBatches = 0;
+    let completedDownloadUuids = 0;
+    const totalDownloadUuids = jobs.length;
+
+    for (const job of jobs) {
+      const { uuid, meta, hadRaw, downloadWindowCount, index } = job;
       const runArgs = {
         ...args,
         command: "run",
@@ -3908,12 +3940,14 @@ async function runBatchUuidTxt(args) {
         outDir: args.outDir,
         quiet: true,
       };
-      progress.update(index, formatBatchProgressDetail(index + 1, uuids.length, `${step} downloading ${shortUuid(uuid)} (${meta.expectedCount || "?"})`));
+      progress?.update(completedDownloadBatches, formatUuidRemainingDetail(completedDownloadUuids, totalDownloadUuids));
       const summary = await run(runArgs);
       writeRawUuidCompleteMarker(paths, summary);
       completed += 1;
       if (hadRaw) resumed += 1;
-      progress.update(index + 1, formatBatchProgressDetail(index + 1, uuids.length, `${step} done ${shortUuid(uuid)}`));
+      completedDownloadBatches += downloadWindowCount;
+      completedDownloadUuids += 1;
+      progress?.update(completedDownloadBatches, formatUuidRemainingDetail(completedDownloadUuids, totalDownloadUuids));
       appendProgress(paths, {
         phase: "batch-uuid-complete",
         uuid,
@@ -3924,14 +3958,15 @@ async function runBatchUuidTxt(args) {
       });
       results.push({ uuid, status: hadRaw ? "resumed" : "downloaded" });
     }
+    progress?.stop("Batch UUID TXT complete");
   } catch (error) {
-    progress.stop("Batch UUID TXT stopped");
+    prepareProgress.stop("Batch UUID TXT prepare stopped");
+    progress?.stop("Batch UUID TXT stopped");
     appendProgress(paths, { phase: "batch-uuid-failed", message: error?.message || String(error), completed, skipped, resumed });
     upsertTaskIndex(args, { status: "batch-failed", lastError: error?.message || String(error) });
     throw error;
   }
 
-  progress.stop("Batch UUID TXT complete");
   const summary = {
     ok: true,
     method: "batch-uuid-csv-txt",
@@ -3940,6 +3975,7 @@ async function runBatchUuidTxt(args) {
     searchRoot: args.searchRoot,
     csvFiles,
     totalUuids: uuids.length,
+    totalDownloadBatches,
     completed,
     skipped,
     resumed,
@@ -4996,7 +5032,9 @@ module.exports = {
   downloadBatchCount,
   planWosExportWindows,
   usesLargeExportWindows,
-  formatBatchProgressDetail,
+  formatDownloadWindowDetail,
+  formatUuidRemainingDetail,
+  downloadWindowCountForState,
   MAX_WOS_EXPORT_BATCHES,
   MAX_WOS_EXPORT_RECORDS,
   MAX_WOS_DUAL_SORT_RECORDS,

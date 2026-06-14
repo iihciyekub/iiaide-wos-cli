@@ -3,6 +3,15 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.95 - 2026-06-15
+
+- Make batch UUID TXT progress count actual UUID download windows, so a normal
+  UUID counts as one batch and a large A-Z/Z-A UUID can count as two.
+- Show only UUID completion/remaining counts in batch UUID TXT progress details,
+  keeping repeated status text and UUID labels out of the download line.
+- Show per-UUID TXT large-export windows as `download` progress instead of
+  calling A-Z/Z-A internal WOS file chunks batches.
+
 ## 0.4.94 - 2026-06-15
 
 - Show current batch ordinal, total batch count, and remaining batch count in
