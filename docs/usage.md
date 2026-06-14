@@ -149,7 +149,7 @@ for `uuid.csv` files, reads the whole CSV text, extracts UUID-shaped values by
 regex, and de-duplicates them before downloading. Each UUID writes raw TXT
 batches under `raw/<uuid>/full-record/` and a `<uuid>_complete.json` marker
 when that UUID's planned 500-record batch coverage is complete. UUIDs over
-200,000 records are skipped unless large export mode is allowed. Large UUID
+100,000 records are skipped unless large export mode is allowed. Large UUID
 exports keep A-Z and Z-A windows under
 `raw/<uuid>/full-record/author-ascending/` and
 `raw/<uuid>/full-record/author-descending/`; each sort directory has an
@@ -157,6 +157,7 @@ exports keep A-Z and Z-A windows under
 a fast hint, but still validate the raw batch checklist for the recorded window
 plan before skipping a UUID; if files are missing, the UUID is resumed instead
 of being skipped.
+The two-sort large export can cover at most 200,000 records for a UUID.
 
 CLI form:
 

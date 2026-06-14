@@ -25,7 +25,7 @@ const { DEFAULT_MUST_LOGIN_URL, loginAndExtractMustSid } = require("./lib/wos-mu
 const { version: VERSION } = require("../package.json");
 
 const DEFAULT_BATCH_SIZE = 500;
-const MAX_WOS_EXPORT_BATCHES = 400;
+const MAX_WOS_EXPORT_BATCHES = 200;
 const MAX_WOS_EXPORT_RECORDS = MAX_WOS_EXPORT_BATCHES * DEFAULT_BATCH_SIZE;
 const MAX_WOS_DUAL_SORT_RECORDS = MAX_WOS_EXPORT_RECORDS * 2;
 const WOS_LARGE_EXPORT_SORTS = ["author-ascending", "author-descending"];
@@ -174,7 +174,7 @@ Output management:
 Export options:
   --sort-by <sort>        Summary sort key. Default: relevance
   --batch-size <n>        WOS export API batch size. Default: 500, max: 500
-  --allow-large-export    For UUID result sets over 200,000 records, use author ascending/descending windows up to 400,000 records
+  --allow-large-export    For UUID result sets over 100,000 records, use author ascending/descending windows up to 200,000 records
   --timeout-ms <n>        Navigation/API timeout. Default: 120000
   --wos-domain <domain>   WOS domain. Default: www.webofscience.com
   --wosjs <file>          Browser-side wos.js injection file. Default: ./import/wos.js
@@ -2179,15 +2179,15 @@ async function confirmLargeWosExport(args, totalRecords, windows, options = {}) 
       console.error(`Skipping large UUID: ${totalRecords} records exceeds ${MAX_WOS_EXPORT_RECORDS}; re-run with --allow-large-export.`);
     } else {
       console.error(message);
-      console.error("Skipping this UUID. Re-run with --allow-large-export to download up to the 400,000-record maximum.");
+    console.error(`Skipping this UUID. Re-run with --allow-large-export to download up to the ${MAX_WOS_DUAL_SORT_RECORDS}-record maximum.`);
     }
     return false;
   }
   if (!process.stdin.isTTY || !isInteractive(process.stdout)) {
-    throw new CliMessageError(`${message}\nRe-run with --allow-large-export to download up to the 400,000-record maximum, or reduce the query/range.`);
+    throw new CliMessageError(`${message}\nRe-run with --allow-large-export to download up to the ${MAX_WOS_DUAL_SORT_RECORDS}-record maximum, or reduce the query/range.`);
   }
   console.error(message);
-  const answer = String(await (options.prompt || promptConfirmationText)("Type max to continue up to 400,000 records, or skip to cancel")).trim().toLowerCase();
+  const answer = String(await (options.prompt || promptConfirmationText)(`Type max to continue up to ${MAX_WOS_DUAL_SORT_RECORDS} records, or skip to cancel`)).trim().toLowerCase();
   if (["max", "yes", "y"].includes(answer)) {
     args.allowLargeExport = true;
     return true;

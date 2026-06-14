@@ -2022,33 +2022,33 @@ test("raw batch plan identifies arbitrary missing TXT ranges", () => {
 
 test("plans WOS large UUID exports with author sort windows", () => {
   assert.deepEqual(
-    cli.planWosExportWindows(199999, 500, { sortBy: "relevance" }).map((window) => ({
+    cli.planWosExportWindows(99999, 500, { sortBy: "relevance" }).map((window) => ({
       sortBy: window.sortBy,
       startIndex: window.startIndex,
       endIndex: window.endIndex,
       batchCount: window.batchCount,
     })),
-    [{ sortBy: "relevance", startIndex: 1, endIndex: 199999, batchCount: 400 }]
+    [{ sortBy: "relevance", startIndex: 1, endIndex: 99999, batchCount: 200 }]
   );
-  assert.equal(cli.planWosExportWindows(200000, 500).length, 1);
+  assert.equal(cli.planWosExportWindows(100000, 500).length, 1);
 
-  const justOver = cli.planWosExportWindows(200001, 500);
+  const justOver = cli.planWosExportWindows(100001, 500);
   assert.deepEqual(justOver.map((window) => [window.sortBy, window.endIndex, window.batchCount]), [
-    ["author-ascending", 200000, 400],
+    ["author-ascending", 100000, 200],
     ["author-descending", 1000, 2],
   ]);
 
-  const windows = cli.planWosExportWindows(350000, 500);
+  const windows = cli.planWosExportWindows(175000, 500);
   assert.deepEqual(windows.map((window) => [window.sortBy, window.endIndex, window.batchCount]), [
-    ["author-ascending", 200000, 400],
-    ["author-descending", 150500, 301],
+    ["author-ascending", 100000, 200],
+    ["author-descending", 75500, 151],
   ]);
   assert.equal(cli.usesLargeExportWindows(windows), true);
 
-  const capped = cli.planWosExportWindows(400001, 500);
+  const capped = cli.planWosExportWindows(200001, 500);
   assert.deepEqual(capped.map((window) => [window.sortBy, window.endIndex, window.batchCount]), [
-    ["author-ascending", 200000, 400],
-    ["author-descending", 200000, 400],
+    ["author-ascending", 100000, 200],
+    ["author-descending", 100000, 200],
   ]);
   assert.equal(capped[0].incompleteBeyondWosLimit, true);
 });
@@ -2085,16 +2085,16 @@ test("large TXT completion markers preserve sort windows and write per-directory
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
   const uuid = "query";
-  const windows = cli.planWosExportWindows(350000, 500);
+  const windows = cli.planWosExportWindows(175000, 500);
   for (const window of windows) {
     const rawDir = cli.rawBatchDir(paths, uuid, { sortBy: window.sortBy });
     fs.mkdirSync(rawDir, { recursive: true });
-    fs.writeFileSync(path.join(rawDir, `query_1_${window.sortBy === "author-ascending" ? 200000 : 150500}.txt`), "UT WOS:A\n");
+    fs.writeFileSync(path.join(rawDir, `query_1_${window.sortBy === "author-ascending" ? 100000 : 75500}.txt`), "UT WOS:A\n");
   }
 
   cli.writeRawUuidCompleteMarker(paths, {
     uuid,
-    expectedCount: 350000,
+    expectedCount: 175000,
     rangeStart: 1,
     rangeEnd: 350000,
     largeExport: true,
