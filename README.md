@@ -1,7 +1,7 @@
 # iiaide-wos CLI
 
 iiaide-wos CLI is a task-oriented command-line tool for interacting with the
-Web of Science website and turning WOS records into reusable data packages.
+Web of Science website and turning WOS exports into reusable data packages.
 
 The npm package name is `iiaide-wos-cli` and its primary command is
 `iiaide-wos`. Installed releases also expose `iiw` as a short alias for the
@@ -15,10 +15,7 @@ It currently supports three input workflows:
    the IDs into a managed task.
 3. Provide a WOS summary URL or result-set UUID and download BibTeX batches.
 
-After a workflow creates a task, the CLI can open each WOS full-record page
-through the injected browser-side `wos.js` helper and write the structured page
-record into the global SQLite database by WOSID. The complete task directory can
-then be archived, shared, or used by downstream tools.
+The complete task directory can then be archived, shared, or used by downstream tools.
 
 ## What The Project Produces
 
@@ -27,30 +24,15 @@ Every workflow is managed as a task under `tasks/<task-id>/`.
 ```text
 tasks/<task-id>/
   raw/<uuid>/full-record/   # <uuid>_<start>_<end>.txt raw WOS export batches
-    <uuid>_wosid.csv        # normalized one-column WOS ID index for this UUID
   raw/<uuid>/bib/           # <uuid>_<start>_<end>.bib BibTeX export batches
-  export/<uuid>/bib/
-    <uuid>.bib              # combined BibTeX file
   logs/progress.jsonl
   manifest.json
   summary.json
 ```
 
-The task directory is the deliverable data package. It keeps raw inputs, normalized WOSID indexes, progress, failures, and metadata together. Parsed WOS data is stored in the global SQLite database. If a repeat run finds raw batches but the WOSID index is missing, the CLI rebuilds the missing index locally before attempting another WOS download.
+The task directory is the deliverable data package. It keeps raw inputs, progress, failures, and metadata together. For TXT and BibTeX downloads, the task is complete once the planned raw batch files are present for the selected WOS range.
 
-The CLI also keeps user-level global SQLite files outside task directories:
-
-```text
-~/.iiaide-wos/wosdata.sqlite          # parsed WOS page records
-~/.iiaide-wos/wos-blacklist.sqlite    # WOSIDs skipped after parse FAIL
-```
-
-The WOS data database is built from parsed WOS page data only; raw full-record
-`.txt` batches and BibTeX `.bib` files are not imported into SQLite. The parse
-blacklist is stored separately so it can be inspected, cleared, or replaced
-without touching saved WOS records.
-
-Artifact-producing commands print only the final artifact path on success: `run` and `import` print the WOSID CSV, `bib` prints the combined `.bib`, and `parse`, `parse-pipeline`, or `wosdata` print the SQLite database path.
+Artifact-producing commands print only the final artifact path on success: `run` prints the raw TXT batch directory, `bib` prints the raw BibTeX batch directory, and `import` prints the managed WOSID CSV path.
 
 ## Install
 
@@ -211,6 +193,18 @@ SID_THREE"
 
 `--add-sid` remains available as a single-value compatibility alias.
 
+Clear every saved SID from the global pool:
+
+```bash
+iiaide-wos settings --clear-sids
+```
+
+Clear only saved dead-SID history while keeping the live SID pool:
+
+```bash
+iiaide-wos settings --clear-dead-sids
+```
+
 If you use a MUST institutional account, `auth login` can produce one fresh SID
 and write it to the same global pool:
 
@@ -218,15 +212,15 @@ and write it to the same global pool:
 iiaide-wos auth login --provider must
 ```
 
-For long parses, run a separate monitor process that refills the pool when it
-gets low:
+For long-running download work, run a separate monitor process that refills the
+pool when it gets low:
 
 ```bash
 iiaide-wos auth monitor --provider must --min-sids 2 --interval-ms 3000
 ```
 
 The auth commands use a short-lived Playwright browser that is separate from the
-workspace WOS browser profile used for export and parse work. Repeated
+workspace WOS browser profile used for export and validation work. Repeated
 `--account` and `--password` pairs rotate across multiple MUST accounts. Prefer
 interactive password input or `WOS_ACCOUNT` / `WOS_PASSWORD` over `--password`
 because command-line arguments can be visible in shell history and process
@@ -251,11 +245,6 @@ session stays open while the menu process is alive. Normal WOS work runs in
 background headless Playwright mode. Use `iiaide-wos settings
 --playwright-visible on` or menu item `5.1 Playwright visible` to save visible
 browser mode in `tasks/config.json`; use `off` to return to background mode.
-Use `iiaide-wos settings --parse-concurrency 3` or menu item `5.2 Parse tabs`
-to save the default reusable WOS tab count for parse workflows.
-When menu item `2 WOS IDs to SQL` has to wait for the SID pool and the current
-task already has WOS IDs, the menu resumes `parse --task` automatically after a
-SID is saved instead of asking again for a CSV, WOS URL, or UUID.
 The `--headed` and `--headless` flags remain one-command overrides. If a saved
 SID is clearly invalid, the CLI removes that SID from the pool and tries the
 next saved SID. It opens a visible WOS browser window for login only after the
@@ -270,8 +259,10 @@ or `WOSJS_PATH` when that helper lives elsewhere.
 When the interactive CLI starts, it runs a lightweight SID probe with a
 short HTTP timeout. The dashboard shows `Auth yes` only when that probe
 confirms the SID. If the saved SID is missing, invalid, or still not
-confirmed, the panel shows `Auth no` but still opens the workflow menu. SID
-setup is requested only when you choose a WOS download or parse workflow that
+confirmed, the panel shows `Auth no` but still opens the workflow menu. The
+lightweight probe treats both an off-domain redirect and the WOS shell state
+`window.sessionData = undefined` as fast invalid-SID signals. SID setup is
+requested only when you choose a WOS download workflow that
 needs WOS network access. The left dashboard logo is highlighted in
 color-capable terminals, and the WOS origin URL appears under the left-side
 `iiaide-wos CLI` title. Export commands still run the stricter persistent
@@ -280,23 +271,30 @@ Playwright validation before downloading. In menu mode, SID setup offers
 browser detection add the SID to the saved pool; SID pool waiting keeps checking
 until another process, such as `auth monitor`, adds one. The CLI then redraws
 the workspace dashboard so the refreshed authentication state is visible before
-the next workflow prompt. The Settings menu provides `5.3 Add SIDs` for one or
-more pasted values. The separate `6 Auth producer` group provides `6.1 MUST
-login` for one fresh MUST-produced SID and `6.2 MUST monitor` to keep the current
-CLI process refilling the pool. Settings, SQLite, task management, auth
-producer, and update workflows can be used while `Auth no` is shown. The
+the next workflow prompt. Download workflows prompt for the WOS URL/UUID first
+and only then ask for SID setup when authentication is missing. The Settings
+menu provides `5.2 Add SIDs` for one or more pasted values and `5.3 Clear all
+SIDs` to empty the global SID pool. `5.4 Clear dead SIDs` removes only the
+saved invalid-SID history. When the interactive CLI keeps one WOS browser
+session alive and you switch to downloading a different UUID, it automatically
+rotates to the next saved SID when more than one saved SID is available. The separate `6 Auth producer` group
+provides `6.1 MUST login` for one fresh MUST-produced SID and `6.2 MUST
+monitor` to keep the current CLI process refilling the pool. Settings, task
+management, auth producer, and update workflows can be used while `Auth no` is
+shown. The
 dashboard shows a masked current SID, the active pool position/count, and `SID
 Producer` when an auth monitor heartbeat is available.
 `iiaide-wos check` first runs the lightweight SID probe; when the SID is
 missing, invalid, or cannot be confirmed, it tries the saved SID pool and, in an
-interactive terminal, uses the same SID setup choices. It prints only a short
-safe status message.
+interactive terminal, uses the same SID setup choices. It logs which masked SID
+value is currently being validated and still prints only a short safe status
+message.
 
 For scripts and CI, prompts are disabled. Supply authentication explicitly:
 
 ```bash
 iiaide-wos run --sid "YOUR_SID" --uuid "<uuid>"
-WOS_SID="YOUR_SID" iiaide-wos parse --task "demo-search"
+WOS_SID="YOUR_SID" iiaide-wos bib --uuid "<uuid>" --task "demo-bib"
 ```
 
 SID sources are checked in this order: explicit `--sid`, `WOS_SID`
@@ -314,15 +312,15 @@ iiaide-wos run \
   --task-label "Demo WOS search"
 ```
 
-The CLI downloads field-tagged full records and generates
-`tasks/demo-search/raw/<uuid>/full-record/<uuid>_wosid.csv`. Use
-`--from-index` and `--limit` to export a slice of WOS records. Re-running the
+The CLI downloads field-tagged full records into
+`tasks/demo-search/raw/<uuid>/full-record/`. Use `--from-index` and `--limit`
+to export a slice of WOS records. Re-running the
 same task first reads the WOS record count, converts the selected range into
-200-record TXT batch files, then skips any batch file already present on disk
+500-record TXT batch files, then skips any batch file already present on disk
 and downloads only the missing files. During long exports, each completed batch
 is written to disk immediately, so an interrupted browser session still leaves
-resumable raw TXT batches behind. The final `_wosid.csv` is written only after
-the selected TXT batch plan is complete. If WOS rejects a TXT export request for
+resumable raw TXT batches behind. The task is complete once the selected TXT
+batch plan is complete. If WOS rejects a TXT export request for
 a missing batch, the CLI treats the active SID as expired, removes it from the
 saved pool, reopens WOS with the next saved SID, and requests that same missing
 batch again.
@@ -347,9 +345,23 @@ BibTeX downloads call the injected browser-side
 `window.wos.export.fetchBibBatches` API with the resolved UUID, not the webpage
 export overlay. The CLI still initializes WOS with the SID, opens the summary
 URL first, and uses the final page-exposed query UUID when WOS provides one.
-The wos.js helper owns WOS request details; the CLI writes task files, combines
-the final `.bib`, and displays progress. Incomplete BibTeX batches are not
-marked completed. Use `--from-index` and `--limit` for an explicit range.
+The wos.js helper owns WOS request details; the CLI writes task files and
+displays progress. Re-running the same BibTeX task reads the selected WOS
+record range, skips any existing 500-record raw `.bib` batch, and downloads
+only missing ranges. The task is complete once the selected raw BibTeX batch
+plan is complete. Incomplete BibTeX batch coverage is not marked completed. Use
+`--from-index` and `--limit` for an explicit range.
+
+You can also start the batch UUID TXT workflow directly:
+
+```bash
+iiaide-wos batch-run --task "batch-demo" --search-root "."
+```
+
+`batch-run` recursively searches `--search-root` (default: the current working
+directory) for files named `uuid.csv`, extracts UUID-shaped values from their
+contents, de-duplicates them, and downloads each UUID through the same
+500-record resumable TXT checklist flow used by `run`.
 
 ### 2D. Create A Task From An Existing WOS ID CSV
 
@@ -371,184 +383,25 @@ iiaide-wos import \
   --task-label "Imported WOS IDs"
 ```
 
-### 3. Parse WOS Data To SQLite
+CSV import is local-only: it normalizes an existing WOSID list into the task
+artifact layout and does not create a WOS result-set UUID, raw TXT batches, or
+BibTeX batches. To download raw WOS TXT or BibTeX from a CSV list, the CLI needs
+a separate WOS query-building workflow that submits the IDs as a `UT=(...)`
+search, reads the resulting UUID and record count, then follows the same
+500-record checklist download path used by URL/UUID tasks.
 
-Starting from a URL or UUID, run the WOSID index step and then parse every missing WOSID page into SQLite:
+### 3. Use WOSID CSVs Downstream
 
-```bash
-iiaide-wos parse-pipeline --uuid "<uuid>" --task "demo-search"
-```
-
-If the task already has a WOSID CSV, run only the parse stage:
-
-```bash
-iiaide-wos parse --task "demo-search"
-```
-
-Or parse directly from a local WOSID CSV:
-
-```bash
-iiaide-wos parse --csv "./input/wosids.csv" --task "demo-csv"
-```
-
-This first normalizes the CSV into
-`raw/<task-id>/full-record/<task-id>_wosid.csv`, then parses that WOSID list into
-the global SQLite database.
-
-The parse stage opens each full-record page through the injected browser-side `wos.js` helper:
-
-```js
-await window.wos.record.viewFullRecordByWosId(targetWosId)
-const parsed = await window.wos.record.parseCurrentFullRecordPage()
-```
-
-The CLI calls those methods from Playwright `page.evaluate()`. It does not open
-WOSID full-record pages by clicking summary-page links or by calling
-`page.goto()` for each record; `wos.js` owns the browser-side route change and
-page-readiness check.
-
-During parse, each Playwright worker reuses one WOS tab across records and lets
-`wos.js` move between full-record pages through WOS front-end routing. With
-`--concurrency 3`, for example, the CLI keeps up to three reusable WOS tabs
-instead of opening and closing a new tab for every WOSID.
-Save that default with `iiaide-wos settings --parse-concurrency 3` or
-interactive menu item `5.2 Parse tabs`; explicit `--concurrency <n>` still wins
-for one command.
-
-The browser-side `wos.js` opener treats WOSIDs as externally prepared accession
-strings. It trims whitespace and can extract the accession segment from a
-`/full-record/<id>` URL, but it preserves prefixes such as `PUB:`, `WOS:`, or
-`MEDLINE:` without uppercasing or stripping punctuation. CLI CSV/TXT import and
-SQLite validation remain responsible for canonicalization and loose ID
-comparison.
-
-When the first WOS page shows the Clarivate privacy or cookie banner, the CLI's
-persistent Playwright profile now auto-clicks the common OneTrust `Accept all`
-or close buttons, and it also recognizes the `Privacy` / `ot-sdk-container`
-dialog shell before choosing which button to press. That makes login, summary
-export, and parse warm-up pages less likely to stall behind either the
-full-banner or close-only cookie variant.
-
-When a saved SID is missing or fails browser validation in an interactive
-terminal, the CLI now offers a SID choice first: paste a SID manually, wait for
-the saved SID pool, or open a WOS browser login for auto-detection. It no longer
-forces the visible browser login path before giving you the pool/manual options.
-
-WOSID parsing preserves the accession prefix found in the TXT or CSV input. The
-CLI no longer forces parsed IDs into a `WOS:<id>` shape; it validates the
-expected TXT/CSV ID against the parsed page ID by comparing both values with
-non-alphanumeric characters removed.
-
-Parse failures do not directly invalidate the current SID. If the CLI sees 20
-consecutive WOSID page parse failures, it closes the entire current Playwright
-context, reconnects with the current SID, and runs
-`window.wos.query.buildQuery("AB=<random 4 letters>")` through `wos.js`. If WOS
-returns an explicit SID/session `error_code` such as a query-limit,
-expired-session, login, or invalid-SID message, the CLI force-closes Playwright
-and treats the current SID as invalid. The current SID is removed from the saved
-pool even if it was detected from the persistent browser profile, and that SID is
-not accepted again during recovery. If no saved SID remains, the current CLI
-checks the global SID pool every 10 seconds and resumes parsing automatically as
-soon as a new saved SID is added and can reopen WOS. If the newly added SID
-cannot reopen WOS, the CLI removes it and keeps waiting for another saved SID
-instead of returning to the interactive menu. If another saved SID is already
-available, or if the current process inherited `WOS_SID`, the CLI still removes
-that environment value before restarting the child CLI process.
-Inconclusive browser-side query results such as `unknown error` force-close
-Playwright and reconnect with the current SID without deleting it. If
-`buildQuery` does not return `error_code`, the consecutive parse-failure counter
-resets and the parse continues without changing SID.
-
-The authentication success line includes a masked active SID and pool position, and
-parse recovery messages are printed as short multi-line notices so the running
-SID, recovery reason, and next action are easier to read.
-
-Individual content-level WOSID page failures are recorded once with the real
-extraction or SQLite import error. They are not requeued for retry. Recognized
-session-level failures are reported as deferred, trigger SID recovery, and are
-not written to the blacklist.
-
-When a WOSID parse attempt is finally reported as `parse FAIL`, the CLI stores
-that WOSID in the separate global SQLite parse blacklist database and skips it
-by default on future parse runs. These blacklisted failures still contribute to
-the SID recovery diagnostic counter. Use
-`iiaide-wos wosdata --blacklist` to inspect the list, `iiaide-wos wosdata
---unblacklist <WOSID>` to remove one entry, or `iiaide-wos wosdata
---clear-blacklist` to remove all entries. Add `--retry-blacklist` to a parse
-command when you want to deliberately try those WOSIDs again. A successful retry
-removes the WOSID from the blacklist.
-
-If WOS opens a full-record page but the DOM structure cannot be parsed, the CLI
-falls back to the browser-side single-record export API before marking the WOSID
-as failed.
-
-For long parse runs, the CLI now restarts Playwright every 600 parsed WOSIDs by
-default, and it also checks RSS memory every 200 WOSIDs so a hot
-Chromium renderer can be recycled before memory growth gets out of hand. Use
-`--browser-restart-every 0` if you deliberately want one long-lived browser
-session, or tune `--max-rss-mb <n>` when you want a stricter or looser memory
-cap.
-When parse recovery, a manual browser-login SID refresh, or an explicit browser
-restart closes Playwright, the CLI now first releases each reusable WOS page to
-`about:blank` and then tears down the persistent context so Chromium renderer
-memory is less likely to accumulate across long runs.
-
-Before parsing, the CLI checks the global SQLite database and skips WOSIDs that
-are already present. The work summary prints aligned multi-line fields for
-`dbRecords`, `dbBlacklist`, `db`, and `blacklistDb` before browser work starts,
-with highlighted left-hand labels in color terminals, so a wrong database
-selection or failed blacklist write is visible before page visits begin. New
-full-record page data is validated and
-written directly to `~/.iiaide-wos/wosdata.sqlite`; no local WOSID JSON files are
-written. To merge records collected in another WOS SQLite database, run:
-
-```bash
-iiaide-wos wosdata --merge-db "./shared/other-wosdata.sqlite"
-```
-
-Use `--db ./shared/wosdata.sqlite` to choose the target database file. Use `--blacklist-db ./shared/wos-blacklist.sqlite` to choose the parse blacklist database. Database merge reads only SQLite WOS record rows; it does not require raw `.txt` or `.bib` files and does not store WOS usernames, passwords, or SID values. Existing database records are skipped by default; add `--force` to `wosdata --merge-db` to overwrite them after validation. For quick inspection, query one WOSID:
-
-```bash
-iiaide-wos wosdata --wosid "WOS:000000000000001"
-```
-
-List WOSIDs that parse will skip by default because a prior full-record page
-could not yield a usable record:
-
-```bash
-iiaide-wos wosdata --blacklist
-iiaide-wos wosdata --unblacklist "WOS:000000000000001"
-iiaide-wos wosdata --clear-blacklist
-```
-
-Blacklist list/remove/clear results include database stats such as
-`stats.recordCount` and `stats.blacklistCount`, so clearing the blacklist should
-immediately change `stats.blacklistCount` to `0`.
-
-Advanced users can still run read-only `SELECT` statements with `wosdata --query`.
-
-The interactive dashboard shows the active database path, WOSID count,
-blacklist database path, blacklist count, and database size at startup.
+The CLI no longer parses full-record TXT or WOSID page data into SQLite. `run` and `bib` now stop at complete raw batch exports; `import` remains available when you want to manage an existing WOSID CSV as a task artifact.
 
 Useful options:
 
 ```text
---limit 20              Process only the first 20 selected WOS IDs
---from-index 101        Start from the 101st WOS ID
+--limit 20              Process only the first 20 selected WOS records
+--from-index 101        Start from the 101st WOS record
 --force                 Replace managed task outputs when needed
---reparse-existing      Refetch and overwrite records that already exist in SQLite
---blacklist-db <file>   Use a custom SQLite parse blacklist database
---record-timeout-ms 30000
---cooldown-ms 500       Delay between records
---concurrency 3         Use up to 3 reusable WOS tabs for this parse run
---browser-restart-every 50
---max-rss-mb 1536       Restart between parse chunks once RSS reaches 1536 MB
---retry-blacklist       Retry WOSIDs previously skipped after parse failures
+--reuse-raw             Validate existing raw TXT batches before contacting WOS
 ```
-
-In the interactive menu, use `2 WOS IDs to SQL`. Paste either a WOS summary
-URL/result-set UUID or a local `.csv` file path; the CLI chooses the matching
-parse pipeline automatically and runs with the saved default parse options.
 
 ## Task Management
 
@@ -563,9 +416,7 @@ iiaide-wos clear --task "demo-search"
 ```
 
 Use a stable `--task` name for work that may be resumed or shared. Use
-`--force` only when intentionally replacing CLI-managed task outputs; use
-`--reparse-existing` only when intentionally revisiting WOSIDs already saved in
-SQLite.
+`--force` only when intentionally replacing CLI-managed task outputs.
 Use `clear` only when intentionally removing a CLI-managed task directory and
 its workspace index entry; before deletion the CLI prints the resolved task id
 and requires you to type that exact task id as confirmation.
@@ -579,8 +430,7 @@ Interactive downloads reuse the current task by default. If the same UUID has
 complete raw TXT coverage for its verified WOS record range, iiaide-wos skips
 SID validation and WOS download, then prints the existing final artifact path. A
 different UUID can be appended to the same task; its raw batches are kept under
-separate `raw/<uuid>/` directories, while parsed page data is shared through the
-global SQLite database.
+separate `raw/<uuid>/` directories.
 After showing the available record count and planned batch count, interactive
 TXT and BibTeX downloads start directly.
 At the `WOS summary URL or UUID` prompt, pressing Enter uses the shown saved
@@ -598,20 +448,16 @@ The interactive workflow menu is grouped by command family:
 1 Download literature
   1.1 UUID - TXT format
   1.2 UUID - BIB format
-2 WOS IDs to SQL
-  2.1 Resume
+  1.3 Batch UUID CSV - TXT
 3 Task manager
   3.1 New
   3.2 Switch
   3.3 Clear
-4 SQL database
-  4.1 Status
-  4.2 Merge database
-  4.3 Query WOSID
 5 Settings
   5.1 Playwright visible
-  5.2 Parse tabs
-  5.3 Add SIDs
+  5.2 Add SIDs
+  5.3 Clear all SIDs
+  5.4 Clear dead SIDs
 6 Auth producer
   6.1 MUST login
   6.2 MUST monitor
@@ -624,18 +470,18 @@ q Exit
 Download workflows run directly in the current task marked with `*`. Use
 `c Check SID` when you want to validate the saved SID from the startup panel
 and enter SID setup choices if the saved SID pool has no usable value.
-Use `2 WOS IDs to SQL` to parse from either a local WOSID CSV or a WOS summary
-URL/UUID; `.csv` input runs the CSV path and URL/UUID input runs the WOS export
-path first. Use `2.1 Resume` to run the current task's existing WOSID list into
-SQLite immediately without entering the source again.
-Use `4.1 Status` to inspect the global SQLite database, `4.2 Merge database`
-to merge another WOS SQLite database, and `4.3 Query WOSID` to enter one WOSID
-and print its SQLite record. Merge asks whether existing SQL rows should be
-force overwritten; the default is no.
 Use `u Update` to install the latest release and restart the interactive CLI.
 Use
 `3.1 New` before downloading when you want a fresh task, `3.2 Switch` to select
 an existing task, and `3.3 Clear` to remove an existing managed task.
+
+`1.3 Batch UUID CSV - TXT` searches the current working directory recursively
+for files named `uuid.csv`, extracts UUID-shaped values from their contents, and
+downloads TXT batches for each UUID in sequence. Each UUID is treated as its own
+resumable subtask under the current task. Completed UUIDs write a small marker
+file beside their raw TXT batches, but the CLI still verifies the planned
+500-record batch coverage before skipping them, so stale markers do not cause an
+incomplete UUID to be skipped.
 
 ## Documentation
 
@@ -647,13 +493,9 @@ an existing task, and `3.3 Clear` to remove an existing managed task.
 
 ## Current Scope
 
-- WOS export and parse workflows interact with WOS using a valid user session
-  SID. The optional `auth` commands can log into MUST SSO to produce fresh SIDs,
-  but task artifacts and `wosdata.sqlite` do not store account usernames,
-  passwords, or SID values.
+- WOS export workflows interact with WOS using a valid user session SID. The optional `auth` commands can log into MUST SSO to produce fresh SIDs, but task artifacts do not store account usernames, passwords, or SID values.
 - URL/UUID exports use the WOS web export endpoint instead of scrolling the
   virtualized result list.
 - Imported CSV tasks do not contain raw WOS full-record export files until
   another command explicitly adds them.
-- WOS page structure and export behavior may change, so task logs, SQLite raw
-  record payloads, and validation results are retained for troubleshooting.
+- WOS page structure and export behavior may change, so task logs and raw export batches are retained for troubleshooting.

@@ -3,9 +3,9 @@
 ## Goal
 
 Integrate the existing MUST SSO SID producer into `iiaide-wos` without changing
-the WOS download and parse contract. WOS workflows continue to consume only the
-global saved SID pool. MUST account login is a separate producer that writes
-fresh SIDs into that pool.
+the WOS download contract. WOS workflows continue to consume only the global
+saved SID pool. MUST account login is a separate producer that writes fresh
+SIDs into that pool.
 
 ## Commands
 
@@ -34,12 +34,12 @@ normal credential input rules and do not save passwords.
 ## Boundaries
 
 - The producer uses its own short-lived Playwright browser context.
-- WOS export, parse, validation, and browser-profile work keep using
+- WOS export, validation, and browser-profile work keep using
   `<tasksRoot>/.browser-profile`.
 - The global SID pool remains the handoff boundary between producers and WOS
   consumers.
-- The producer must not store account usernames or passwords in task artifacts,
-  SQLite, or the SID config.
+- The producer must not store account usernames or passwords in task artifacts
+  or the SID config.
 - Routine output masks SID values. Full SID values are saved to config, not
   printed.
 - The monitor writes a lightweight heartbeat to

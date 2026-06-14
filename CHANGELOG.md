@@ -3,6 +3,67 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.87 - 2026-06-14
+
+- Refresh the user docs to match the current raw-batch-only download behavior:
+  `run` ends at complete raw TXT batches, `bib` ends at complete raw `.bib`
+  batches, and removed `parse`/SQLite wording no longer appears in the main
+  guides.
+- Document the `batch-run` command, `--search-root`, and SID pool cleanup
+  actions more clearly across README and usage guides.
+
+## 0.4.86 - 2026-06-14
+
+- Add a batch UUID TXT workflow (`batch-run`, interactive menu `1.3`) that
+  recursively discovers `uuid.csv`, extracts UUIDs by regex, and resumes each
+  UUID download independently.
+- Write per-UUID TXT completion markers and still verify raw batch checklist
+  coverage before skipping a UUID on later batch runs.
+
+## 0.4.85 - 2026-06-14
+
+- Add `--clear-dead-sids` and interactive menu item `5.4 Clear dead SIDs` so
+  saved invalid-SID history can be cleared without removing the live SID pool.
+- Rotate to the next saved SID automatically when the interactive CLI keeps a
+  WOS session alive and the next download targets a different UUID.
+
+## 0.4.84 - 2026-06-14
+
+- Add a `--clear-sids` settings action and interactive menu item `5.3 Clear all
+  SIDs` to empty the global saved SID pool.
+- Show which masked SID is currently being validated in interactive/auth check
+  output.
+- Classify lightweight SID probes as invalid when WOS redirects off-domain or
+  returns a shell with `window.sessionData = undefined`.
+
+## 0.4.83 - 2026-06-14
+
+- End TXT and BibTeX download tasks when the planned raw batch files are
+  complete; `run` no longer writes a derived WOSID CSV and `bib` no longer
+  combines raw batches into a single `.bib`.
+- Reuse complete raw TXT and BibTeX batch coverage as the finished artifact and
+  print the raw batch directory path on successful `run` and `bib` commands.
+- Validate TXT and BibTeX tasks against raw batch checklist coverage instead of
+  derived CSV or combined BibTeX files.
+
+## 0.4.82 - 2026-06-14
+
+- Change the default WOS TXT and BibTeX export batch size from 200 to 500
+  records per batch file. The `--batch-size` upper bound remains 500.
+- Resume BibTeX exports from existing raw `.bib` batch files and download only
+  missing 500-record ranges before rebuilding the combined `.bib` file.
+- Clarify that CSV import is local-only; CSV-backed raw exports should first
+  build a WOS `UT=(...)` result set and then use the URL/UUID checklist flow.
+
+## 0.4.81 - 2026-06-14
+
+- Remove the WOS data SQLite workflow. The CLI no longer exposes `parse`,
+  `parse-pipeline`, `wosdata`, SQLite database flags, parse blacklist flags, or
+  parse-concurrency settings.
+- Remove the `better-sqlite3` dependency and the SQLite helper module.
+- Update the interactive menu and docs so the supported deliverables are WOSID
+  CSVs from TXT exports and combined BibTeX files.
+
 ## 0.4.80 - 2026-06-13
 
 - In the interactive `WOS IDs to SQL` flow, if a missing/invalid SID is repaired

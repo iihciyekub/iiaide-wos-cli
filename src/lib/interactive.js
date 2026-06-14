@@ -135,7 +135,6 @@ function printHeader(version, workspace = {}) {
   const sidValue = sidCheck.sidMasked || sidCheck.sid || workspace.sidMasked || maskSid(workspace.sid) || "";
   const sidOrigin = sidCheck.origin || workspace.wosOrigin || "";
   const originUrl = sidOrigin || workspace.baseUrl || "https://www.webofscience.com";
-  const wosDataDb = workspace.wosDataDb || {};
   const sidPoolCount = Number(workspace.sidPoolCount || 0);
   const sidPoolIndex = Number(workspace.sidPoolIndex || -1);
   const activeSidNumber = sidPoolIndex >= 0 ? sidPoolIndex + 1 : 0;
@@ -143,19 +142,12 @@ function printHeader(version, workspace = {}) {
     kvLine("Workspace", workspacePath),
     kvLine("Task ID", currentTask ? highlightTaskId(currentTask) : "none"),
     "",
-    kvLine("WOS DB", wosDataDb.dbPath || "none"),
-    kvLine("WOS IDs", String(wosDataDb.recordCount || 0)),
-    kvLine("Blacklist DB", wosDataDb.blacklistDbPath || "none"),
-    kvLine("Blacklist", String(wosDataDb.blacklistCount || 0)),
-    kvLine("DB Size", formatBytes(wosDataDb.sizeBytes || 0)),
-    "",
     kvLine("Auth", sidOkLabel(sidStatus)),
     kvLine("SID Value", sidValue || "none"),
     kvLine("SID Pool", sidPoolCount ? `${activeSidNumber}/${sidPoolCount}` : "0"),
     kvLine("SID Producer", workspace.authMonitor?.label || "off"),
     "",
     kvLine("Playwright", workspace.wosBrowserMode || "background"),
-    kvLine("Parse Tabs", String(workspace.parseConcurrency || 1)),
     kvLine("Profile", workspace.wosProfileName || ".browser-profile"),
     kvLine("Runtime", formatRuntime(workspace.runtimeMs)),
   ];
@@ -284,14 +276,6 @@ function isWosSourceLike(value) {
     /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-[0-9a-f]{10})?/i.test(text);
 }
 
-function classifyWosIdsToSqlInput(value) {
-  const input = String(value || "").trim();
-  if (!input) return { kind: "", value: "" };
-  if (/\.csv$/i.test(input)) return { kind: "csv", value: input };
-  if (isWosSourceLike(input)) return { kind: "wos-source", value: input };
-  return { kind: "unknown", value: input };
-}
-
 function defaultTaskId() {
   const date = new Date();
   const pad = (value, width = 2) => String(value).padStart(width, "0");
@@ -334,10 +318,6 @@ function findTask(workspace, taskId) {
 function currentTaskSelection(workspace) {
   const taskId = workspace?.currentTask || workspace?.latestTask || "";
   return { taskId, task: taskId ? findTask(workspace, taskId) : null };
-}
-
-function canResumeWosIdsToSqlTask(task = {}) {
-  return Number(task?.uniqueCount || 0) > 0;
 }
 
 function resolveTaskSelection(workspace, value, fallback = "", newTaskId = "") {
@@ -488,43 +468,20 @@ function shortcutRow(items) {
   stdout.write(`  ${text}\n`);
 }
 
-function printWosDataDbStatus(workspace) {
-  const db = workspace?.wosDataDb || {};
-  stdout.write(`${color("32", "WOS data SQLite:", stdout)} ${db.dbPath || "none"}\n`);
-  stdout.write(`  WOS IDs ${Number(db.recordCount || 0)}\n`);
-  stdout.write(`  Sources ${Number(db.sourceCount || 0)}\n`);
-  stdout.write(`  Blacklist DB ${db.blacklistDbPath || "none"}\n`);
-  stdout.write(`  Blacklist ${Number(db.blacklistCount || 0)}\n`);
-  stdout.write(`  Blacklist Size ${formatBytes(db.blacklistSizeBytes || 0)}\n`);
-  stdout.write(`  Size    ${formatBytes(db.sizeBytes || 0)}\n\n`);
-}
-
-function appendWosDataDbArg(result, workspace) {
-  const dbPath = workspace?.wosDataDb?.dbPath;
-  const blacklistDbPath = workspace?.wosDataDb?.blacklistDbPath;
-  if (dbPath) result.push("--db", dbPath);
-  if (blacklistDbPath) result.push("--blacklist-db", blacklistDbPath);
-  return result;
-}
-
 async function askWorkflow(rl) {
   workflowGroup("1", "Download literature");
   workflowItem("1.1", "UUID - TXT format", "URL/UUID -> raw/<uuid>/full-record/*.txt and WOS IDs");
   workflowItem("1.2", "UUID - BIB format", "URL/UUID -> raw/<uuid>/bib/*.bib");
-  workflowTopItem("2", "WOS IDs to SQL", "CSV path or URL/UUID -> WOS IDs -> SQLite");
-  workflowItem("2.1", "Resume", "Current task WOS IDs -> SQLite");
+  workflowItem("1.3", "Batch UUID CSV - TXT", "Search uuid.csv files recursively and resume TXT downloads per UUID");
   workflowGroup("3", "Task manager");
   workflowItem("3.1", "New", "Create a fresh current task");
   workflowItem("3.2", "Switch", "Select an existing current task");
   workflowItem("3.3", "Clear", "Remove a managed task");
-  workflowGroup("4", "SQL database");
-  workflowItem("4.1", "Status", "Show global SQLite path, WOSID count, source count, and size");
-  workflowItem("4.2", "Merge database", "Merge another WOS SQLite database into the global database");
-  workflowItem("4.3", "Query WOSID", "Enter one WOSID and print its SQLite record");
   workflowGroup("5", "Settings");
   workflowItem("5.1", "Playwright visible", "Choose whether WOS browser work opens a visible window");
-  workflowItem("5.2", "Parse tabs", "Set default reusable WOS tabs for WOSID parsing");
-  workflowItem("5.3", "Add SIDs", "Paste one or more SIDs into the saved SID pool");
+  workflowItem("5.2", "Add SIDs", "Paste one or more SIDs into the saved SID pool");
+  workflowItem("5.3", "Clear all SIDs", "Remove every saved SID from the global SID pool");
+  workflowItem("5.4", "Clear dead SIDs", "Remove saved invalid-SID history without changing the active SID pool");
   workflowGroup("6", "Auth producer");
   workflowItem("6.1", "MUST login", "Run one MUST SSO login and save the produced SID");
   workflowItem("6.2", "MUST monitor", "Keep this CLI running to refill the SID pool");
@@ -537,8 +494,8 @@ async function askWorkflow(rl) {
     if (isQuitInput(choice)) return CONTROL_QUIT;
     if (choice === "c") return "c";
     if (choice === "u") return "u";
-    if (["1.1", "1.2", "2", "2.1", "3.1", "3.2", "3.3", "4.1", "4.2", "4.3", "5.1", "5.2", "5.3", "6.1", "6.2"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 2, 2.1, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.1, 5.2, 5.3, 6.1, 6.2, c to check SID, u to update, B to go back, or q to quit\n`);
+    if (["1.1", "1.2", "1.3", "3.1", "3.2", "3.3", "5.1", "5.2", "5.3", "5.4", "6.1", "6.2"].includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 1.3, 3.1, 3.2, 3.3, 5.1, 5.2, 5.3, 5.4, 6.1, 6.2, c to check SID, u to update, B to go back, or q to quit\n`);
   }
 }
 
@@ -760,45 +717,6 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       return ["clear", "--task", selection.taskId, "--tasks-root", activeWorkspace.tasksRoot];
     }
 
-    if (choice === "4.1") {
-      printWosDataDbStatus(activeWorkspace);
-      return { refresh: true };
-    }
-
-    if (choice === "4.2") {
-      const sourceDb = await askParameterOrCancel(
-        rl,
-        "Source SQLite database",
-        "enter a local .sqlite database file to merge"
-      );
-      if (isBackResult(sourceDb)) return { refresh: true };
-      if (isQuitResult(sourceDb)) return null;
-      const result = appendWosDataDbArg(
-        ["wosdata", "--merge-db", sourceDb, "--tasks-root", activeWorkspace.tasksRoot],
-        activeWorkspace
-      );
-      const force = await askOptionalBoolean(rl, "Force overwrite existing SQL rows", false);
-      if (isBackResult(force)) return { refresh: true };
-      if (isQuitResult(force)) return null;
-      if (force) result.push("--force");
-      return result;
-    }
-
-    if (choice === "4.3") {
-      const wosid = await askParameterOrCancel(
-        rl,
-        "WOSID",
-        "enter one WOSID, for example WOS:000000000000001"
-      );
-      if (isBackResult(wosid)) return { refresh: true };
-      if (isQuitResult(wosid)) return null;
-      const result = appendWosDataDbArg(
-        ["wosdata", "--wosid", wosid, "--tasks-root", activeWorkspace.tasksRoot],
-        activeWorkspace
-      );
-      return result;
-    }
-
     if (choice === "5.1") {
       const visible = await askOptionalBoolean(
         rl,
@@ -816,24 +734,6 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     }
 
     if (choice === "5.2") {
-      const parseConcurrency = await askIntegerInRange(
-        rl,
-        "Default WOS parse tabs",
-        Number(activeWorkspace.parseConcurrency || 1),
-        1,
-        10
-      );
-      if (isBackResult(parseConcurrency)) return { refresh: true };
-      if (isQuitResult(parseConcurrency)) return null;
-      if (typeof helpers.setParseConcurrency === "function") {
-        activeWorkspace = await helpers.setParseConcurrency(parseConcurrency);
-        stdout.write(`${color("32", "Parse tabs:", stdout)} ${parseConcurrency} saved. Refreshing workspace panel.\n\n`);
-        return { refresh: true };
-      }
-      return { refresh: true };
-    }
-
-    if (choice === "5.3") {
       const sids = await promptBatchSids();
       if (isBackResult(sids)) return { refresh: true };
       if (isQuitResult(sids)) return null;
@@ -841,6 +741,35 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       if (typeof helpers.addSids === "function") {
         activeWorkspace = await helpers.addSids(sids);
         stdout.write(`${color("32", "SID pool:", stdout)} added. Refreshing workspace panel.\n\n`);
+        return { refresh: true };
+      }
+      return { refresh: true };
+    }
+
+    if (choice === "5.3") {
+      const confirmation = await askParameterOrCancel(
+        rl,
+        "Type CLEAR to remove all saved SIDs",
+        "type CLEAR to remove every saved SID from the pool"
+      );
+      if (isBackResult(confirmation)) return { refresh: true };
+      if (isQuitResult(confirmation)) return null;
+      if (String(confirmation || "").trim().toUpperCase() !== "CLEAR") {
+        stdout.write(`${color("33", "SID pool:", stdout)} unchanged.\n\n`);
+        return { refresh: true };
+      }
+      if (typeof helpers.clearSids === "function") {
+        activeWorkspace = await helpers.clearSids();
+        stdout.write(`${color("32", "SID pool:", stdout)} cleared. Refreshing workspace panel.\n\n`);
+        return { refresh: true };
+      }
+      return { refresh: true };
+    }
+
+    if (choice === "5.4") {
+      if (typeof helpers.clearDeadSids === "function") {
+        activeWorkspace = await helpers.clearDeadSids();
+        stdout.write(`${color("32", "Dead SID history:", stdout)} cleared. Refreshing workspace panel.\n\n`);
         return { refresh: true };
       }
       return { refresh: true };
@@ -866,77 +795,13 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     const task = selection.task;
     stdout.write(`${color("32", "Using task:", stdout)} ${taskId}\n\n`);
 
-    let sid = "";
-    if (workspaceSidStatus(activeWorkspace) !== "valid") {
-      sid = await askSidFromBrowserOrManual(() => rl, helpers.readBrowserSid, promptManualSid, helpers.waitForSidPool);
-      if (isBackResult(sid)) return { refresh: true };
-      if (isQuitResult(sid)) return null;
-      if (!sid) return { refresh: true };
-      if (typeof helpers.saveSid === "function") {
-        activeWorkspace = await helpers.saveSid(sid);
-        stdout.write(`${color("32", "SID:", stdout)} saved.\n\n`);
-      }
+    if (choice === "1.3") {
+      return ["batch-run", "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot];
     }
 
     const sourceFallback = [task?.url, task?.uuid].find(isWosSourceLike) || "";
     if (sourceFallback) {
       stdout.write(`${color("2", "Saved source:", stdout)} ${sourceFallback}\n`);
-    }
-
-    if (choice === "2.1") {
-      const result = appendWosDataDbArg(
-        ["parse", "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot],
-        activeWorkspace
-      );
-      if (sid) result.push("--sid", sid);
-      return result;
-    }
-
-    if (choice === "2") {
-      if (sid && canResumeWosIdsToSqlTask(task)) {
-        stdout.write(`${color("32", "SID ready:", stdout)} resuming current WOS IDs to SQL task.\n\n`);
-        const result = appendWosDataDbArg(
-          ["parse", "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot],
-          activeWorkspace
-        );
-        result.push("--sid", sid);
-        return result;
-      }
-      const input = await askParameterOrCancel(
-        rl,
-        "CSV path, WOS URL, or UUID",
-        "enter a .csv file, WOS summary URL, or WOS result-set UUID",
-        sourceFallback
-      );
-      if (isBackResult(input)) return { refresh: true };
-      if (isQuitResult(input)) return null;
-      const parsed = classifyWosIdsToSqlInput(input);
-      if (parsed.kind === "csv") {
-        const result = appendWosDataDbArg(
-          ["parse", "--csv", parsed.value, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot],
-          activeWorkspace
-        );
-        if (sid) result.push("--sid", sid);
-        return result;
-      }
-      if (parsed.kind !== "wos-source") {
-        stdout.write(`${color("33", "Required:", stdout)} enter a .csv file, WOS summary URL, or WOS result-set UUID.\n\n`);
-        return { refresh: true };
-      }
-      const sourceFlag = /^https?:\/\//i.test(parsed.value) ? "--url" : "--uuid";
-      const result = [
-        "parse-pipeline",
-        sourceFlag,
-        parsed.value,
-        "--task",
-        taskId,
-        "--tasks-root",
-        activeWorkspace.tasksRoot,
-        "--reuse-raw",
-      ];
-      appendWosDataDbArg(result, activeWorkspace);
-      if (sid) result.push("--sid", sid);
-      return result;
     }
 
     const source = await askParameterOrCancel(
@@ -953,6 +818,17 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     }
     const sourceFlag = /^https?:\/\//i.test(source) ? "--url" : "--uuid";
     const command = choice === "1.2" ? "bib" : "run";
+    let sid = "";
+    if (workspaceSidStatus(activeWorkspace) !== "valid") {
+      sid = await askSidFromBrowserOrManual(() => rl, helpers.readBrowserSid, promptManualSid, helpers.waitForSidPool);
+      if (isBackResult(sid)) return { refresh: true };
+      if (isQuitResult(sid)) return null;
+      if (!sid) return { refresh: true };
+      if (typeof helpers.saveSid === "function") {
+        activeWorkspace = await helpers.saveSid(sid);
+        stdout.write(`${color("32", "SID:", stdout)} saved.\n\n`);
+      }
+    }
     const result = [command, sourceFlag, source, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot];
     if (command !== "bib") result.push("--reuse-raw");
     if (sid) result.push("--sid", sid);
@@ -970,9 +846,7 @@ module.exports = {
   formatBytes,
   formatRuntime,
   currentTaskSelection,
-  canResumeWosIdsToSqlTask,
   isWosSourceLike,
-  classifyWosIdsToSqlInput,
   askTaskSelection,
   listTaskHints,
   printHeader,

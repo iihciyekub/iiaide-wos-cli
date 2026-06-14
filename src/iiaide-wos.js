@@ -20,36 +20,13 @@ const {
 const { color, createProgress, createSpinner, isInteractive } = require("./lib/terminal");
 const { updateCli } = require("./lib/update");
 const { exportBibBatchesViaWosJs, exportTxtBatchesViaWosJs } = require("./lib/wos-browser-export");
-const { normalizeWosId, reconcileWosId } = require("./lib/wos-ids");
+const { normalizeWosId } = require("./lib/wos-ids");
 const { DEFAULT_MUST_LOGIN_URL, loginAndExtractMustSid } = require("./lib/wos-must-auth");
-const {
-  defaultWosDataDbPath,
-  defaultWosBlacklistDbPath,
-  clearWosDataBlacklist,
-  existingWosDataBlacklistedIds,
-  existingWosDataIds,
-  importWosDataRecord,
-  linkExistingWosDataSources,
-  mergeWosDataDatabase,
-  queryWosDataBlacklist,
-  queryWosDataByWosId,
-  queryWosDataDatabase,
-  recordWosDataBlacklist,
-  removeWosDataBlacklist,
-  wosDataRecordExists,
-  wosDataDbStats,
-} = require("./lib/wos-sqlite");
 const { version: VERSION } = require("../package.json");
 
-const DEFAULT_BATCH_SIZE = 200;
+const DEFAULT_BATCH_SIZE = 500;
 const DEFAULT_TIMEOUT_MS = 120000;
-const DEFAULT_RECORD_TIMEOUT_MS = 20000;
-const DEFAULT_BROWSER_RESTART_EVERY = 600;
-const DEFAULT_PARSE_MEMORY_CHECK_EVERY = 200;
-const DEFAULT_PARSE_MAX_RSS_MB = 4096;
-const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 20;
 const SID_POOL_WAIT_INTERVAL_MS = 10000;
-const DEFAULT_PARSE_CONNECTIVITY_QUERY = "PY=2000";
 const DEFAULT_WOS_PROTOCOL = "https";
 const DEFAULT_WOS_DOMAIN = "www.webofscience.com";
 const DEFAULT_BASE_URL = `${DEFAULT_WOS_PROTOCOL}://${DEFAULT_WOS_DOMAIN}`;
@@ -144,12 +121,12 @@ Usage:
   iiaide-wos auth monitor [--provider must] [--account <email>] [--password <secret>] [options]
   iiaide-wos sid-pool [--tasks-root <dir>]
   iiaide-wos workspace [--tasks-root <dir>]
-  iiaide-wos settings [--playwright-visible <on|off>] [--parse-concurrency <n>] [--add-sid <SID>] [--add-sids "<SID...>"] [--tasks-root <dir>]
+  iiaide-wos settings [--playwright-visible <on|off>] [--add-sid <SID>] [--add-sids "<SID...>"] [--clear-sids] [--clear-dead-sids] [--tasks-root <dir>]
   iiaide-wos update [--check]
   iiaide-wos install-browser [--with-deps]
+  iiaide-wos batch-run [--sid <SID>] [--task <task-id>] [--tasks-root <dir>] [options]
   iiaide-wos run [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
   iiaide-wos bib [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
-  iiaide-wos parse-pipeline [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
   iiaide-wos [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
   iiaide-wos import --csv <wosids.csv> [--task <task-id>] [options]
   iiaide-wos list [--tasks-root <dir>]
@@ -159,8 +136,6 @@ Usage:
   iiaide-wos validate (--task <task-id> | --latest) [--tasks-root <dir>]
   iiaide-wos clear (--task <task-id> | --latest) [--tasks-root <dir>]
   iiaide-wos sid [--sid <SID> | --from-browser] [--tasks-root <dir>] [--wos-domain <domain>] [--base-url <url>] [--headed]
-  iiaide-wos parse [--sid <SID>] (--task <task-id> | --latest | --csv <wosids.csv>) [options]
-  iiaide-wos wosdata (--merge-db <file> | --wosid <WOSID> | --query <sql> | --blacklist | --unblacklist <WOSID> | --clear-blacklist) [--db <file>] [--blacklist-db <file>] [--tasks-root <dir>]
 
 Inputs:
   --sid <SID>             Web of Science SID. Interactive commands prompt when missing or expired
@@ -181,26 +156,19 @@ Inputs:
   --url <summary-url>     WOS summary URL
   --uuid <uuid>           WOS result-set UUID; used when --url is not provided
   --csv <file>            Existing CSV containing a wosid/UT column or WOS IDs in its first column
-  --merge-db <file>       Merge records from another WOS SQLite database into --db
-  --wosid <WOSID>         Query one WOS record from the SQLite database
-  --query <sql>           Run a read-only SELECT query against the WOS SQLite database
-  --blacklist             List WOSIDs skipped by parse because record-level parsing failed
-  --unblacklist <WOSID>   Remove one WOSID from the parse blacklist
-  --clear-blacklist       Remove all WOSIDs from the parse blacklist
+  --search-root <dir>     Batch UUID search root. Default: current working directory
 
 Output management:
   --task <task-id>        Stable task id. If omitted, creates a timestamp-based task id
   --task-label <label>    Human label stored in task metadata
   --tasks-root <dir>      Parent directory for tasks. Default: ./tasks
-  --db <file>             SQLite WOS data database. Default: ~/.iiaide-wos/wosdata.sqlite
-  --blacklist-db <file>   SQLite parse blacklist database. Default: ~/.iiaide-wos/wos-blacklist.sqlite
   --out-dir <dir>         Exact task directory override
   --force                 Allow managed task replacement
   --reuse-raw             Rebuild CSV from existing raw batches when present
 
 Export options:
   --sort-by <sort>        Summary sort key. Default: relevance
-  --batch-size <n>        WOS export API batch size. Default: 200, max: 500
+  --batch-size <n>        WOS export API batch size. Default: 500, max: 500
   --timeout-ms <n>        Navigation/API timeout. Default: 120000
   --wos-domain <domain>   WOS domain. Default: www.webofscience.com
   --wosjs <file>          Browser-side wos.js injection file. Default: ./import/wos.js
@@ -209,9 +177,10 @@ Export options:
   --headless              Run browser in background mode for this command
   --playwright-visible <on|off>
                           Save whether WOS Playwright work opens a visible browser
-  --parse-concurrency <n> Save default parse reusable WOS tabs. 1-10
   --add-sid <SID>         Add one SID to the saved SID pool; compatibility alias
   --add-sids <text>       Add multiple SIDs separated by spaces, newlines, or commas
+  --clear-sids            Remove every saved SID from the global SID pool
+  --clear-dead-sids       Remove saved invalid-SID history without changing the active SID pool
   --version               Show CLI version
   --help                  Show this help
   --check                 Check for an update without installing it
@@ -221,22 +190,10 @@ Range options:
   --from-index <n>        Start from 1-based WOS record/WOSID index
   --limit <n>             Process only n records/WOS IDs
 
-Parse options:
-  --concurrency <n>       Parallel full-record pages. Default: 1
-  --record-timeout-ms <n> Per-record full-page timeout. Default: 20000
-  --cooldown-ms <n>       Delay after each record. Default: 250
-  --browser-restart-every <n>
-                          Restart Playwright after n parsed WOSIDs. Default: 600, 0 disables
-  --max-rss-mb <n>        Restart Playwright between parse chunks when RSS exceeds n MB. Default: 4096, 0 disables
-  --retry-blacklist       Include blacklisted parse-failed WOSIDs in this parse run
-  --reparse-existing      Visit WOSIDs that already exist in SQLite and overwrite them
-
 Task directory layout:
   raw/<uuid>/full-record/ WOS fullRecord text batches as <uuid>_<start>_<end>.txt
-  raw/<uuid>/full-record/<uuid>_wosid.csv
   raw/<uuid>/bib/         BibTeX batches as <uuid>_<start>_<end>.bib
-  ~/.iiaide-wos/wosdata.sqlite
-  export/<uuid>/bib/<uuid>.bib
+  raw/<task-id>/full-record/<task-id>_wosid.csv (import only)
   logs/progress.jsonl
   manifest.json
   summary.json
@@ -260,18 +217,11 @@ function parseArgs(argv) {
     urlHadProtocol: false,
     uuid: "",
     csvPath: "",
-    mergeDbPath: "",
-    queryWosId: "",
-    unblacklistWosId: "",
-    sqlQuery: "",
-    blacklistQuery: false,
-    clearBlacklist: false,
+    searchRoot: path.resolve(process.cwd()),
     taskId: "",
     taskLabel: "",
     outDir: "",
     tasksRoot: path.resolve(process.cwd(), "tasks"),
-    dbPath: "",
-    blacklistDbPath: "",
     sortBy: "relevance",
     batchSize: DEFAULT_BATCH_SIZE,
     timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -284,22 +234,16 @@ function parseArgs(argv) {
     headed: false,
     headedSource: "",
     playwrightVisible: null,
-    parseConcurrencySetting: null,
     addSidInputs: [],
+    clearSids: false,
+    clearDeadSids: false,
     force: false,
     reuseRaw: false,
-    retryBlacklist: false,
-    reparseExisting: false,
     concurrency: 1,
     concurrencySource: "",
-    recordTimeoutMs: DEFAULT_RECORD_TIMEOUT_MS,
-    browserRestartEvery: DEFAULT_BROWSER_RESTART_EVERY,
-    memoryCheckEvery: DEFAULT_PARSE_MEMORY_CHECK_EVERY,
-    maxRssMb: DEFAULT_PARSE_MAX_RSS_MB,
     limit: 0,
     fromIndex: 1,
     fromIndexSource: "",
-    cooldownMs: 250,
     checkOnly: false,
     withDeps: false,
     authProvider: "must",
@@ -367,19 +311,12 @@ function parseArgs(argv) {
     }
     else if (arg === "--uuid") args.uuid = readValue(arg, i++);
     else if (arg === "--csv") args.csvPath = readValue(arg, i++);
-    else if (arg === "--merge-db") args.mergeDbPath = readValue(arg, i++);
-    else if (arg === "--wosid" || arg === "--wos-id") args.queryWosId = readValue(arg, i++);
-    else if (arg === "--unblacklist" || arg === "--remove-blacklist") args.unblacklistWosId = readValue(arg, i++);
-    else if (arg === "--query" || arg === "--sql") args.sqlQuery = readValue(arg, i++);
-    else if (arg === "--blacklist" || arg === "--list-blacklist") args.blacklistQuery = true;
-    else if (arg === "--clear-blacklist") args.clearBlacklist = true;
+    else if (arg === "--search-root") args.searchRoot = path.resolve(readValue(arg, i++));
     else if (arg === "--task") args.taskId = normalizeTaskId(readValue(arg, i++));
     else if (arg === "--latest") args.latest = true;
     else if (arg === "--task-label" || arg === "--label") args.taskLabel = readValue(arg, i++);
     else if (arg === "--out-dir" || arg === "--download-dir") args.outDir = readValue(arg, i++);
     else if (arg === "--tasks-root" || arg === "--output-root") args.tasksRoot = readValue(arg, i++);
-    else if (arg === "--db") args.dbPath = readValue(arg, i++);
-    else if (arg === "--blacklist-db") args.blacklistDbPath = readValue(arg, i++);
     else if (arg === "--sort-by") args.sortBy = readValue(arg, i++);
     else if (arg === "--batch-size") args.batchSize = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--timeout-ms" || arg === "--timeout") args.timeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
@@ -405,31 +342,19 @@ function parseArgs(argv) {
     else if (arg === "--playwright-visible") args.playwrightVisible = parseBooleanFlag(arg, readValue(arg, i++));
     else if (arg === "--add-sid") args.addSidInputs.push(readValue(arg, i++));
     else if (arg === "--add-sids") args.addSidInputs.push(readValue(arg, i++));
+    else if (arg === "--clear-sids") args.clearSids = true;
+    else if (arg === "--clear-dead-sids") args.clearDeadSids = true;
     else if (arg === "--force") args.force = true;
     else if (arg === "--reuse-raw") args.reuseRaw = true;
-    else if (arg === "--retry-blacklist") args.retryBlacklist = true;
-    else if (arg === "--reparse-existing" || arg === "--overwrite-existing") args.reparseExisting = true;
     else if (arg === "--concurrency") {
       args.concurrency = parseIntegerFlag(arg, readValue(arg, i++));
       args.concurrencySource = "cli";
-    }
-    else if (arg === "--parse-concurrency" || arg === "--parse-tabs") {
-      const value = parseIntegerFlag(arg, readValue(arg, i++));
-      args.parseConcurrencySetting = value;
-      if (!args.concurrencySource && command !== "settings") {
-        args.concurrency = value;
-        args.concurrencySource = "cli";
-      }
     }
     else if (arg === "--limit") args.limit = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--from-index") {
       args.fromIndex = parseIntegerFlag(arg, readValue(arg, i++));
       args.fromIndexSource = "cli";
     }
-    else if (arg === "--record-timeout-ms" || arg === "--record-timeout" || arg === "--page-timeout-ms") args.recordTimeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
-    else if (arg === "--cooldown-ms") args.cooldownMs = parseIntegerFlag(arg, readValue(arg, i++));
-    else if (arg === "--browser-restart-every" || arg === "--parse-restart-every" || arg === "--restart-every") args.browserRestartEvery = parseIntegerFlag(arg, readValue(arg, i++));
-    else if (arg === "--max-rss-mb" || arg === "--memory-restart-mb") args.maxRssMb = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--check") args.checkOnly = true;
     else if (arg === "--with-deps") args.withDeps = true;
     else throw new Error(`Unknown argument: ${arg}`);
@@ -450,23 +375,16 @@ function parseArgs(argv) {
   assertIntegerRange("--min-sids", args.authMinSids, 0);
   assertIntegerRange("--retry-delay-ms", args.authRetryDelayMs, 1000);
   assertIntegerRange("--max-checks", args.authMaxChecks, 0);
-  assertIntegerRange("--record-timeout-ms", args.recordTimeoutMs, 5000);
   assertIntegerRange("--concurrency", args.concurrency, 1, 10);
-  if (args.parseConcurrencySetting !== null) assertIntegerRange("--parse-concurrency", args.parseConcurrencySetting, 1, 10);
   assertIntegerRange("--limit", args.limit, 0);
   assertIntegerRange("--from-index", args.fromIndex, 1);
-  assertIntegerRange("--cooldown-ms", args.cooldownMs, 0);
-  assertIntegerRange("--browser-restart-every", args.browserRestartEvery, 0);
-  assertIntegerRange("--max-rss-mb", args.maxRssMb, 0);
   args.tasksRoot = path.resolve(args.tasksRoot);
   applySavedRuntimeSettings(args);
   assertIntegerRange("--concurrency", args.concurrency, 1, 10);
   if (args.csvPath) args.csvPath = path.resolve(args.csvPath);
-  if (args.mergeDbPath) args.mergeDbPath = path.resolve(args.mergeDbPath);
-  args.dbPath = args.dbPath ? path.resolve(args.dbPath) : defaultWosDataDbPath();
-  args.blacklistDbPath = args.blacklistDbPath ? path.resolve(args.blacklistDbPath) : defaultWosBlacklistDbPath();
   if (!args.taskId && args.uuid) args.taskId = makeTaskId();
-  if (!args.taskId && (command === "import" || command === "parse") && args.csvPath) args.taskId = makeTaskId();
+  if (!args.taskId && command === "import" && args.csvPath) args.taskId = makeTaskId();
+  if (!args.taskId && command === "batch-run") args.taskId = makeTaskId();
   if (args.outDir) {
     args.outDir = path.resolve(args.outDir);
   } else if (args.taskId) {
@@ -586,6 +504,12 @@ function extractUuid(value) {
     text.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{10})/i) ||
     text.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
   return match ? match[1] : "";
+}
+
+function extractUuidsFromText(value) {
+  const text = String(value || "");
+  const matches = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-[0-9a-f]{10})?/ig) || [];
+  return dedupeSidValues(matches.map((item) => String(item || "").trim().toLowerCase()));
 }
 
 function buildSummaryUrl(baseUrl, uuid, sortBy) {
@@ -758,9 +682,6 @@ function applySavedRuntimeSettings(args) {
   const config = readConfig(args.tasksRoot);
   if (!args.headedSource && typeof config.playwrightVisible === "boolean") {
     args.headed = config.playwrightVisible;
-  }
-  if (!args.concurrencySource && Number.isSafeInteger(config.parseConcurrency)) {
-    args.concurrency = config.parseConcurrency;
   }
   return config;
 }
@@ -1042,21 +963,6 @@ function setPlaywrightVisibleSetting(args, visible) {
   };
 }
 
-function setParseConcurrencySetting(args, value) {
-  assertIntegerRange("--parse-concurrency", value, 1, 10);
-  const config = readConfig(args.tasksRoot);
-  writeConfig(args.tasksRoot, {
-    ...config,
-    parseConcurrency: value,
-  });
-  if (!args.concurrencySource) args.concurrency = value;
-  return {
-    ok: true,
-    config: configPath(args.tasksRoot),
-    parseConcurrency: value,
-  };
-}
-
 function clearSavedSidConfig(args) {
   const config = readSidConfig(args);
   const pool = sidPoolFromConfig(config);
@@ -1068,6 +974,38 @@ function clearSavedSidConfig(args) {
   args.sidPoolIndex = -1;
   args.sidPoolCount = 0;
   return true;
+}
+
+function clearDeadSidHistory(args) {
+  const config = readSidConfig(args);
+  if (!Array.isArray(config.deadSids) || !config.deadSids.length) return false;
+  const { deadSids: _deadSids, ...rest } = config;
+  writeGlobalConfig(rest);
+  return true;
+}
+
+function advanceSavedSid(args, options = {}) {
+  const config = readSidConfig(args);
+  const pool = sidPoolFromConfig(config);
+  if (pool.sids.length < 2) return false;
+  if (options.requireCurrent !== false && args.sid && pool.activeSid && args.sid !== pool.activeSid) return false;
+  const nextCursor = (pool.activeIndex + 1) % pool.sids.length;
+  const { sid: _sid, ...rest } = config;
+  writeGlobalConfig({
+    ...rest,
+    sids: pool.sids,
+    sidCursor: nextCursor,
+  });
+  args.sid = pool.sids[nextCursor];
+  args.sidSource = "config";
+  args.sidPoolIndex = nextCursor;
+  args.sidPoolCount = pool.sids.length;
+  return {
+    ok: true,
+    activeSid: args.sid,
+    sidPoolCount: pool.sids.length,
+    sidPoolIndex: nextCursor,
+  };
 }
 
 function loadSavedSid(args) {
@@ -1115,6 +1053,11 @@ function authValidatedMessage(args) {
   return badge ? `WOS authentication validated ${badge}` : "WOS authentication validated";
 }
 
+function authValidationMessage(args, prefix = "Validating WOS authentication") {
+  const badge = sidBadge(args);
+  return badge ? `${prefix} ${badge}` : prefix;
+}
+
 function writeRuntimeNotice(title, lines = [], stream = process.stderr) {
   const prefix = isInteractive(stream) ? "\n" : "";
   const heading = color("33;1", title, stream);
@@ -1151,11 +1094,20 @@ async function quickValidateCurrentSid(args, options = {}) {
     const text = await response.text().catch(() => "");
     const href = response.url || initUrl;
     const origin = urlOrigin(href);
+    const originDomain = urlDomain(origin);
     const haystack = `${href}\n${text}`.toLowerCase();
-    if ([401, 403].includes(response.status) || /\b(logged out|session expired)\b/i.test(haystack)) {
+    const shellExposesUndefinedSession = /window\.sessiondata\s*=\s*undefined\b/i.test(text);
+    const shellExposesSid = text.includes(sid) && /sessionData|BasicProperties|SID/.test(text);
+    const hostShiftedAwayFromWos = Boolean(originDomain) && originDomain !== normalizeWosDomain(args.wosDomain || DEFAULT_WOS_DOMAIN);
+    if (
+      [401, 403].includes(response.status)
+      || /\b(logged out|session expired)\b/i.test(haystack)
+      || shellExposesUndefinedSession
+      || hostShiftedAwayFromWos
+    ) {
       return { status: "invalid", sidSource, sid, sidMasked, ok: false, href, origin, httpStatus: response.status, message: "SID was rejected by WOS" };
     }
-    if (response.ok && text.includes(sid) && /sessionData|BasicProperties|SID/.test(text)) {
+    if (response.ok && shellExposesSid) {
       return { status: "valid", sidSource, sid, sidMasked, ok: true, href, origin, httpStatus: response.status, message: "SID accepted by WOS" };
     }
     return {
@@ -1709,7 +1661,6 @@ function workspaceStatus(args, sidCheck = null) {
     wosDomain,
     wosOrigin: sidCheck?.origin || "",
     playwrightVisible: Boolean(args.headed),
-    parseConcurrency: args.concurrency,
     wosBrowserMode: wosBrowserMode(args),
     wosProfileName: wosProfileName(args),
     wosProfilePath: wosUserDataDir(args),
@@ -1727,7 +1678,6 @@ function workspaceStatus(args, sidCheck = null) {
     authMonitor: readAuthMonitorStatus(),
     deadSidCount: Array.isArray(sidConfig.deadSids) ? sidConfig.deadSids.length : 0,
     sidCheck: safeSidCheck,
-    wosDataDb: wosDataDbStats(args.dbPath, args.blacklistDbPath),
     tasks: tasks.map((task) => ({
       taskId: task.taskId,
       status: task.status || "",
@@ -1903,42 +1853,57 @@ function readCompletedRunSummary(paths, args) {
   if (!summary?.ok || summary.method !== "wos-js-export-fetchTxtBatches" || !sameTaskUuid(summary, args)) return null;
   if (isUnverifiedPartialTxtSummary(summary, args)) return null;
   const identifier = summary.uuid || args.uuid || args.taskId;
-  const sourcePaths = withRawSource(paths, identifier);
-  const csvPath = resolveWosIdsCsvPath(sourcePaths, identifier);
-  if (!fs.existsSync(csvPath)) return null;
   const rangeStart = Math.max(1, Number(summary.rangeStart) || Number(summary.fromIndex) || 1);
   const rangeEnd = Math.max(0, Number(summary.rangeEnd) || 0) ||
     (summary.expectedCount ? rangeStart + Math.max(0, Number(summary.expectedCount) || 0) - 1 : 0);
   if (!rangeEnd) return null;
   const plan = rawBatchPlanForRange(paths, identifier, rangeStart, rangeEnd, DEFAULT_BATCH_SIZE);
   if (plan.missingBatches.length) return null;
-  return { ...summary, files: { ...(summary.files || {}), wosidsCsv: csvPath } };
+  return {
+    ...summary,
+    files: {
+      ...(summary.files || {}),
+      rawDir: rawBatchDir(paths, identifier),
+      wosIdsDir: withRawSource(paths, identifier).wosIdsDir,
+    },
+  };
 }
 
 function readCompletedBibSummary(paths, args) {
   const summary = readJson(paths.summary, null);
   if (!summary?.ok || summary.method !== "wos-js-export-fetchBibBatches" || !sameTaskUuid(summary, args)) return null;
-  const sourcePaths = withRawSource(paths, summary.uuid || args.uuid);
-  const bibPath = summary.files?.bibFile || bibFilePath(sourcePaths, summary.uuid || args.uuid);
-  return fs.existsSync(bibPath) ? summary : null;
+  const uuid = summary.uuid || args.uuid || "";
+  const rangeStart = Math.max(1, Number(summary.rangeStart) || Number(summary.fromIndex) || 1);
+  const rangeEnd = Math.max(0, Number(summary.rangeEnd) || 0) ||
+    (summary.expectedCount ? rangeStart + Math.max(0, Number(summary.expectedCount) || 0) - 1 : 0);
+  if (!uuid || !rangeEnd) return null;
+  const plan = bibBatchPlanForRange(paths, uuid, rangeStart, rangeEnd, DEFAULT_BATCH_SIZE);
+  if (plan.missingBatches.length) return null;
+  return {
+    ...summary,
+    files: {
+      ...(summary.files || {}),
+      bibDir: bibBatchDir(paths, uuid),
+    },
+  };
 }
 
 function readCompletedArtifactSummary(args) {
   if (args.force || !args.outDir) return null;
   const paths = getRunPaths(args.outDir);
   if (args.command === "bib") return readCompletedBibSummary(paths, args);
-  if (args.command === "run" || args.command === "parse-pipeline") return readCompletedRunSummary(paths, args);
+  if (args.command === "run") return readCompletedRunSummary(paths, args);
   return null;
 }
 
 function printCompletedArtifactPath(command, summary) {
   if (command === "bib") {
-    console.error("BibTeX already exists; skipping download.");
-    console.log(summary.files.bibFile);
+    console.error("BibTeX raw batches already exist; skipping download.");
+    console.log(summary.files.bibDir);
     return summary.ok ? 0 : 1;
   }
-  console.error("WOS ID CSV already exists; skipping download.");
-  console.log(summary.files.wosidsCsv);
+  console.error("WOS raw TXT batches already exist; skipping download.");
+  console.log(summary.files.rawDir);
   return summary.ok ? 0 : 1;
 }
 
@@ -2113,6 +2078,29 @@ function readWosIdsCsv(filePath) {
   });
 }
 
+function readUuidCsv(filePath) {
+  const text = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+  return extractUuidsFromText(text);
+}
+
+function findUuidCsvFiles(searchRoot) {
+  const root = path.resolve(searchRoot || process.cwd());
+  const results = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(fullPath);
+        continue;
+      }
+      if (entry.isFile() && /^uuid\.csv$/i.test(entry.name)) results.push(fullPath);
+    }
+  };
+  visit(root);
+  return results.sort();
+}
+
 function parseCsv(text) {
   const rows = [];
   let row = [];
@@ -2148,162 +2136,6 @@ function parseCsv(text) {
   row.push(cell);
   if (row.some((value) => value.trim())) rows.push(row);
   return rows;
-}
-
-function existingWosDataState(paths, wosids, args = {}) {
-  const globalIds = existingWosDataIds(args.dbPath, wosids);
-  const blacklistIds = existingWosDataBlacklistedIds({ blacklistDbPath: args.blacklistDbPath }, wosids);
-  return { globalIds, blacklistIds };
-}
-
-function hasExistingWosData(state, wosid) {
-  const normalized = normalizeWosId(wosid);
-  return Boolean(normalized && state.globalIds.has(normalized));
-}
-
-function hasBlacklistedWosData(state, wosid) {
-  const normalized = normalizeWosId(wosid);
-  return Boolean(normalized && state.blacklistIds.has(normalized));
-}
-
-function selectParseWork(paths, wosids, args) {
-  let indexed = wosids.map((wosid, index) => ({ wosid, index: index + 1 }));
-  indexed = indexed.filter((item) => item.index >= args.fromIndex);
-  const state = existingWosDataState(paths, wosids, args);
-  if (!args.reparseExisting) {
-    indexed = indexed.filter((item) => !hasExistingWosData(state, item.wosid));
-  }
-  if (!args.retryBlacklist) {
-    indexed = indexed.filter((item) => !hasBlacklistedWosData(state, item.wosid));
-  }
-  if (args.limit) indexed = indexed.slice(0, args.limit);
-  return indexed;
-}
-
-function parseStats(paths, wosids, args = {}) {
-  const state = existingWosDataState(paths, wosids, args);
-  const completed = wosids.filter((wosid) => hasExistingWosData(state, wosid)).length;
-  const blacklisted = wosids.filter((wosid) => !hasExistingWosData(state, wosid) && hasBlacklistedWosData(state, wosid)).length;
-  const skippedExisting = args.reparseExisting ? 0 : completed;
-  const skippedBlacklist = args.retryBlacklist ? 0 : blacklisted;
-  return {
-    completed,
-    skippedExisting,
-    blacklisted,
-    skippedBlacklist,
-    missing: Math.max(0, wosids.length - completed - skippedBlacklist),
-  };
-}
-
-function parseWorkSummary(paths, wosids, work, args) {
-  const stats = parseStats(paths, wosids, args);
-  const dbStats = wosDataDbStats(args.dbPath, args.blacklistDbPath);
-  const firstIndex = work[0]?.index || 0;
-  const lastIndex = work[work.length - 1]?.index || 0;
-  return {
-    dbPath: args.dbPath,
-    blacklistDbPath: args.blacklistDbPath,
-    dbRecordCount: dbStats.recordCount || 0,
-    dbBlacklistCount: dbStats.blacklistCount || 0,
-    total: wosids.length,
-    completed: stats.completed,
-    skipped: stats.skippedExisting + stats.skippedBlacklist,
-    skippedExisting: stats.skippedExisting,
-    skippedBlacklist: stats.skippedBlacklist,
-    blacklisted: stats.blacklisted,
-    missing: stats.missing,
-    selected: work.length,
-    firstIndex,
-    lastIndex,
-    concurrency: args.concurrency,
-    browserRestartEvery: args.browserRestartEvery,
-    memoryCheckEvery: args.memoryCheckEvery,
-    maxRssMb: args.maxRssMb,
-  };
-}
-
-function printParseWorkSummary(summary, write = console.error) {
-  const range = summary.selected ? `${summary.firstIndex}-${summary.lastIndex}` : "none";
-  const label = (value) => color("1;36", value.padEnd(20), process.stderr);
-  write([
-    "WOS data records:",
-    `  ${label("total")}${summary.total}`,
-    `  ${label("skipped")}${summary.skipped}`,
-    `  ${label("blacklisted")}${summary.blacklisted}`,
-    `  ${label("missing")}${summary.missing}`,
-    `  ${label("selected")}${summary.selected}`,
-    `  ${label("range")}${range}`,
-    `  ${label("dbRecords")}${summary.dbRecordCount}`,
-    `  ${label("dbBlacklist")}${summary.dbBlacklistCount}`,
-    `  ${label("db")}${summary.dbPath}`,
-    `  ${label("blacklistDb")}${summary.blacklistDbPath}`,
-    `  ${label("concurrency")}${summary.concurrency}`,
-    `  ${label("browserRestartEvery")}${summary.browserRestartEvery || "off"}`,
-    `  ${label("memoryCheckEvery")}${summary.memoryCheckEvery || "off"}`,
-    `  ${label("maxRssMb")}${summary.maxRssMb || "off"}`,
-  ].join("\n"));
-}
-
-function importParsedWosData(args, taskId, wosids = []) {
-  const linked = linkExistingWosDataSources({
-    dbPath: args.dbPath,
-    wosids,
-    taskId,
-  });
-  return {
-    ok: true,
-    dbPath: args.dbPath,
-    taskId,
-    total: 0,
-    imported: 0,
-    skipped: 0,
-    linked: linked.linked || 0,
-    sourceLinked: linked.linked || 0,
-  };
-}
-
-function runWosDataImport(args) {
-  if (args.clearBlacklist) {
-    return clearWosDataBlacklist({
-      dbPath: args.dbPath,
-      blacklistDbPath: args.blacklistDbPath,
-    });
-  }
-  if (args.unblacklistWosId) {
-    return removeWosDataBlacklist({
-      dbPath: args.dbPath,
-      blacklistDbPath: args.blacklistDbPath,
-      wosid: args.unblacklistWosId,
-    });
-  }
-  if (args.blacklistQuery) {
-    return queryWosDataBlacklist({
-      dbPath: args.dbPath,
-      blacklistDbPath: args.blacklistDbPath,
-      limit: args.limit || 50,
-    });
-  }
-  if (args.queryWosId) {
-    return queryWosDataByWosId({
-      dbPath: args.dbPath,
-      wosid: args.queryWosId,
-    });
-  }
-  if (args.sqlQuery) {
-    return queryWosDataDatabase({
-      dbPath: args.dbPath,
-      sql: args.sqlQuery,
-      limit: args.limit || 50,
-    });
-  }
-  if (args.mergeDbPath) {
-    return mergeWosDataDatabase({
-      dbPath: args.dbPath,
-      sourceDbPath: args.mergeDbPath,
-      force: args.force,
-    });
-  }
-  throw new Error("Missing wosdata operation: use --merge-db, --wosid, --query, --blacklist, --unblacklist, or --clear-blacklist");
 }
 
 function sleep(ms) {
@@ -2369,11 +2201,6 @@ function chunkItemsByCount(items, count) {
   return chunks;
 }
 
-function currentProcessRssMb() {
-  const rss = Number(process.memoryUsage?.().rss || 0);
-  return rss > 0 ? Math.round(rss / (1024 * 1024)) : 0;
-}
-
 function formatRuntime(ms) {
   const totalSeconds = Math.max(0, Math.round((Number(ms) || 0) / 1000));
   const hours = Math.floor(totalSeconds / 3600);
@@ -2382,18 +2209,6 @@ function formatRuntime(ms) {
   if (hours) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
   if (minutes) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
   return `${seconds}s`;
-}
-
-function effectiveParseChunkSize(args) {
-  const restartSize = Math.max(0, Number(args?.browserRestartEvery) || 0);
-  const memoryCheckSize = Math.max(0, Number(args?.memoryCheckEvery) || 0);
-  const size = [restartSize, memoryCheckSize].filter((value) => value > 0).reduce((min, value) => Math.min(min, value), Infinity);
-  return Number.isFinite(size) ? size : 0;
-}
-
-function shouldRestartParseForMemory(args, rssMb = currentProcessRssMb()) {
-  const maxRssMb = Math.max(0, Number(args?.maxRssMb) || 0);
-  return Boolean(maxRssMb && rssMb >= maxRssMb);
 }
 
 function batchFileName(uuid, markFrom, markTo, extension = "txt") {
@@ -2414,6 +2229,10 @@ function rawBatchPath(paths, uuid, markFrom, markTo) {
   return path.join(rawBatchDir(paths, uuid), batchFileName(uuid, markFrom, markTo));
 }
 
+function rawUuidCompleteMarkerPath(paths, uuid) {
+  return path.join(rawBatchDir(paths, uuid), `${safeFilePart(uuid)}_complete.json`);
+}
+
 function bibBatchDir(paths, uuid) {
   if (!uuid) throw new Error("Missing BibTeX batch UUID");
   const safeUuid = safeFilePart(uuid);
@@ -2428,14 +2247,23 @@ function batchFileStart(fileName) {
   return Number(String(fileName || "").match(/_(\d+)_(\d+)\.[^.]+$/)?.[1] || 0);
 }
 
-function parseRawBatchFileName(fileName) {
-  const match = String(fileName || "").match(/_(\d+)_(\d+)\.txt$/);
+function parseBatchFileName(fileName, extension) {
+  const pattern = new RegExp(`_(\\d+)_(\\d+)\\.${extension}$`);
+  const match = String(fileName || "").match(pattern);
   if (!match) return null;
   return {
     fileName,
     batchStart: Number(match[1]),
     batchEnd: Number(match[2]),
   };
+}
+
+function parseRawBatchFileName(fileName) {
+  return parseBatchFileName(fileName, "txt");
+}
+
+function parseBibBatchFileName(fileName) {
+  return parseBatchFileName(fileName, "bib");
 }
 
 function rawBatchFiles(paths, uuid) {
@@ -2545,7 +2373,7 @@ function splitBatchRanges(startIndex, endIndex, batchSize = DEFAULT_BATCH_SIZE) 
   return batches;
 }
 
-function rawBatchPlanForRange(paths, uuid, startIndex = 1, endIndex = 0, batchSize = DEFAULT_BATCH_SIZE) {
+function batchPlanForRange(paths, uuid, startIndex, endIndex, batchSize, fileList, fileParser) {
   const start = Math.max(1, Number(startIndex) || 1);
   const end = Math.max(0, Number(endIndex) || 0);
   const selectedCount = end && end >= start ? end - start + 1 : 0;
@@ -2564,8 +2392,8 @@ function rawBatchPlanForRange(paths, uuid, startIndex = 1, endIndex = 0, batchSi
   };
   if (!uuid || !selectedCount) return empty;
 
-  const ranges = rawBatchFiles(paths, uuid)
-    .map(parseRawBatchFileName)
+  const ranges = fileList(paths, uuid)
+    .map(fileParser)
     .filter(Boolean)
     .filter((range) => range.batchEnd >= start && range.batchStart <= end)
     .sort((a, b) => a.batchStart - b.batchStart || a.batchEnd - b.batchEnd);
@@ -2613,6 +2441,14 @@ function rawBatchPlanForRange(paths, uuid, startIndex = 1, endIndex = 0, batchSi
   };
 }
 
+function rawBatchPlanForRange(paths, uuid, startIndex = 1, endIndex = 0, batchSize = DEFAULT_BATCH_SIZE) {
+  return batchPlanForRange(paths, uuid, startIndex, endIndex, batchSize, rawBatchFiles, parseRawBatchFileName);
+}
+
+function bibBatchPlanForRange(paths, uuid, startIndex = 1, endIndex = 0, batchSize = DEFAULT_BATCH_SIZE) {
+  return batchPlanForRange(paths, uuid, startIndex, endIndex, batchSize, bibBatchFiles, parseBibBatchFileName);
+}
+
 function parseExistingRawBatches(paths, uuid, options = {}) {
   const rows = [];
   const files = options.files || rawBatchCoverage(paths, uuid).files;
@@ -2648,6 +2484,47 @@ function finalWosIdsCsvExists(paths, identifier) {
 function finalBibExists(paths, uuid) {
   if (!uuid) return false;
   return fs.existsSync(bibFilePath(withRawSource(paths, uuid), uuid));
+}
+
+function writeRunSummary(paths, meta) {
+  const outputId = meta.uuid || meta.taskId;
+  const outputPaths = withRawSource(paths, outputId);
+  const summary = {
+    ok: true,
+    method: "wos-js-export-fetchTxtBatches",
+    ...meta,
+    files: {
+      rawDir: rawBatchDir(paths, outputId),
+      wosIdsDir: outputPaths.wosIdsDir,
+      progressLog: paths.progressLog,
+    },
+    finishedAt: new Date().toISOString(),
+  };
+  writeJson(paths.summary, summary);
+  return summary;
+}
+
+function writeRawUuidCompleteMarker(paths, meta = {}) {
+  const uuid = meta.uuid || "";
+  if (!uuid) return "";
+  const markerPath = rawUuidCompleteMarkerPath(paths, uuid);
+  writeJson(markerPath, {
+    ok: true,
+    uuid,
+    expectedCount: Number(meta.expectedCount) || 0,
+    availableCount: Number(meta.availableCount) || Number(meta.expectedCount) || 0,
+    selectedCount: Number(meta.selectedCount) || Number(meta.expectedCount) || 0,
+    fromIndex: Number(meta.fromIndex) || 1,
+    rangeStart: Number(meta.rangeStart) || Number(meta.fromIndex) || 1,
+    rangeEnd: Number(meta.rangeEnd) || 0,
+    completedAt: new Date().toISOString(),
+  });
+  return markerPath;
+}
+
+function readRawUuidCompleteMarker(paths, uuid) {
+  if (!uuid) return null;
+  return readJson(rawUuidCompleteMarkerPath(paths, uuid), null);
 }
 
 function writeOutputs(paths, rows, meta) {
@@ -2818,6 +2695,21 @@ async function prepareWosSession(args, options = {}) {
   const report = options.report || console.error;
   const visible = Boolean(options.visible || args.headed);
   const recoverSid = options.recoverSid !== false;
+  const requestedUuid = String(args.uuid || "").trim();
+  if (
+    keepAlive
+    && sharedWosSession?.context
+    && requestedUuid
+    && sharedWosSession.lastUuid
+    && sharedWosSession.lastUuid !== requestedUuid
+    && args.sidSource === "config"
+  ) {
+    const rotated = advanceSavedSid(args);
+    if (rotated) {
+      report(`WOS UUID changed from ${sharedWosSession.lastUuid} to ${requestedUuid}; switched to next saved SID (${rotated.sidPoolIndex + 1}/${rotated.sidPoolCount}).`);
+      await closeSharedWosSession();
+    }
+  }
   if (keepAlive && sharedWosSession?.context) {
     const page = sharedWosSession.page || sharedWosSession.context.pages()[0] || await sharedWosSession.context.newPage();
     sharedWosSession.page = page;
@@ -2875,7 +2767,7 @@ async function prepareWosSession(args, options = {}) {
     applyValidatedWosOrigin(args, status);
     if (!visible) await hideWosWindow(page);
     if (keepAlive) {
-      sharedWosSession = { context, page };
+      sharedWosSession = { context, page, lastUuid: requestedUuid };
       return { context, page, status, close: async () => {} };
     }
     return { context, page, status, close: async () => releaseWosContext(context) };
@@ -3002,43 +2894,6 @@ async function readSummaryInfo(page, args) {
   });
 }
 
-async function warmUpWosQueryPage(page, args, rowText = DEFAULT_PARSE_CONNECTIVITY_QUERY) {
-  await ensureWosJsOnPage(page, args);
-  const probe = await page.evaluate(async (queryText) => {
-    if (!window.wos?.query?.openQueryPage) {
-      throw new Error("wos.js query API missing: window.wos.query.openQueryPage");
-    }
-    await window.wos.query.openQueryPage(queryText);
-    return {
-      rowText: queryText,
-      href: window.location.href,
-      status: window.location.pathname.includes("/wos/woscc/general-summary") ? "routed" : "unknown",
-      sid: window.sessionData?.BasicProperties?.SID || "",
-    };
-  }, rowText);
-  const searchInfoReady = await page.waitForSelector('div[data-ta="search-info"]', {
-    state: "attached",
-    timeout: Math.min(args.recordTimeoutMs || args.timeoutMs, 5000),
-  }).then(() => true).catch(() => false);
-  await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
-  let info = null;
-  if (searchInfoReady) {
-    try {
-      info = await readSummaryInfo(page, { ...args, timeoutMs: Math.min(args.timeoutMs, 5000) });
-    } catch (_) {
-      info = null;
-    }
-  }
-  return {
-    rowText,
-    href: info?.href || probe.href,
-    countText: info?.countText || "",
-    expectedCount: info?.expectedCount || 0,
-    status: info?.status || probe.status,
-    searchInfoReady,
-  };
-}
-
 function randomUppercaseLetters(length = 4) {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   let value = "";
@@ -3046,24 +2901,6 @@ function randomUppercaseLetters(length = 4) {
     value += alphabet[Math.floor(Math.random() * alphabet.length)];
   }
   return value;
-}
-
-async function runWosRecoveryBuildQuery(page, args, expr = `AB=${randomUppercaseLetters(4)}`) {
-  await ensureWosJsOnPage(page, args);
-  const result = await page.evaluate(async (queryText) => {
-    if (!window.wos?.query?.buildQuery) {
-      throw new Error("wos.js query API missing: window.wos.query.buildQuery");
-    }
-    return window.wos.query.buildQuery(queryText);
-  }, expr);
-  return {
-    expr,
-    uuid: result?.uuid || "",
-    ref_count: Number(result?.ref_count || 0) || 0,
-    rowText: result?.rowText || expr,
-    status: result?.status || "",
-    error_code: result?.error_code || "",
-  };
 }
 
 async function prepareWosRequestContext(page, args) {
@@ -3094,10 +2931,9 @@ function pageContextUuid(context, fallbackUuid) {
 }
 
 async function exportFromWos(args, paths) {
-  const authSpinner = createSpinner("Validating WOS authentication");
+  const authSpinner = createSpinner(authValidationMessage(args));
   let session = null;
   let page = null;
-  const rows = [];
   let info = null;
   let batchProgress = null;
   let summarySpinner = null;
@@ -3138,11 +2974,6 @@ async function exportFromWos(args, paths) {
     const resumePlan = rawBatchPlanForRange(paths, info.uuid, range.startIndex, range.endIndex, batchSize);
     const resumedCount = resumePlan.coveredCount;
     if (resumePlan.presentFiles.length) {
-      appendRows(rows, parseExistingRawBatches(paths, info.uuid, {
-        files: resumePlan.presentFiles,
-        startIndex: range.startIndex,
-        endIndex: range.endIndex,
-      }));
       appendProgress(paths, {
         phase: "resume-raw",
         uuid: info.uuid,
@@ -3152,7 +2983,6 @@ async function exportFromWos(args, paths) {
         plannedBatches: resumePlan.plannedBatchCount,
         missingBatchCount: resumePlan.missingBatches.length,
         coveredCount: resumePlan.coveredCount,
-        parsed: rows.length,
       });
       console.error(`WOS raw resume: ${resumePlan.presentFiles.length}/${resumePlan.plannedBatchCount} TXT batches present; ${resumePlan.missingBatches.length} missing`);
     }
@@ -3161,17 +2991,15 @@ async function exportFromWos(args, paths) {
     const persistTxtBatch = (batch, sourcePhase = "batch") => {
       const markFrom = Number(batch.markFrom) || 0;
       const markTo = Number(batch.markTo) || 0;
-      if (!markFrom || !markTo) return { parsed: 0, saved: false };
+      if (!markFrom || !markTo) return { saved: false };
       const key = batchKey(markFrom, markTo);
-      if (persistedBatchKeys.has(key)) return { parsed: 0, saved: false };
+      if (persistedBatchKeys.has(key)) return { saved: false };
       const rawPath = rawBatchPath(paths, info.uuid, markFrom, markTo);
       writeFileAtomic(rawPath, String(batch.text || ""));
-      const ids = parseExportText(batch.text, markFrom, markTo);
-      appendRows(rows, ids);
       persistedBatchKeys.add(key);
-      appendProgress(paths, { phase: sourcePhase, markFrom, markTo, parsed: ids.length, rawPath });
-      if (!isInteractive()) console.error(`export ${markFrom}-${markTo}: parsed ${ids.length} WOS IDs`);
-      return { parsed: ids.length, saved: true };
+      appendProgress(paths, { phase: sourcePhase, markFrom, markTo, rawPath });
+      if (!isInteractive()) console.error(`export ${markFrom}-${markTo}: saved ${rawPath}`);
+      return { saved: true };
     };
     let sidSwitchCount = 0;
     const switchSidAfterTxtExportFailure = async (missingBatch, error) => {
@@ -3205,7 +3033,7 @@ async function exportFromWos(args, paths) {
           `Waiting for a new saved SID and checking again every ${Math.ceil(SID_POOL_WAIT_INTERVAL_MS / 1000)} seconds.`,
         ]);
       }
-      const switchSpinner = createSpinner("Validating WOS authentication after SID switch");
+      const switchSpinner = createSpinner(authValidationMessage(args, "Validating WOS authentication after SID switch"));
       let refreshedContext = null;
       let refreshedUuid = "";
       try {
@@ -3307,19 +3135,11 @@ async function exportFromWos(args, paths) {
         if (!fs.existsSync(targetRawPath)) return false;
         const key = batchKey(missingBatch.markFrom, missingBatch.markTo);
         if (persistedBatchKeys.has(key)) return true;
-        const fileName = batchFileName(info.uuid, missingBatch.markFrom, missingBatch.markTo);
-        const parsedRows = parseExistingRawBatches(paths, info.uuid, {
-          files: [fileName],
-          startIndex: missingBatch.markFrom,
-          endIndex: missingBatch.markTo,
-        });
-        appendRows(rows, parsedRows);
         appendProgress(paths, {
           phase: sourcePhase,
           uuid: info.uuid,
           markFrom: missingBatch.markFrom,
           markTo: missingBatch.markTo,
-          parsed: parsedRows.length,
           rawPath: targetRawPath,
         });
         updateMissingProgress({ saved: true }, missingBatch.markFrom, missingBatch.markTo);
@@ -3400,13 +3220,12 @@ async function exportFromWos(args, paths) {
     await session?.close?.();
   }
   return {
-    rows,
     info,
   };
 }
 
 async function exportBibFromWos(args, paths) {
-  const authSpinner = createSpinner("Validating WOS authentication");
+  const authSpinner = createSpinner(authValidationMessage(args));
   let session = null;
   let progress = null;
   const files = [];
@@ -3419,6 +3238,7 @@ async function exportBibFromWos(args, paths) {
   let selectedCount = 0;
   let downloadedEntries = 0;
   let completedBatches = 0;
+  let resumedCount = 0;
   try {
     session = await prepareWosSession(args);
     const page = session.page;
@@ -3459,10 +3279,34 @@ async function exportBibFromWos(args, paths) {
       batchSize: DEFAULT_BATCH_SIZE,
     });
     const batchSize = DEFAULT_BATCH_SIZE;
+    const resumePlan = bibBatchPlanForRange(paths, uuid, startIndex, finalIndex, batchSize);
+    resumedCount = resumePlan.coveredCount;
+    const resumedFiles = resumePlan.presentFiles.map((fileName) => path.join(bibBatchDir(paths, uuid), fileName));
+    const fileKeys = new Set();
+    for (const filePath of resumedFiles) {
+      files.push(filePath);
+      fileKeys.add(path.basename(filePath));
+      downloadedEntries += parseBibEntryCount(fs.readFileSync(filePath, "utf8"));
+    }
+    if (resumePlan.presentFiles.length) {
+      appendProgress(paths, {
+        phase: "resume-bib-raw",
+        uuid,
+        startIndex,
+        endIndex: finalIndex,
+        files: resumePlan.presentFiles.length,
+        plannedBatches: resumePlan.plannedBatchCount,
+        missingBatchCount: resumePlan.missingBatches.length,
+        coveredCount: resumePlan.coveredCount,
+        entries: downloadedEntries,
+      });
+      console.error(`WOS BibTeX resume: ${resumePlan.presentFiles.length}/${resumePlan.plannedBatchCount} BibTeX batches present; ${resumePlan.missingBatches.length} missing`);
+    }
+    const remainingCount = resumePlan.missingCount;
     const { batches: totalBatches } = reportDownloadPlan(
       "WOS BibTeX records",
       expectedCount,
-      selectedCount,
+      remainingCount,
       batchSize
     );
     appendProgress(paths, {
@@ -3470,61 +3314,102 @@ async function exportBibFromWos(args, paths) {
       label: "WOS BibTeX records",
       availableCount: expectedCount,
       selectedCount,
-      batchCount: totalBatches,
+      resumedCount,
+      remainingCount,
+      batchCount: resumePlan.missingBatches.length,
+      plannedBatches: resumePlan.plannedBatchCount,
+      presentBatches: resumePlan.presentFiles.length,
+      missingBatchCount: resumePlan.missingBatches.length,
+      firstMissingBatch: resumePlan.missingBatches[0] || null,
       batchSize,
     });
-    progress = createProgress(
-      "Downloading WOS BibTeX",
-      totalBatches || 1
-    );
-    const exportResult = await exportBibBatchesViaWosJs(page, {
-      uuid,
-      markFrom: startIndex,
-      markTo: finalIndex || 0,
-      batchSize,
-      sortBy: args.sortBy,
-      filters: "authorTitleSource",
-      onProgress(event) {
-        appendProgress(paths, { phase: "wosjs-bib-progress", ...event });
-        if (event.phase === "start" && event.totalBatches) {
-          progress.setTotal(event.totalBatches);
+    if (remainingCount) {
+      progress = createProgress(
+        "Downloading WOS BibTeX",
+        totalBatches || resumePlan.missingBatches.length || 1
+      );
+      const persistBibBatch = (batch) => {
+        const entryCount = parseBibEntryCount(batch.text);
+        if (!entryCount) {
+          appendProgress(paths, { phase: "bib-empty-batch", markFrom: batch.markFrom, requestedMarkTo: batch.markTo });
+          if (!files.length) throw new Error(`No BibTeX entries returned for UUID ${uuid} at ${batch.markFrom}-${batch.markTo}`);
+          if (!isInteractive()) console.error(`bib export ${batch.markFrom}-${batch.markTo}: no entries`);
+          return false;
         }
-        if (event.phase === "batch") {
-          progress.update(event.completedBatches || 0, `${event.current}-${event.batchEnd}`);
+        const markTo = batch.markFrom + entryCount - 1;
+        const fileName = batchFileName(uuid, batch.markFrom, markTo, "bib");
+        const bibPath = bibBatchPath(paths, uuid, batch.markFrom, markTo);
+        if (!fileKeys.has(fileName)) {
+          writeFileAtomic(bibPath, batch.text);
+          files.push(bibPath);
+          fileKeys.add(fileName);
+          downloadedEntries += entryCount;
+          completedBatches += 1;
         }
-      },
-    });
-    if (!expectedCount && exportResult.totalRecords) expectedCount = exportResult.totalRecords;
-
-    for (const batch of exportResult.batches) {
-      const entryCount = parseBibEntryCount(batch.text);
-      if (!entryCount) {
-        appendProgress(paths, { phase: "bib-empty-batch", markFrom: batch.markFrom, requestedMarkTo: batch.markTo });
-        if (!files.length) throw new Error(`No BibTeX entries returned for UUID ${uuid} at ${batch.markFrom}-${batch.markTo}`);
-        if (!isInteractive()) console.error(`bib export ${batch.markFrom}-${batch.markTo}: no entries`);
-        break;
+        appendProgress(paths, {
+          phase: "bib-batch",
+          markFrom: batch.markFrom,
+          markTo,
+          requestedMarkTo: batch.markTo,
+          entries: entryCount,
+          bibPath,
+        });
+        progress.update(completedBatches, `${batch.markFrom}-${markTo}: ${entryCount} entries`);
+        if (!isInteractive()) console.error(`bib export ${batch.markFrom}-${markTo}: ${entryCount} entries -> ${bibPath}`);
+        return true;
+      };
+      const consumeExistingMissingBatch = (missingBatch) => {
+        const targetPath = bibBatchPath(paths, uuid, missingBatch.markFrom, missingBatch.markTo);
+        if (!fs.existsSync(targetPath)) return false;
+        const fileName = path.basename(targetPath);
+        if (!fileKeys.has(fileName)) {
+          files.push(targetPath);
+          fileKeys.add(fileName);
+          downloadedEntries += parseBibEntryCount(fs.readFileSync(targetPath, "utf8"));
+          completedBatches += 1;
+        }
+        appendProgress(paths, {
+          phase: "resume-bib-raw-before-request",
+          uuid,
+          markFrom: missingBatch.markFrom,
+          markTo: missingBatch.markTo,
+          bibPath: targetPath,
+        });
+        progress.update(completedBatches, `${missingBatch.markFrom}-${missingBatch.markTo}`);
+        return true;
+      };
+      for (const missingBatch of resumePlan.missingBatches) {
+        if (consumeExistingMissingBatch(missingBatch)) continue;
+        const exportResult = await exportBibBatchesViaWosJs(page, {
+          uuid,
+          markFrom: missingBatch.markFrom,
+          markTo: missingBatch.markTo,
+          batchSize,
+          sortBy: args.sortBy,
+          filters: "authorTitleSource",
+          onProgress(event) {
+            appendProgress(paths, { phase: "wosjs-bib-progress", ...event });
+            if (event.phase === "batch") {
+              progress.update(completedBatches + (event.completedBatches || 0), `${event.current}-${event.batchEnd}`);
+            }
+          },
+        });
+        if (!expectedCount && exportResult.totalRecords) expectedCount = exportResult.totalRecords;
+        for (const batch of exportResult.batches) persistBibBatch(batch);
       }
-      const markTo = batch.markFrom + entryCount - 1;
-      const bibPath = bibBatchPath(paths, uuid, batch.markFrom, markTo);
-      writeFileAtomic(bibPath, batch.text);
-      files.push(bibPath);
-      downloadedEntries += entryCount;
-      completedBatches += 1;
-      appendProgress(paths, {
-        phase: "bib-batch",
-        markFrom: batch.markFrom,
-        markTo,
-        requestedMarkTo: batch.markTo,
-        entries: entryCount,
-        bibPath,
-      });
-      progress.update(completedBatches, `${batch.markFrom}-${markTo}: ${entryCount} entries`);
-      if (!isInteractive()) console.error(`bib export ${batch.markFrom}-${markTo}: ${entryCount} entries -> ${bibPath}`);
+      const finalPlan = bibBatchPlanForRange(paths, uuid, startIndex, finalIndex, batchSize);
+      if (finalPlan.missingBatches.length) {
+        const firstMissing = finalPlan.missingBatches[0];
+        throw new Error(`Incomplete raw BibTeX batches after export: missing ${firstMissing.markFrom}-${firstMissing.markTo}`);
+      }
+      progress.stop("WOS BibTeX download complete");
+      progress = null;
+    } else if (!isInteractive()) {
+      console.error("WOS BibTeX records already covered by raw batches.");
     }
     if (selectedCount && downloadedEntries < selectedCount) {
       throw new Error(`Incomplete BibTeX export for UUID ${uuid}: downloaded ${downloadedEntries}/${selectedCount} records`);
     }
-    progress.stop("WOS BibTeX download complete");
   } finally {
     authSpinner.stop();
     progress?.stop("WOS BibTeX download stopped");
@@ -3539,6 +3424,10 @@ async function exportBibFromWos(args, paths) {
       requestedCount,
       href: args.url,
       rowText: bounded ? `${startIndex}-${finalIndex}` : "",
+      fromIndex: startIndex,
+      rangeStart: startIndex,
+      rangeEnd: finalIndex,
+      resumedCount,
       requestMode: true,
       completedBatches,
     },
@@ -3546,508 +3435,191 @@ async function exportBibFromWos(args, paths) {
   };
 }
 
+async function inspectWosUuid(args) {
+  await prepareWosExport(args);
+  const session = await prepareWosSession(args);
+  try {
+    const context = await prepareWosRequestContext(session.page, args);
+    const info = await readSummaryInfo(session.page, args);
+    const expectedCount = info.expectedCount || context.expectedCount || 0;
+    const rangeStart = args.fromIndex || 1;
+    const rangeEnd = args.limit
+      ? Math.min(rangeStart + Math.max(0, Number(args.limit) || 0) - 1, expectedCount)
+      : expectedCount;
+    return {
+      uuid: info.uuid || context.uuid || args.uuid,
+      expectedCount,
+      availableCount: expectedCount,
+      selectedCount: Math.max(0, rangeEnd - rangeStart + 1),
+      fromIndex: rangeStart,
+      rangeStart,
+      rangeEnd,
+      href: info.href || args.url,
+      rowText: info.rowText || "",
+    };
+  } finally {
+    await session.close?.();
+  }
+}
+
+function plannedTxtRangeFromMeta(meta = {}) {
+  const rangeStart = Math.max(1, Number(meta.rangeStart) || Number(meta.fromIndex) || 1);
+  const rangeEnd = Math.max(0, Number(meta.rangeEnd) || 0)
+    || (meta.expectedCount ? rangeStart + Math.max(0, Number(meta.expectedCount) || 0) - 1 : 0);
+  return { rangeStart, rangeEnd };
+}
+
+function rawUuidDownloadState(paths, uuid, meta = {}) {
+  const { rangeStart, rangeEnd } = plannedTxtRangeFromMeta(meta);
+  if (!uuid || !rangeEnd) return { complete: false, rangeStart, rangeEnd, plan: null };
+  const plan = rawBatchPlanForRange(paths, uuid, rangeStart, rangeEnd, DEFAULT_BATCH_SIZE);
+  return { complete: plan.complete, rangeStart, rangeEnd, plan };
+}
+
+async function runBatchUuidTxt(args) {
+  const csvFiles = findUuidCsvFiles(args.searchRoot);
+  if (!csvFiles.length) {
+    throw new CliMessageError(`No uuid.csv files found under ${args.searchRoot}`);
+  }
+  const uuids = dedupeSidValues(csvFiles.flatMap(readUuidCsv));
+  if (!uuids.length) {
+    throw new CliMessageError(`No UUIDs found in uuid.csv files under ${args.searchRoot}`);
+  }
+
+  const paths = createRunLayout(args);
+  const batchManifest = {
+    command: "iiaide-wos",
+    operation: "batch-run",
+    args: manifestArgs(args),
+    task: {
+      taskId: args.taskId,
+      label: args.taskLabel,
+      taskDir: paths.taskDir,
+      tasksRoot: args.tasksRoot,
+    },
+    batch: {
+      searchRoot: args.searchRoot,
+      csvFiles,
+      totalUuids: uuids.length,
+    },
+    createdAt: new Date().toISOString(),
+  };
+  writeJson(paths.manifest, batchManifest);
+  upsertTaskIndex(args, { status: "batch-running", lastError: "" });
+  appendProgress(paths, { phase: "batch-uuid-discovered", searchRoot: args.searchRoot, csvFiles, totalUuids: uuids.length });
+
+  const progress = createProgress("Batch UUID TXT", uuids.length);
+  const results = [];
+  let completed = 0;
+  let skipped = 0;
+  let resumed = 0;
+
+  try {
+    for (const [index, uuid] of uuids.entries()) {
+      const step = `${index + 1}/${uuids.length}`;
+      progress.update(index, `${step} ${uuid}`);
+      const marker = readRawUuidCompleteMarker(paths, uuid);
+      let meta = marker || {};
+      let state = rawUuidDownloadState(paths, uuid, meta);
+      appendProgress(paths, { phase: "batch-uuid-start", uuid, index: index + 1, total: uuids.length, marker: Boolean(marker) });
+
+      if (marker && state.complete) {
+        skipped += 1;
+        completed += 1;
+        progress.update(index + 1, `${step} skipped ${uuid}`);
+        appendProgress(paths, { phase: "batch-uuid-skip-complete", uuid, index: index + 1, total: uuids.length });
+        results.push({ uuid, status: "skipped" });
+        continue;
+      }
+
+      if (!meta.expectedCount || !state.complete) {
+        const inspectArgs = {
+          ...args,
+          command: "run",
+          uuid,
+          url: buildSummaryUrl(args.baseUrl, uuid, args.sortBy),
+          force: false,
+          outDir: args.outDir,
+        };
+        meta = await inspectWosUuid(inspectArgs);
+        state = rawUuidDownloadState(paths, uuid, meta);
+        if (state.complete) {
+          writeRawUuidCompleteMarker(paths, { ...meta, uuid });
+          skipped += 1;
+          completed += 1;
+          progress.update(index + 1, `${step} verified ${uuid}`);
+          appendProgress(paths, { phase: "batch-uuid-verified-complete", uuid, index: index + 1, total: uuids.length });
+          results.push({ uuid, status: "skipped" });
+          continue;
+        }
+      }
+
+      const hadRaw = rawBatchFiles(paths, uuid).length > 0;
+      const runArgs = {
+        ...args,
+        command: "run",
+        uuid,
+        url: buildSummaryUrl(args.baseUrl, uuid, args.sortBy),
+        force: false,
+        outDir: args.outDir,
+      };
+      const summary = await run(runArgs);
+      writeRawUuidCompleteMarker(paths, summary);
+      completed += 1;
+      if (hadRaw) resumed += 1;
+      progress.update(index + 1, `${step} done ${uuid}`);
+      appendProgress(paths, {
+        phase: "batch-uuid-complete",
+        uuid,
+        index: index + 1,
+        total: uuids.length,
+        resumed: hadRaw,
+        expectedCount: summary.expectedCount,
+      });
+      results.push({ uuid, status: hadRaw ? "resumed" : "downloaded" });
+    }
+  } catch (error) {
+    progress.stop("Batch UUID TXT stopped");
+    appendProgress(paths, { phase: "batch-uuid-failed", message: error?.message || String(error), completed, skipped, resumed });
+    upsertTaskIndex(args, { status: "batch-failed", lastError: error?.message || String(error) });
+    throw error;
+  }
+
+  progress.stop("Batch UUID TXT complete");
+  const summary = {
+    ok: true,
+    method: "batch-uuid-csv-txt",
+    taskId: args.taskId,
+    taskLabel: args.taskLabel,
+    searchRoot: args.searchRoot,
+    csvFiles,
+    totalUuids: uuids.length,
+    completed,
+    skipped,
+    resumed,
+    files: {
+      rawRoot: paths.rawRoot,
+      progressLog: paths.progressLog,
+    },
+    results,
+    finishedAt: new Date().toISOString(),
+  };
+  writeJson(paths.manifest, batchManifest);
+  writeJson(paths.summary, summary);
+  upsertTaskIndex(args, { status: "batch-completed", lastError: "" });
+  return summary;
+}
+
 function combineBibFiles(paths, uuid, files) {
   const outputPaths = withRawSource(paths, uuid);
   const combinedPath = bibFilePath(outputPaths, uuid);
-  const combined = files
+  const combined = [...files]
+    .sort((a, b) => batchFileStart(path.basename(a)) - batchFileStart(path.basename(b)))
     .map((filePath) => fs.readFileSync(filePath, "utf8").trim())
     .filter(Boolean)
     .join("\n\n");
   writeFileAtomic(combinedPath, combined + (combined ? "\n" : ""));
   return combinedPath;
-}
-
-function remainingRecordTimeout(deadline, timeoutMs, wosid) {
-  const remaining = deadline - Date.now();
-  if (remaining <= 0) {
-    throw new Error(`Full record timeout after ${timeoutMs}ms: ${wosid}`);
-  }
-  return remaining;
-}
-
-async function createReusableRecordPage(context, args) {
-  const timeoutMs = args.recordTimeoutMs || args.timeoutMs;
-  const page = await context.newPage();
-  page.setDefaultTimeout(timeoutMs);
-  await page.goto(`${args.baseUrl}/wos/`, {
-    waitUntil: "domcontentloaded",
-    timeout: Math.min(10000, timeoutMs),
-  });
-  await dismissWosPopups(page);
-  await ensureWosJsOnPage(page, args);
-  return page;
-}
-
-async function extractOneRecordInfo(page, args, wosid) {
-  const timeoutMs = args.recordTimeoutMs || args.timeoutMs;
-  const deadline = Date.now() + timeoutMs;
-  page.setDefaultTimeout(timeoutMs);
-  try {
-    await ensureWosJsOnPage(page, args);
-    const raw = await page.evaluate(async (targetWosId) => {
-      if (!window.wos?.record?.viewFullRecordByWosId || !window.wos?.record?.parseCurrentFullRecordPage) {
-        throw new Error("wos.js record parser API missing: window.wos.record.parseCurrentFullRecordPage");
-      }
-
-      const objectValues = (value) => Object.values(value || {}).filter((item) => (
-        item && typeof item === "object" && !Array.isArray(item)
-      ));
-      const hasRecordContent = (record) => {
-        if (!record || typeof record !== "object" || Array.isArray(record)) return false;
-        if (record.wosid || record.UT || record.AccessionNumber || record.identifiers?.accessionNumber) return true;
-        if (record.title || record.articleTitle || record.abstract) return true;
-        if (Array.isArray(record.authors) && record.authors.length) return true;
-        return Object.keys(record).length > 2;
-      };
-      const pickRecord = (parsed, preferredWosId) => {
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-        const candidates = [
-          parsed[preferredWosId],
-          parsed[targetWosId],
-          ...objectValues(parsed),
-          parsed,
-        ];
-        return candidates.find(hasRecordContent) || null;
-      };
-
-      const diagnostics = [];
-      let openedWosId = "";
-      try {
-        openedWosId = await window.wos.record.viewFullRecordByWosId(targetWosId);
-      } catch (error) {
-        diagnostics.push(`viewFullRecordByWosId: ${error?.message || error}`);
-      }
-
-      const currentWosId = () => window.wos.record.currentWosId || openedWosId || targetWosId;
-      let record = null;
-      let parseMethod = "";
-      try {
-        const parsed = await window.wos.record.parseCurrentFullRecordPage(targetWosId);
-        record = pickRecord(parsed, currentWosId());
-        if (record) parseMethod = "dom";
-      } catch (error) {
-        diagnostics.push(`parseCurrentFullRecordPage: ${error?.message || error}`);
-      }
-
-      if (!record && typeof window.wos.record.fetchFullRecordJsonByWosId === "function") {
-        try {
-          const fetched = await window.wos.record.fetchFullRecordJsonByWosId(targetWosId);
-          record = pickRecord(fetched, currentWosId());
-          if (record) parseMethod = "export-api";
-        } catch (error) {
-          diagnostics.push(`fetchFullRecordJsonByWosId: ${error?.message || error}`);
-        }
-      }
-
-      if (!record) {
-        throw new Error(`No full-record JSON parsed for ${targetWosId}${diagnostics.length ? ` (${diagnostics.join("; ")})` : ""}`);
-      }
-      return {
-        ...record,
-        wosid: currentWosId(),
-        _parseMethod: parseMethod,
-        url: location.href,
-      };
-    }, wosid);
-    raw.wosid = reconcileWosId(wosid, raw.wosid || raw.identifiers?.accessionNumber || raw.url) || wosid;
-    raw.fetchedAt = new Date().toISOString();
-    return raw;
-  } catch (error) {
-    if (/timeout/i.test(error?.message || "")) {
-      throw new Error(`Full record timeout after ${timeoutMs}ms: ${wosid}`);
-    }
-    throw error;
-  }
-}
-
-async function runPoolWithReusableRecordPages(items, concurrency, getSessionState, args, worker, beforeItem = null) {
-  let cursor = 0;
-  const workerCount = Math.min(concurrency, items.length);
-  const workers = Array.from({ length: workerCount }, async () => {
-    let page = null;
-    let pageGeneration = 0;
-    try {
-      while (cursor < items.length) {
-        const index = cursor;
-        cursor += 1;
-        if (typeof beforeItem === "function") await beforeItem(items[index], index);
-        const state = getSessionState();
-        if (!state?.session?.context) throw new Error("WOS parse session is not available");
-        if (!page || pageGeneration !== state.generation || page.isClosed?.()) {
-          await releaseWosPage(page);
-          page = await createReusableRecordPage(state.session.context, args);
-          pageGeneration = state.generation;
-        }
-        await worker(items[index], index, page);
-      }
-    } finally {
-      await releaseWosPage(page);
-    }
-  });
-  await Promise.all(workers);
-}
-
-async function runParse(args) {
-  const task = resolveTask(args);
-  args.taskId = task.taskId;
-  args.outDir = task.taskDir;
-  args.uuid = args.uuid || task.uuid;
-  args.url = args.url || task.url || (args.uuid ? buildSummaryUrl(args.baseUrl, args.uuid, args.sortBy) : "");
-  const paths = withRawSource(createRunLayout({ ...args, force: true }), args.uuid || task.uuid || task.taskId);
-  const wosidsPath = resolveWosIdsCsvPath(paths, args.uuid || task.uuid || task.taskId, args.wosidsCsv);
-  if (!fs.existsSync(wosidsPath)) throw new Error(`Missing WOSID CSV: ${wosidsPath}`);
-  const wosids = readWosIdsCsv(wosidsPath);
-  if (!wosids.length) throw new Error(`No WOS IDs found in ${wosidsPath}`);
-
-  const work = selectParseWork(paths, wosids, args);
-  const beforeStats = parseStats(paths, wosids, args);
-  printParseWorkSummary(parseWorkSummary(paths, wosids, work, args));
-  if (!work.length) {
-    const failures = [];
-    writeJson(paths.parseFailures, failures);
-    const sqlite = beforeStats.completed ? importParsedWosData(args, task.taskId, wosids) : null;
-    upsertTaskIndex(args, {
-      status: beforeStats.completed === wosids.length ? "parse-completed" : "parse-incomplete",
-      lastError: "",
-      uuid: args.uuid || task.uuid,
-      url: args.url || task.url,
-      expectedCount: task.expectedCount,
-      uniqueCount: task.uniqueCount,
-    });
-    return {
-      taskId: task.taskId,
-      taskDir: task.taskDir,
-      totalWosIds: wosids.length,
-      selected: 0,
-      parsed: 0,
-      completed: beforeStats.completed,
-      blacklisted: beforeStats.blacklisted,
-      skippedBlacklist: beforeStats.skippedBlacklist,
-      failed: 0,
-      dbPath: args.dbPath,
-      sqlite,
-      failures: paths.parseFailures,
-    };
-  }
-
-  if (!args.sid) {
-    await prepareWosExport(args);
-  }
-  appendProgress(paths, { phase: "parse-start", total: wosids.length, selected: work.length, completed: beforeStats.completed, skippedExisting: beforeStats.skippedExisting, blacklisted: beforeStats.blacklisted, skippedBlacklist: beforeStats.skippedBlacklist, retryBlacklist: args.retryBlacklist, reparseExisting: args.reparseExisting, wosidsCsv: wosidsPath });
-  upsertTaskIndex(args, {
-    status: "parse-running",
-    lastError: "",
-    uuid: args.uuid || task.uuid,
-    url: args.url || task.url,
-    expectedCount: task.expectedCount,
-    uniqueCount: task.uniqueCount,
-  });
-
-  const authSpinner = createSpinner("Validating WOS authentication");
-  let parseProgress = null;
-  let session = null;
-  let sessionGeneration = 0;
-  let processed = 0;
-  let parsed = 0;
-  let consecutiveParseFailures = 0;
-  let sidRecovery = null;
-  const failures = [];
-  const startParseSession = async (reason, chunkIndex = 0, chunksLength = 0, sessionOptions = {}) => {
-    const nextSession = await prepareWosSession(args, { report: console.error, ...sessionOptions });
-    try {
-      sessionGeneration += 1;
-      const warmup = await warmUpWosQueryPage(nextSession.page, args);
-      appendProgress(paths, {
-        phase: "parse-connectivity-query",
-        reason,
-        rowText: warmup.rowText,
-        href: warmup.href,
-        countText: warmup.countText,
-        status: warmup.status,
-        searchInfoReady: warmup.searchInfoReady,
-        chunk: chunkIndex || undefined,
-        chunks: chunksLength || undefined,
-      });
-      return nextSession;
-    } catch (error) {
-      await forceCloseWosSession(nextSession);
-      throw error;
-    }
-  };
-  const refreshSidAfterConsecutiveFailures = async (reasonText = `${PARSE_RECOVERY_CONSECUTIVE_FAILURES} consecutive WOSID page parses failed.`) => {
-    if (sidRecovery) return sidRecovery;
-    sidRecovery = (async () => {
-      writeRuntimeNotice("WOS parse recovery", [
-        reasonText,
-        "Closing Playwright and testing the current SID with a WOS query.",
-        sidBadge(args) ? `Current ${sidBadge(args)}` : "",
-      ]);
-      appendProgress(paths, { phase: "parse-sid-reconnect-start", consecutiveParseFailures, reason: reasonText });
-      await forceCloseWosSession(session);
-      session = null;
-      session = await prepareWosSession(args, { report: console.error });
-      sessionGeneration += 1;
-      const recoveryQuery = await runWosRecoveryBuildQuery(session.page, args);
-      appendProgress(paths, {
-        phase: "parse-recovery-build-query",
-        expr: recoveryQuery.expr,
-        status: recoveryQuery.status,
-        errorCode: recoveryQuery.error_code,
-        uuid: recoveryQuery.uuid,
-        refCount: recoveryQuery.ref_count,
-      });
-      if (recoveryQuery.error_code) {
-        if (isSidInvalidRecoveryErrorCode(recoveryQuery.error_code)) {
-          writeRuntimeNotice("WOS SID invalid", [
-            `error_code: ${recoveryQuery.error_code}`,
-            "Closing Playwright, removing this SID, and continuing with the next available saved SID.",
-          ]);
-          await forceCloseWosSession(session);
-          session = null;
-          const discarded = discardActiveConfigSid(args, `WOS recovery query failed: ${recoveryQuery.error_code}`, { force: true });
-          if (discarded && !discarded.sidPoolCount) {
-            writeRuntimeNotice("WOS SID pool empty", [
-              "No saved SID remains after removing the invalid SID.",
-              `Waiting for a new saved SID and checking again every ${Math.ceil(SID_POOL_WAIT_INTERVAL_MS / 1000)} seconds.`,
-            ]);
-            appendProgress(paths, {
-              phase: "parse-sid-pool-wait-start",
-              errorCode: recoveryQuery.error_code,
-              intervalMs: SID_POOL_WAIT_INTERVAL_MS,
-            });
-            const usable = await waitForUsableWosSession(args, {
-              intervalMs: SID_POOL_WAIT_INTERVAL_MS,
-              report: console.error,
-              openSession: () => startParseSession("sid-pool-refilled", 0, 0, { recoverSid: false }),
-              onPoll: ({ attempts, waitedMs, intervalMs, sidPoolCount }) => {
-                appendProgress(paths, {
-                  phase: "parse-sid-pool-wait",
-                  attempts,
-                  waitedMs,
-                  intervalMs,
-                  sidPoolCount,
-                });
-              },
-              onSidLoaded: (resumedSid) => {
-                writeRuntimeNotice("WOS SID pool refilled", [
-                  `Detected a new saved SID after ${formatRuntime(resumedSid.waitedMs)}.`,
-                  "Reopening WOS and continuing parse.",
-                  sidBadge(args) ? `Current ${sidBadge(args)}` : "",
-                ]);
-                appendProgress(paths, {
-                  phase: "parse-sid-pool-wait-completed",
-                  waitedMs: resumedSid.waitedMs,
-                  attempts: resumedSid.attempts,
-                  sidPoolCount: resumedSid.sidPoolCount,
-                  sidSource: resumedSid.sidSource,
-                });
-              },
-              onValidationFailure: ({ message }) => {
-                appendProgress(paths, {
-                  phase: "parse-sid-pool-refill-validation-failed",
-                  sidSource: args.sidSource,
-                  message,
-                });
-                writeRuntimeNotice("WOS SID pool refill failed", [
-                  "A new saved SID was detected, but WOS could not reopen with it.",
-                  "Removing that SID and waiting for another saved SID instead of returning to the menu.",
-                  message,
-                ]);
-              },
-            });
-            session = usable.session;
-            consecutiveParseFailures = 0;
-            appendProgress(paths, { phase: "parse-sid-reconnect-completed", sidSource: args.sidSource });
-            return;
-          }
-          args.sid = "";
-          args.sidSource = "";
-          delete process.env.WOS_SID;
-          throw new CliRestartRequestedError(`WOS recovery query failed: ${recoveryQuery.error_code}`, { omitSidArgs: true });
-        }
-        writeRuntimeNotice("WOS recovery inconclusive", [
-          `error_code: ${recoveryQuery.error_code}`,
-          "Reconnecting with the current SID and continuing parse.",
-        ]);
-        appendProgress(paths, {
-          phase: "parse-recovery-build-query-inconclusive",
-          errorCode: recoveryQuery.error_code,
-          action: "reconnect-current-sid",
-        });
-        await forceCloseWosSession(session);
-        session = null;
-        session = await startParseSession("recovery-query-inconclusive");
-      }
-      consecutiveParseFailures = 0;
-      appendProgress(paths, { phase: "parse-sid-reconnect-completed", sidSource: args.sidSource });
-    })().finally(() => {
-      sidRecovery = null;
-    });
-    return sidRecovery;
-  };
-  try {
-    session = await prepareWosSession(args);
-    sessionGeneration += 1;
-    authSpinner.succeed(authValidatedMessage(args));
-    parseProgress = createProgress("Parsing WOS data", work.length);
-    const chunkSize = effectiveParseChunkSize(args);
-    const chunks = chunkItemsByCount(work, chunkSize);
-    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
-      const chunk = chunks[chunkIndex];
-      if (!session) {
-        session = await startParseSession("browser-restart", chunkIndex + 1, chunks.length);
-        appendProgress(paths, { phase: "parse-browser-session-start", chunk: chunkIndex + 1, chunks: chunks.length });
-      }
-      await runPoolWithReusableRecordPages(chunk, args.concurrency, () => ({
-        session,
-        generation: sessionGeneration,
-      }), args, async (item, _workerIndex, page) => {
-        const { wosid, index } = item;
-        let recordProgressStatus = "ok";
-        if (!args.reparseExisting && wosDataRecordExists(args.dbPath, wosid)) {
-          recordProgressStatus = "skipped";
-          consecutiveParseFailures = 0;
-          appendProgress(paths, { phase: "parse-record", status: "skipped-existing", wosid, index, dbPath: args.dbPath });
-          if (!isInteractive()) {
-            console.error(`parse SKIP ${index}/${wosids.length} ${wosid}: already exists in ${args.dbPath}`);
-          }
-          return;
-        }
-        appendProgress(paths, { phase: "parse-record-start", wosid, index, total: wosids.length });
-        try {
-          const raw = await extractOneRecordInfo(page, args, wosid);
-          const sqliteResult = importWosDataRecord({
-            dbPath: args.dbPath,
-            record: raw,
-            taskId: task.taskId,
-            source: raw.url || `wos:${wosid}`,
-            expectedWosId: wosid,
-            force: args.reparseExisting,
-          });
-          const blacklistRemoval = removeWosDataBlacklist({ dbPath: args.dbPath, blacklistDbPath: args.blacklistDbPath, wosid });
-          parsed += 1;
-          consecutiveParseFailures = 0;
-          appendProgress(paths, { phase: "parse-record", status: "completed", wosid, index, dbPath: args.dbPath, imported: sqliteResult.imported, skipped: sqliteResult.skipped, blacklistRemoved: blacklistRemoval.removed });
-          if (!isInteractive()) {
-            console.error(`parse OK ${index}/${wosids.length} ${wosid} -> ${args.dbPath}`);
-          }
-        } catch (error) {
-          const sessionRecoveryError = isSessionRecoveryError(error);
-          const blacklisted = !sessionRecoveryError;
-          let blacklistError = "";
-          if (blacklisted) {
-            try {
-              recordWosDataBlacklist({
-                dbPath: args.dbPath,
-                blacklistDbPath: args.blacklistDbPath,
-                wosid,
-                taskId: task.taskId,
-                source: `parse:${task.taskId}`,
-                reason: "parse-failed",
-                error: error.message || String(error),
-              });
-            } catch (blacklistWriteError) {
-              blacklistError = blacklistWriteError.message || String(blacklistWriteError);
-            }
-          }
-          recordProgressStatus = sessionRecoveryError ? "deferred" : "failed";
-          consecutiveParseFailures += 1;
-          appendProgress(paths, {
-            phase: "parse-record",
-            status: "failed",
-            wosid,
-            index,
-            sessionRecoveryError,
-            blacklisted,
-            deferred: sessionRecoveryError,
-            blacklistError,
-            consecutiveParseFailures,
-            error: error.message || String(error),
-          });
-          if (!isInteractive()) {
-            console.error(`parse FAIL ${index}/${wosids.length} ${wosid}${blacklisted ? " blacklisted" : ""}: ${error.message || error}`);
-            if (blacklistError) console.error(`parse blacklist write failed for ${wosid}: ${blacklistError}`);
-          }
-          const failure = {
-            wosid,
-            index,
-            blacklisted,
-            deferred: sessionRecoveryError,
-            blacklistError,
-            error: error && error.stack ? error.stack : String(error),
-            failedAt: new Date().toISOString(),
-          };
-          failures.push(failure);
-          if (sessionRecoveryError || consecutiveParseFailures >= PARSE_RECOVERY_CONSECUTIVE_FAILURES) {
-            await refreshSidAfterConsecutiveFailures(
-              sessionRecoveryError
-                ? `WOS session error while parsing ${wosid}.`
-                : `${PARSE_RECOVERY_CONSECUTIVE_FAILURES} consecutive WOSID page parses failed.`
-            );
-          }
-        }
-        processed += 1;
-        parseProgress.update(processed, `${recordProgressStatus} ${wosid}`, failures.length);
-        if (args.cooldownMs) await sleep(args.cooldownMs);
-      }, async () => {
-        if (sidRecovery) await sidRecovery;
-      });
-      const rssMb = currentProcessRssMb();
-      const restartForMemory = shouldRestartParseForMemory(args, rssMb);
-      const restartForCount = Boolean(args.browserRestartEvery && chunkIndex < chunks.length - 1 && ((chunkIndex + 1) * chunkSize) % args.browserRestartEvery === 0);
-      if ((restartForCount || restartForMemory) && chunkIndex < chunks.length - 1) {
-        appendProgress(paths, {
-          phase: restartForMemory ? "parse-memory-restart" : "parse-browser-restart",
-          processed,
-          selected: work.length,
-          browserRestartEvery: args.browserRestartEvery,
-          maxRssMb: args.maxRssMb,
-          rssMb,
-        });
-        if (!isInteractive()) {
-          if (restartForMemory) {
-            console.error(`parse memory restart ${processed}/${work.length}; rss=${rssMb}MB reached max-rss-mb=${args.maxRssMb}. Reconnecting with current SID and testing WOS query routing with ${DEFAULT_PARSE_CONNECTIVITY_QUERY}`);
-          } else {
-            console.error(`parse browser restart ${processed}/${work.length}; reconnecting with current SID and testing WOS query routing with ${DEFAULT_PARSE_CONNECTIVITY_QUERY}`);
-          }
-        }
-        await session?.close?.();
-        session = null;
-      }
-    }
-    parseProgress.stop("WOS data parse complete");
-  } finally {
-    authSpinner.stop();
-    parseProgress?.stop("WOS data parse stopped");
-    await session?.close?.();
-  }
-
-  writeJson(paths.parseFailures, failures);
-  const finalStats = parseStats(paths, wosids, args);
-  const status = !failures.length && finalStats.completed === wosids.length ? "parse-completed" : "parse-incomplete";
-  const sqlite = finalStats.completed ? importParsedWosData(args, task.taskId, wosids) : null;
-  upsertTaskIndex(args, {
-    status,
-    lastError: "",
-    uuid: args.uuid || task.uuid,
-    url: args.url || task.url,
-    expectedCount: task.expectedCount,
-    uniqueCount: task.uniqueCount,
-  });
-  return {
-    taskId: task.taskId,
-    taskDir: task.taskDir,
-    totalWosIds: wosids.length,
-    selected: work.length,
-    parsed,
-    completed: finalStats.completed,
-    blacklisted: finalStats.blacklisted,
-    skippedBlacklist: finalStats.skippedBlacklist,
-    failed: failures.length,
-    dbPath: args.dbPath,
-    sqlite,
-    failures: paths.parseFailures,
-  };
 }
 
 function validateTask(args) {
@@ -4058,29 +3630,64 @@ function validateTask(args) {
   const paths = withRawSource(basePaths, rawSource);
   const summary = initialSummary;
   const isBibTask = summary.method === "wos-js-export-fetchBibBatches";
+  const isImportedCsvTask = summary.method === "imported-wosid-csv";
+  const isBatchTxtTask = summary.method === "batch-uuid-csv-txt";
   const wosidsCsv = wosIdsCsvPath(paths, summary.uuid || task.uuid || task.taskId);
-  const combinedBib = isBibTask ? bibFilePath(paths, summary.uuid || task.uuid) : "";
-  const wosids = !isBibTask && fs.existsSync(wosidsCsv) ? readWosIdsCsv(wosidsCsv) : [];
+  const wosids = isImportedCsvTask && fs.existsSync(wosidsCsv) ? readWosIdsCsv(wosidsCsv) : [];
+  const batchResults = isBatchTxtTask && Array.isArray(summary.results) ? summary.results : [];
   const rawUuid = summary.uuid || task.uuid || "";
   const rawFiles = rawUuid ? rawBatchFiles(paths, rawUuid) : [];
   const bibUuid = isBibTask ? (summary.uuid || task.uuid || "") : "";
   const bibFiles = bibUuid && fs.existsSync(bibBatchDir(paths, bibUuid))
     ? fs.readdirSync(bibBatchDir(paths, bibUuid)).filter((name) => name.endsWith(".bib"))
     : [];
-  const wosData = parseStats(paths, wosids, args);
+  const txtRangeStart = Math.max(1, Number(summary.rangeStart) || Number(summary.fromIndex) || 1);
+  const txtRangeEnd = Math.max(0, Number(summary.rangeEnd) || 0) ||
+    (summary.expectedCount ? txtRangeStart + Math.max(0, Number(summary.expectedCount) || 0) - 1 : 0);
+  const bibRangeStart = Math.max(1, Number(summary.rangeStart) || Number(summary.fromIndex) || 1);
+  const bibRangeEnd = Math.max(0, Number(summary.rangeEnd) || 0) ||
+    (summary.expectedCount ? bibRangeStart + Math.max(0, Number(summary.expectedCount) || 0) - 1 : 0);
   const issues = [];
   if (!fs.existsSync(paths.manifest)) issues.push("missing manifest.json");
   if (!fs.existsSync(paths.summary)) issues.push("missing summary.json");
+  if (isBatchTxtTask && !batchResults.length) issues.push("missing batch UUID results");
+  if (isBatchTxtTask) {
+    for (const item of batchResults) {
+      const marker = readRawUuidCompleteMarker(basePaths, item.uuid);
+      if (!marker) {
+        issues.push(`missing batch completion marker: ${item.uuid}`);
+        continue;
+      }
+      const state = rawUuidDownloadState(basePaths, item.uuid, marker);
+      if (!state.complete && state.plan?.missingBatches?.length) {
+        const firstMissing = state.plan.missingBatches[0];
+        issues.push(`incomplete batch UUID ${item.uuid}: missing ${firstMissing.markFrom}-${firstMissing.markTo}`);
+      }
+    }
+  }
   if (isBibTask && !bibFiles.length) issues.push("missing raw/<uuid>/bib batches");
-  if (isBibTask && !fs.existsSync(combinedBib)) issues.push(`missing combined BibTeX file: ${path.relative(paths.taskDir, combinedBib)}`);
-  if (!isBibTask && !fs.existsSync(wosidsCsv)) issues.push(`missing WOSID CSV: ${path.relative(paths.taskDir, wosidsCsv)}`);
-  if (!isBibTask && summary.expectedCount && summary.uniqueCount !== summary.expectedCount) {
+  if (isBibTask && bibRangeEnd) {
+    const plan = bibBatchPlanForRange(paths, bibUuid, bibRangeStart, bibRangeEnd, DEFAULT_BATCH_SIZE);
+    if (plan.missingBatches.length) {
+      const firstMissing = plan.missingBatches[0];
+      issues.push(`missing raw BibTeX batch: ${firstMissing.markFrom}-${firstMissing.markTo}`);
+    }
+  }
+  if (isImportedCsvTask && !fs.existsSync(wosidsCsv)) issues.push(`missing WOSID CSV: ${path.relative(paths.taskDir, wosidsCsv)}`);
+  if (isImportedCsvTask && summary.expectedCount && summary.uniqueCount !== summary.expectedCount) {
     issues.push(`wosid count mismatch: expected=${summary.expectedCount} unique=${summary.uniqueCount}`);
   }
-  if (!isBibTask && summary.uniqueCount && wosids.length !== summary.uniqueCount) {
+  if (isImportedCsvTask && summary.uniqueCount && wosids.length !== summary.uniqueCount) {
     issues.push(`WOSID CSV rows mismatch: csv=${wosids.length} summary.uniqueCount=${summary.uniqueCount}`);
   }
-  if (!isBibTask && summary.method !== "imported-wosid-csv" && !rawFiles.length) issues.push("missing raw/<uuid>/full-record batches");
+  if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && !rawFiles.length) issues.push("missing raw/<uuid>/full-record batches");
+  if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && txtRangeEnd) {
+    const plan = rawBatchPlanForRange(paths, rawUuid, txtRangeStart, txtRangeEnd, DEFAULT_BATCH_SIZE);
+    if (plan.missingBatches.length) {
+      const firstMissing = plan.missingBatches[0];
+      issues.push(`missing raw TXT batch: ${firstMissing.markFrom}-${firstMissing.markTo}`);
+    }
+  }
   return {
     ok: issues.length === 0,
     taskId: task.taskId,
@@ -4088,8 +3695,8 @@ function validateTask(args) {
     wosids: wosids.length,
     rawBatches: rawFiles.length,
     bibBatches: bibFiles.length,
-    bibFile: combinedBib,
-    wosData,
+    rawDir: !isBibTask && !isImportedCsvTask && rawUuid ? rawBatchDir(paths, rawUuid) : "",
+    bibDir: isBibTask && bibUuid ? bibBatchDir(paths, bibUuid) : "",
     issues,
   };
 }
@@ -4147,21 +3754,11 @@ function importWosIds(args) {
   return summary;
 }
 
-function importWosIdsForParse(args) {
-  const summary = importWosIds({
-    ...args,
-    command: "import",
-    force: false,
-  });
-  args.wosidsCsv = summary.files?.wosidsCsv || args.wosidsCsv;
-  return summary;
-}
-
 async function run(args) {
   const initialPaths = getRunPaths(args.outDir);
   const completedSummary = !args.force ? readCompletedRunSummary(initialPaths, args) : null;
   if (completedSummary) {
-    console.error("WOS ID CSV already exists; skipping download.");
+    console.error("WOS raw TXT batches already exist; skipping download.");
     return completedSummary;
   }
   const priorSummaryRaw = readJson(initialPaths.summary, {});
@@ -4188,7 +3785,6 @@ async function run(args) {
     createdAt: new Date().toISOString(),
   });
 
-  let rows = [];
   const rawUuid = args.uuid || priorSummary.uuid || "";
   const inferredRangeStart = priorSummary.rangeStart ||
     priorSummary.fromIndex ||
@@ -4210,7 +3806,6 @@ async function run(args) {
   }
   const canRepairFromRaw = !args.force &&
     rawUuid &&
-    !finalWosIdsCsvExists(paths, rawUuid) &&
     canRepairWosIdsFromRaw(paths, rawUuid, info.expectedCount, info.rangeStart, info.rangeEnd);
 
   if (((args.reuseRaw && !priorRunFailed && !priorRunUnverifiedPartial) || canRepairFromRaw) && rawUuid && rawBatchFiles(paths, rawUuid).length) {
@@ -4227,27 +3822,26 @@ async function run(args) {
         `Incomplete raw batches for UUID ${rawUuid}: missing ${firstMissing.markFrom}-${firstMissing.markTo}, expected ${info.rangeStart || 1}-${expectedEnd}. Re-run without --reuse-raw to resume from WOS.`
       );
     }
-    rows = parseExistingRawBatches(paths, rawUuid, {
-      files: plan.presentFiles,
-      startIndex: info.rangeStart || 1,
-      endIndex: expectedEnd,
-    });
+    info.resumedCount = plan.coveredCount;
     appendProgress(paths, {
-      phase: canRepairFromRaw && !args.reuseRaw ? "repair-export-from-raw" : "reuse-raw",
+      phase: canRepairFromRaw && !args.reuseRaw ? "repair-run-from-raw" : "reuse-raw",
       uuid: rawUuid,
-      parsed: rows.length,
+      rawDir: rawBatchDir(paths, rawUuid),
+      batches: plan.presentFiles.length,
+      coveredCount: plan.coveredCount,
     });
-    if (canRepairFromRaw && !args.reuseRaw && !isInteractive()) {
-      console.error("WOS raw batches already exist; rebuilding missing WOS ID CSV.");
+    if (!isInteractive()) {
+      console.error(args.reuseRaw
+        ? "WOS raw TXT batches already cover the selected range."
+        : "WOS raw TXT batches already exist; marking task complete from raw batches.");
     }
   } else {
     await prepareWosExport(args);
     const result = await exportFromWos(args, paths);
-    rows = result.rows;
     info = result.info;
   }
 
-  const summary = writeOutputs(paths, rows, {
+  const summary = writeRunSummary(paths, {
     taskId: args.taskId,
     taskLabel: args.taskLabel,
     inputUrl: args.url,
@@ -4266,13 +3860,14 @@ async function run(args) {
     summaryHref: info.href || args.url,
     runDir: paths.runDir,
   });
+  writeRawUuidCompleteMarker(paths, summary);
   upsertTaskIndex(args, {
     status: summary.ok ? "completed" : "incomplete",
     lastError: "",
     uuid: summary.uuid,
     url: summary.inputUrl,
     expectedCount: summary.expectedCount,
-    uniqueCount: summary.uniqueCount,
+    uniqueCount: 0,
   });
   return summary;
 }
@@ -4281,7 +3876,7 @@ async function runBib(args) {
   const initialPaths = getRunPaths(args.outDir);
   const completedSummary = !args.force ? readCompletedBibSummary(initialPaths, args) : null;
   if (completedSummary) {
-    console.error("BibTeX already exists; skipping download.");
+    console.error("BibTeX raw batches already exist; skipping download.");
     return completedSummary;
   }
   const outputHasFiles = fs.existsSync(args.outDir) &&
@@ -4309,10 +3904,13 @@ async function runBib(args) {
   const rawBibFiles = rawUuid
     ? bibBatchFiles(paths, rawUuid).map((fileName) => path.join(bibBatchDir(paths, rawUuid), fileName))
     : [];
-  if (!args.force && rawUuid && rawBibFiles.length && !finalBibExists(paths, rawUuid)) {
-    const combinedBib = combineBibFiles(paths, rawUuid, rawBibFiles);
-    const outputPaths = withRawSource(paths, rawUuid);
-    const entryCount = rawBibFiles.reduce((sum, filePath) => sum + parseBibEntryCount(fs.readFileSync(filePath, "utf8")), 0);
+  const priorRangeStart = Math.max(1, Number(priorSummary.fromIndex) || Number(priorSummary.rangeStart) || 1);
+  const priorExpectedEnd = priorSummary.rangeEnd ||
+    (priorSummary.expectedCount ? priorRangeStart + Math.max(0, Number(priorSummary.expectedCount) || 0) - 1 : 0);
+  const priorBibPlan = rawUuid && priorExpectedEnd
+    ? bibBatchPlanForRange(paths, rawUuid, priorRangeStart, priorExpectedEnd, DEFAULT_BATCH_SIZE)
+    : null;
+  if (!args.force && rawUuid && rawBibFiles.length && priorBibPlan?.complete) {
     const summary = {
       ok: true,
       method: "wos-js-export-fetchBibBatches",
@@ -4322,21 +3920,23 @@ async function runBib(args) {
       inputUuid: args.uuid,
       uuid: rawUuid,
       sortBy: args.sortBy,
-      expectedCount: priorSummary.expectedCount || entryCount,
+      expectedCount: priorSummary.expectedCount || priorBibPlan.coveredCount,
       batchCount: rawBibFiles.length,
       rowText: priorSummary.rowText || "",
       summaryHref: priorSummary.summaryHref || args.url,
       runDir: paths.runDir,
+      fromIndex: priorRangeStart,
+      rangeStart: priorRangeStart,
+      rangeEnd: priorExpectedEnd,
+      resumedCount: priorBibPlan.coveredCount,
       files: {
-        bibFile: combinedBib,
         bibFiles: rawBibFiles,
         bibDir: bibBatchDir(paths, rawUuid),
-        exportDir: outputPaths.bibExportDir,
         progressLog: paths.progressLog,
       },
       finishedAt: new Date().toISOString(),
     };
-    appendProgress(paths, { phase: "repair-bib-export-from-raw", uuid: rawUuid, batches: rawBibFiles.length, entries: entryCount });
+    appendProgress(paths, { phase: "repair-bib-from-raw", uuid: rawUuid, bibDir: bibBatchDir(paths, rawUuid), batches: rawBibFiles.length });
     writeJson(paths.summary, summary);
     upsertTaskIndex(args, {
       status: "bib-completed",
@@ -4346,14 +3946,12 @@ async function runBib(args) {
       expectedCount: summary.expectedCount,
       uniqueCount: 0,
     });
-    if (!isInteractive()) console.error("BibTeX raw batches already exist; rebuilding missing combined BibTeX.");
+    if (!isInteractive()) console.error("WOS raw BibTeX batches already exist; marking task complete from raw batches.");
     return summary;
   }
   await prepareWosExport(args);
   const result = await exportBibFromWos(args, paths);
   const uuid = result.info.uuid || args.uuid;
-  const combinedBib = combineBibFiles(paths, uuid, result.files);
-  const outputPaths = withRawSource(paths, uuid);
   const summary = {
     ok: true,
     method: "wos-js-export-fetchBibBatches",
@@ -4368,11 +3966,13 @@ async function runBib(args) {
     rowText: result.info.rowText || "",
     summaryHref: result.info.href || args.url,
     runDir: paths.runDir,
+    fromIndex: result.info.fromIndex || args.fromIndex || 1,
+    rangeStart: result.info.rangeStart || args.fromIndex || 1,
+    rangeEnd: result.info.rangeEnd || result.info.expectedCount || 0,
+    resumedCount: result.info.resumedCount || 0,
     files: {
-      bibFile: combinedBib,
       bibFiles: result.files,
       bibDir: bibBatchDir(paths, uuid),
-      exportDir: outputPaths.bibExportDir,
       progressLog: paths.progressLog,
     },
     finishedAt: new Date().toISOString(),
@@ -4387,31 +3987,6 @@ async function runBib(args) {
     uniqueCount: 0,
   });
   return summary;
-}
-
-async function runParsePipeline(args) {
-  const summary = await run(args);
-  if (!summary.ok) {
-    return {
-      ok: false,
-      taskId: summary.taskId,
-      run: summary,
-      parse: null,
-    };
-  }
-  const parse = await runParse({
-    ...args,
-    force: false,
-    uuid: summary.uuid || args.uuid,
-    url: summary.summaryHref || summary.inputUrl || args.url,
-    wosidsCsv: summary.files?.wosidsCsv,
-  });
-  return {
-    ok: !parse.failed,
-    taskId: summary.taskId,
-    run: summary,
-    parse,
-  };
 }
 
 function listTasks(args) {
@@ -4557,7 +4132,7 @@ async function executeAuthCommand(args, dependencies = authDependencies(args), o
 }
 
 async function validateAndSaveSid(args) {
-  const spinner = createSpinner("Validating and saving WOS SID");
+  const spinner = createSpinner(authValidationMessage(args, "Validating and saving WOS SID"));
   let session = null;
   try {
     session = await prepareWosSession(args, { visible: Boolean(args.headed || args.fromBrowser) });
@@ -4583,6 +4158,9 @@ async function checkSid(args, dependencies = {}) {
   const quickCheck = dependencies.quickValidateSid || quickValidateSid;
   const validateSidFlow = dependencies.validateAndSaveSid || validateAndSaveSid;
   const report = dependencies.report || console.error;
+  const poolStatus = sidPoolFromConfig(readSidConfig(args));
+  const checkingSid = args.sid || process.env.WOS_SID || poolStatus.activeSid || "";
+  if (checkingSid) report(authValidationMessage({ ...args, sid: checkingSid, sidSource: args.sidSource || (checkingSid === poolStatus.activeSid ? "config" : "") }));
   const quick = await quickCheck(args, dependencies.quickValidateOptions || {});
 
   if (quick.status === "valid") {
@@ -4661,7 +4239,7 @@ async function executeCommand(args) {
     return 0;
   }
   if (args.command === "settings") {
-    if (args.playwrightVisible === null && args.parseConcurrencySetting === null && !args.addSidInputs.length) {
+    if (args.playwrightVisible === null && !args.addSidInputs.length && !args.clearSids && !args.clearDeadSids) {
       console.error(usage());
       return 2;
     }
@@ -4669,8 +4247,11 @@ async function executeCommand(args) {
     if (args.playwrightVisible !== null) {
       Object.assign(result, setPlaywrightVisibleSetting(args, args.playwrightVisible));
     }
-    if (args.parseConcurrencySetting !== null) {
-      Object.assign(result, setParseConcurrencySetting(args, args.parseConcurrencySetting));
+    if (args.clearSids) {
+      result.clearedSids = clearSavedSidConfig(args);
+    }
+    if (args.clearDeadSids) {
+      result.clearedDeadSids = clearDeadSidHistory(args);
     }
     if (args.addSidInputs.length) {
       Object.assign(result, addSidsToConfig(args, args.addSidInputs, { activate: true }));
@@ -4740,31 +4321,14 @@ async function executeCommand(args) {
     console.log(summary.files.wosidsCsv);
     return 0;
   }
-  if (args.command === "parse") {
-    if (args.csvPath) {
-      if (!args.taskId || !args.outDir) {
-        console.error(usage());
-        return 2;
-      }
-      importWosIdsForParse(args);
-    }
-    loadSavedSid(args);
-    const result = await runParse(args);
-    console.log(result.sqlite?.dbPath || result.dbPath || "");
-    return result.failed ? 1 : 0;
-  }
-  if (args.command === "wosdata") {
-    if (!args.queryWosId && !args.sqlQuery && !args.mergeDbPath && !args.blacklistQuery && !args.unblacklistWosId && !args.clearBlacklist) {
+  if (args.command === "batch-run") {
+    if (!args.taskId || !args.outDir) {
       console.error(usage());
       return 2;
     }
-    const result = runWosDataImport(args);
-    if (args.queryWosId || args.sqlQuery || args.blacklistQuery || args.unblacklistWosId || args.clearBlacklist) {
-      console.log(JSON.stringify(result, null, 2));
-      return result.ok ? 0 : 1;
-    }
-    console.log(result.dbPath);
-    return result.ok ? 0 : 1;
+    const summary = await runBatchUuidTxt(args);
+    console.log(summary.files.rawRoot);
+    return summary.ok ? 0 : 1;
   }
   if (args.command === "bib") {
     if (!args.url || !args.uuid || !args.outDir) {
@@ -4774,17 +4338,8 @@ async function executeCommand(args) {
     const completed = readCompletedArtifactSummary(args);
     if (completed) return printCompletedArtifactPath(args.command, completed);
     const summary = await runBib(args);
-    console.log(summary.files.bibFile);
+    console.log(summary.files.bibDir);
     return summary.ok ? 0 : 1;
-  }
-  if (args.command === "parse-pipeline") {
-    if (!args.url || !args.uuid || !args.outDir) {
-      console.error(usage());
-      return 2;
-    }
-    const result = await runParsePipeline(args);
-    console.log(result.parse?.sqlite?.dbPath || result.parse?.dbPath || result.run.files.wosidsCsv);
-    return result.ok ? 0 : 1;
   }
   if (args.command === "latest") {
     const latest = readLatestTaskId(args.tasksRoot);
@@ -4805,7 +4360,7 @@ async function executeCommand(args) {
   const completed = readCompletedArtifactSummary(args);
   if (completed) return printCompletedArtifactPath(args.command, completed);
   const summary = await run(args);
-  console.log(summary.files.wosidsCsv);
+  console.log(summary.files.rawDir);
   return summary.ok ? 0 : 1;
 }
 
@@ -4814,7 +4369,7 @@ function recordCommandFailure(args, error) {
     args?.taskId &&
     args?.outDir &&
     fs.existsSync(args.outDir) &&
-    ["run", "import", "parse", "parse-pipeline", "bib"].includes(args.command)
+    ["run", "import", "bib", "batch-run"].includes(args.command)
   ) {
     try {
       upsertTaskIndex(args, {
@@ -4902,16 +4457,22 @@ async function runInteractiveMenu(argv = process.argv) {
           menuArgs.sidSource = "";
           return workspaceStatus(menuArgs, sidCheck);
         },
+        clearSids() {
+          clearSavedSidConfig(menuArgs);
+          menuArgs.sid = "";
+          menuArgs.sidSource = "";
+          return workspaceStatus(menuArgs);
+        },
+        clearDeadSids() {
+          clearDeadSidHistory(menuArgs);
+          return workspaceStatus(menuArgs);
+        },
         setCurrentTask(taskId) {
           setCurrentTaskId(menuArgs, taskId);
           return workspaceStatus(menuArgs, sidCheck);
         },
         setPlaywrightVisible(visible) {
           setPlaywrightVisibleSetting(menuArgs, visible);
-          return workspaceStatus(menuArgs, sidCheck);
-        },
-        setParseConcurrency(value) {
-          setParseConcurrencySetting(menuArgs, value);
           return workspaceStatus(menuArgs, sidCheck);
         },
       });
@@ -4988,9 +4549,7 @@ module.exports = {
   runInteractiveMenu,
   run,
   runBib,
-  runParse,
-  runParsePipeline,
-  runWosDataImport,
+  runBatchUuidTxt,
   importWosIds,
   initializeWorkspace,
   workspaceStatus,
@@ -5014,6 +4573,8 @@ module.exports = {
   prepareWosSession,
   waitForUsableWosSession,
   clearSavedSidConfig,
+  clearDeadSidHistory,
+  advanceSavedSid,
   discardActiveConfigSid,
   addSidsToConfig,
   waitForSavedSidPool,
@@ -5030,7 +4591,6 @@ module.exports = {
   releaseWosContext,
   forceCloseWosSession,
   setPlaywrightVisibleSetting,
-  setParseConcurrencySetting,
   applySavedRuntimeSettings,
   resolveWosJsPath,
   requireWosJsPath,
@@ -5072,20 +4632,17 @@ module.exports = {
   ensurePlaywrightBrowserInstalledForLaunch,
   installPlaywrightBrowserCommand,
   runPool,
-  runPoolWithReusableRecordPages,
   chunkItemsByCount,
-  currentProcessRssMb,
   formatRuntime,
-  effectiveParseChunkSize,
-  shouldRestartParseForMemory,
   prepareWosRequestContext,
-  warmUpWosQueryPage,
-  runWosRecoveryBuildQuery,
   randomUppercaseLetters,
   pageContextUuid,
   readWosIdsCsv,
+  readUuidCsv,
+  findUuidCsvFiles,
   normalizeWosId,
   extractUuid,
+  extractUuidsFromText,
   maskSid,
   announceResolvedWosUuid,
   prepareWosExport,
@@ -5094,22 +4651,18 @@ module.exports = {
   getRunPaths,
   withRawSource,
   cleanRunLayout,
+  rawBatchDir,
   rawBatchFiles,
+  rawUuidCompleteMarkerPath,
+  readRawUuidCompleteMarker,
+  writeRawUuidCompleteMarker,
   firstRawBatchRange,
   inferTxtRangeStart,
   rawBatchCoverageFromStart,
   rawBatchPlanForRange,
   bibBatchFiles,
+  bibBatchPlanForRange,
   parseExistingRawBatches,
-  defaultWosBlacklistDbPath,
-  importWosDataRecord,
-  mergeWosDataDatabase,
-  clearWosDataBlacklist,
-  queryWosDataBlacklist,
-  queryWosDataByWosId,
-  queryWosDataDatabase,
-  recordWosDataBlacklist,
-  removeWosDataBlacklist,
   readJson,
   writeJson,
 };

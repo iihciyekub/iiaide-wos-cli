@@ -5,32 +5,17 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { PassThrough } = require("node:stream");
 const test = require("node:test");
-const Database = require("better-sqlite3");
-
 const cli = require("../src/iiaide-wos");
 const playwrightInstall = require("../src/lib/playwright-install");
 const { readJson, writeJson } = require("../src/lib/io");
-const { askSidFromBrowserOrManual, canResumeWosIdsToSqlTask, classifyWosIdsToSqlInput, currentTaskSelection, formatBytes, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
+const { askSidFromBrowserOrManual, currentTaskSelection, formatBytes, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
 const { createProgress, createSpinner } = require("../src/lib/terminal");
 const { normalizeBatchResult } = require("../src/lib/wos-browser-export");
 const { wosIdsEquivalent } = require("../src/lib/wos-ids");
-const { existingWosDataBlacklistedIds } = require("../src/lib/wos-sqlite");
-
 function temporaryDirectory() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "iiaide-wos-test-"));
   process.env.IIAIDE_WOS_CONFIG = path.join(root, "global-config.json");
   return root;
-}
-
-function seedWosDataRecord(dbPath, taskId, record, options = {}) {
-  return cli.importWosDataRecord({
-    dbPath,
-    taskId,
-    record,
-    source: options.source || `test:${taskId}:${record.wosid || "record"}`,
-    expectedWosId: options.expectedWosId || "",
-    force: Boolean(options.force),
-  });
 }
 
 test("rejects unsafe task IDs and malformed option values", () => {
@@ -70,55 +55,12 @@ test("parses BibTeX export tasks", () => {
   assert.equal(args.outDir, path.join(root, "refs"));
 });
 
-test("parses WOS data SQLite management tasks", () => {
+test("parses batch UUID TXT tasks", () => {
   const root = temporaryDirectory();
-  const sourceDb = path.join(root, "source.sqlite");
-  const dbPath = path.join(root, "custom.sqlite");
-  const blacklistDbPath = path.join(root, "blacklist.sqlite");
-  const args = cli.parseArgs([
-    "node", "cli", "wosdata", "--merge-db", sourceDb, "--db", dbPath, "--blacklist-db", blacklistDbPath, "--tasks-root", root,
-  ]);
-
-  assert.equal(args.command, "wosdata");
-  assert.equal(args.mergeDbPath, sourceDb);
-  assert.equal(args.dbPath, dbPath);
-  assert.equal(args.blacklistDbPath, blacklistDbPath);
-  assert.equal(
-    cli.parseArgs(["node", "cli", "wosdata", "--query", "SELECT wosid FROM wos_records", "--tasks-root", root]).dbPath,
-    path.join(os.homedir(), ".iiaide-wos", "wosdata.sqlite")
-  );
-  assert.equal(
-    cli.parseArgs(["node", "cli", "wosdata", "--blacklist", "--tasks-root", root]).blacklistDbPath,
-    path.join(os.homedir(), ".iiaide-wos", "wos-blacklist.sqlite")
-  );
-  assert.equal(
-    cli.parseArgs(["node", "cli", "wosdata", "--wosid", "WOS:ABC", "--tasks-root", root]).queryWosId,
-    "WOS:ABC"
-  );
-  assert.equal(
-    cli.parseArgs(["node", "cli", "wosdata", "--query", "SELECT wosid FROM wos_records", "--tasks-root", root]).sqlQuery,
-    "SELECT wosid FROM wos_records"
-  );
-  assert.equal(
-    cli.parseArgs(["node", "cli", "wosdata", "--blacklist", "--tasks-root", root]).blacklistQuery,
-    true
-  );
-  assert.equal(
-    cli.parseArgs(["node", "cli", "wosdata", "--unblacklist", "WOS:BAD", "--tasks-root", root]).unblacklistWosId,
-    "WOS:BAD"
-  );
-  assert.equal(
-    cli.parseArgs(["node", "cli", "wosdata", "--clear-blacklist", "--tasks-root", root]).clearBlacklist,
-    true
-  );
-  assert.equal(
-    cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--retry-blacklist", "--tasks-root", root]).retryBlacklist,
-    true
-  );
-  assert.equal(
-    cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--reparse-existing", "--tasks-root", root]).reparseExisting,
-    true
-  );
+  const args = cli.parseArgs(["node", "cli", "batch-run", "--task", "batch-demo", "--tasks-root", root]);
+  assert.equal(args.command, "batch-run");
+  assert.equal(args.outDir, path.join(root, "batch-demo"));
+  assert.equal(args.searchRoot, process.cwd());
 });
 
 test("parses SID check tasks", () => {
@@ -191,44 +133,6 @@ test("detects Playwright missing-browser launch failures", () => {
     true
   );
   assert.equal(playwrightInstall.isMissingPlaywrightBrowserError(new Error("WOS SID validation failed")), false);
-});
-
-test("parse browser restart interval is configurable", () => {
-  const root = temporaryDirectory();
-  const defaults = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
-  assert.equal(defaults.browserRestartEvery, 600);
-  assert.equal(defaults.memoryCheckEvery, 200);
-  assert.equal(defaults.maxRssMb, 4096);
-
-  const disabled = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--browser-restart-every", "0", "--tasks-root", root]);
-  assert.equal(disabled.browserRestartEvery, 0);
-
-  const tuned = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--restart-every", "50", "--tasks-root", root]);
-  assert.equal(tuned.browserRestartEvery, 50);
-
-  const memoryTuned = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--max-rss-mb", "1024", "--tasks-root", root]);
-  assert.equal(memoryTuned.maxRssMb, 1024);
-
-  assert.throws(
-    () => cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--parse-max-attempts", "4", "--tasks-root", root]),
-    /Unknown argument/
-  );
-});
-
-test("parse concurrency default can be saved in settings", () => {
-  const root = temporaryDirectory();
-  const settingsArgs = cli.parseArgs(["node", "cli", "settings", "--parse-concurrency", "3", "--tasks-root", root]);
-  const saved = cli.setParseConcurrencySetting(settingsArgs, settingsArgs.parseConcurrencySetting);
-
-  assert.equal(saved.parseConcurrency, 3);
-  assert.equal(readJson(path.join(root, "config.json")).parseConcurrency, 3);
-
-  const configured = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--tasks-root", root]);
-  assert.equal(configured.concurrency, 3);
-  assert.equal(cli.workspaceStatus(configured).parseConcurrency, 3);
-
-  const oneOff = cli.parseArgs(["node", "cli", "parse", "--task", "demo", "--concurrency", "5", "--tasks-root", root]);
-  assert.equal(oneOff.concurrency, 5);
 });
 
 test("supports WOS domain variables for generated URLs", () => {
@@ -320,215 +224,6 @@ test("interactive missing Playwright browser repair runs bundled install before 
   assert.match(reports.join("\n"), /Installing Playwright Chromium/);
 });
 
-test("parse failure recovery probes buildQuery and restarts CLI only on SID query errors", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/const refreshSidAfterConsecutiveFailures = async \([^)]*\) => \{[\s\S]*?\n  \};\n  try/);
-  assert.ok(match, "parse SID recovery source should be present");
-  assert.match(match[0], /WOS parse recovery/);
-  assert.match(match[0], /await forceCloseWosSession\(session\)/);
-  assert.match(match[0], /runWosRecoveryBuildQuery\(session\.page, args\)/);
-  assert.match(match[0], /if \(recoveryQuery\.error_code\)/);
-  assert.match(match[0], /isSidInvalidRecoveryErrorCode\(recoveryQuery\.error_code\)/);
-  assert.match(match[0], /await forceCloseWosSession\(session\)/);
-  assert.match(match[0], /discardActiveConfigSid\(args[\s\S]*force: true/);
-  assert.match(match[0], /waitForUsableWosSession\(args/);
-  assert.match(source, /runHook\("onSidLoaded", onSidLoaded, resumedSid\)/);
-  assert.match(source, /WOS SID supervisor \$\{name\} hook failed/);
-  assert.match(match[0], /startParseSession\("sid-pool-refilled", 0, 0, \{ recoverSid: false \}\)/);
-  assert.match(match[0], /parse-sid-pool-refill-validation-failed/);
-  assert.match(match[0], /Removing that SID and waiting for another saved SID instead of returning to the menu/);
-  assert.doesNotMatch(match[0], /clearSavedSidConfig\(args\)/);
-  assert.match(match[0], /delete process\.env\.WOS_SID/);
-  assert.match(match[0], /omitSidArgs: true/);
-  assert.match(match[0], /parse-recovery-build-query-inconclusive/);
-  assert.match(match[0], /startParseSession\("recovery-query-inconclusive"\)/);
-  assert.doesNotMatch(match[0], /startParseSession\("consecutive-failures"\)/);
-  assert.doesNotMatch(match[0], /loginForFreshSid/);
-});
-
-test("parse failures are recorded once without retrying individual WOSIDs", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/let recordProgressStatus = "ok"[\s\S]*?parseProgress\.update\(processed, `\$\{recordProgressStatus\} \$\{wosid\}`, failures\.length\);/);
-  assert.ok(match, "parse failure source should be present");
-  assert.doesNotMatch(source, /DEFAULT_PARSE_MAX_ATTEMPTS/);
-  assert.doesNotMatch(source, /parseMaxAttempts/);
-  assert.doesNotMatch(source, /willRetry/);
-  assert.doesNotMatch(source, /chunk\.push\(\{ \.\.\.item/);
-  assert.match(source, /const PARSE_RECOVERY_CONSECUTIVE_FAILURES = 20/);
-  assert.match(match[0], /const sessionRecoveryError = isSessionRecoveryError\(error\)/);
-  assert.match(match[0], /const blacklisted = !sessionRecoveryError/);
-  assert.match(match[0], /recordProgressStatus = sessionRecoveryError \? "deferred" : "failed"/);
-  assert.match(match[0], /deferred: sessionRecoveryError/);
-  assert.match(match[0], /consecutiveParseFailures \+= 1/);
-  assert.match(match[0], /sessionRecoveryError \|\| consecutiveParseFailures >= PARSE_RECOVERY_CONSECUTIVE_FAILURES/);
-  assert.match(match[0], /failures\.push\(failure\)/);
-  assert.match(match[0], /processed \+= 1/);
-});
-
-test("SID recovery classifies parse errors for diagnostics only", () => {
-  assert.equal(cli.isSessionRecoveryError(new Error("No full-record JSON parsed for WOS:BAD")), false);
-  assert.equal(cli.isSessionRecoveryError(new Error("Full record timeout after 20000ms: WOS:BAD")), false);
-  assert.equal(cli.isSessionRecoveryError(new Error("Expected WOSID WOS:A but parsed WOS:B")), false);
-  assert.equal(cli.isSessionRecoveryError(new Error("You’ve reached the query limit for your session.")), true);
-  assert.equal(cli.isSessionRecoveryError(new Error("WOS returned a login page")), true);
-  assert.equal(cli.isSessionRecoveryError(new Error("Target page, context or browser has been closed")), true);
-});
-
-test("WOSID parse failures are blacklistable without error-type filtering", () => {
-  assert.equal(cli.isWosIdNoResultError(new Error("No full-record JSON parsed for WOS:BAD")), true);
-  assert.equal(cli.isWosIdNoResultError(new Error("[WOS] Failed to open full record for WOS:BAD; current route=unknown, page=unknown")), true);
-  assert.equal(cli.isWosIdNoResultError(new Error("Full record timeout after 20000ms: WOS:BAD")), true);
-  assert.equal(cli.isWosIdNoResultError(new Error("You’ve reached the query limit for your session.")), false);
-  assert.equal(cli.isWosIdNoResultError(new Error("WOS data record mismatch: expected=WOS:A actual=WOS:B")), false);
-  assert.equal(cli.isWosIdBlacklistableError(new Error("No full-record JSON parsed for WOS:BAD")), true);
-  assert.equal(cli.isWosIdBlacklistableError(new Error("Full record timeout after 20000ms: WOS:BAD")), true);
-  assert.equal(cli.isWosIdBlacklistableError(new Error("Cannot read properties of undefined while parsing WOS:BAD")), true);
-  assert.equal(cli.isWosIdBlacklistableError(new Error("WOS data record mismatch: expected=WOS:A actual=WOS:B")), true);
-  assert.equal(cli.isWosIdBlacklistableError(new Error("SQLite database is locked")), true);
-});
-
-test("SID recovery invalidates only explicit WOS session error codes", () => {
-  assert.equal(cli.isSidInvalidRecoveryErrorCode("unknown error"), false);
-  assert.equal(cli.isSidInvalidRecoveryErrorCode("failed to read current query page info"), false);
-  assert.equal(cli.isSidInvalidRecoveryErrorCode("failed to read query result page info"), false);
-  assert.equal(cli.isSidInvalidRecoveryErrorCode("You’ve reached the query limit for your session. Please close your session and start a new one."), true);
-  assert.equal(cli.isSidInvalidRecoveryErrorCode("session expired"), true);
-  assert.equal(cli.isSidInvalidRecoveryErrorCode("WOS returned a login page"), true);
-});
-
-test("parse browser restarts are disabled by default and reconnect through a query route when enabled", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/if \(!session\) \{[\s\S]*?\n      \}/);
-  assert.ok(match, "parse restart session block should be present");
-  assert.match(match[0], /startParseSession\("browser-restart", chunkIndex \+ 1, chunks\.length\)/);
-  assert.match(source, /warmUpWosQueryPage\(nextSession\.page, args\)/);
-  assert.match(source, /const DEFAULT_BROWSER_RESTART_EVERY = 600/);
-  assert.match(source, /const DEFAULT_PARSE_MEMORY_CHECK_EVERY = 200/);
-  assert.match(source, /const DEFAULT_PARSE_MAX_RSS_MB = 4096/);
-  assert.match(source, /phase: restartForMemory \? "parse-memory-restart" : "parse-browser-restart"/);
-});
-
-test("parse chunk sizing prefers smaller memory-check windows while preserving restart boundaries", () => {
-  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 600, memoryCheckEvery: 200 }), 200);
-  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 600, memoryCheckEvery: 0 }), 600);
-  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 0, memoryCheckEvery: 200 }), 200);
-  assert.equal(cli.effectiveParseChunkSize({ browserRestartEvery: 0, memoryCheckEvery: 0 }), 0);
-});
-
-test("parse memory restarts trigger only when RSS reaches the configured cap", () => {
-  assert.equal(cli.shouldRestartParseForMemory({ maxRssMb: 4096 }, 4095), false);
-  assert.equal(cli.shouldRestartParseForMemory({ maxRssMb: 4096 }, 4096), true);
-  assert.equal(cli.shouldRestartParseForMemory({ maxRssMb: 0 }, 99999), false);
-});
-
-test("connectivity query uses wos.js openQueryPage and reads search info when available", async () => {
-  const calls = [];
-  const page = {
-    evaluate: async (fn, arg) => {
-      const body = fn.toString();
-      if (body.includes("Boolean(window.wos")) return true;
-      if (body.includes("openQueryPage")) {
-        calls.push(["openQueryPage", arg]);
-        return null;
-      }
-      if (body.includes("fetchCurrentPageInfo")) {
-        return {
-          uuid: "warmup",
-          expectedCount: 12,
-          countText: "12",
-          rowText: "PY=2000",
-          href: "https://www.webofscience.com/wos/woscc/general-summary?queryJson=...",
-          status: "success",
-        };
-      }
-      return null;
-    },
-    waitForSelector: async (selector, options) => {
-      calls.push(["waitForSelector", selector, options.state]);
-    },
-    waitForLoadState: async (state) => {
-      calls.push(["waitForLoadState", state]);
-    },
-  };
-
-  const info = await cli.warmUpWosQueryPage(page, { timeoutMs: 120000 }, "PY=2000");
-  assert.deepEqual(calls.slice(0, 3), [
-    ["openQueryPage", "PY=2000"],
-    ["waitForSelector", 'div[data-ta="search-info"]', "attached"],
-    ["waitForLoadState", "networkidle"],
-  ]);
-  assert.equal(info.rowText, "PY=2000");
-  assert.equal(info.expectedCount, 12);
-  assert.equal(info.searchInfoReady, true);
-});
-
-test("connectivity query can continue when search info never renders", async () => {
-  const page = {
-    evaluate: async (fn, arg) => {
-      const body = fn.toString();
-      if (body.includes("Boolean(window.wos")) return true;
-      if (body.includes("openQueryPage")) {
-        assert.equal(arg, "PY=2000");
-        return {
-          rowText: arg,
-          href: "https://www.webofscience.com/wos/woscc/general-summary?queryJson=...",
-          status: "routed",
-          sid: "sid",
-        };
-      }
-      throw new Error("fetchCurrentPageInfo should not be called without search info");
-    },
-    waitForSelector: async () => {
-      throw new Error("Timeout 5000ms exceeded");
-    },
-    waitForLoadState: async () => {},
-  };
-
-  const info = await cli.warmUpWosQueryPage(page, { timeoutMs: 120000, recordTimeoutMs: 30000 }, "PY=2000");
-  assert.equal(info.rowText, "PY=2000");
-  assert.equal(info.status, "routed");
-  assert.equal(info.searchInfoReady, false);
-  assert.equal(info.expectedCount, 0);
-});
-
-test("recovery buildQuery uses a random abstract query and surfaces WOS errors", async () => {
-  assert.match(cli.randomUppercaseLetters(4), /^[A-Z]{4}$/);
-  const calls = [];
-  const page = {
-    evaluate: async (fn, arg) => {
-      const body = fn.toString();
-      if (body.includes("Boolean(window.wos")) return true;
-      if (body.includes("buildQuery")) {
-        calls.push(["buildQuery", arg]);
-        return {
-          uuid: "random-query",
-          ref_count: 0,
-          rowText: arg,
-          status: "failed",
-          error_code: "unknown error",
-        };
-      }
-      return null;
-    },
-  };
-
-  const result = await cli.runWosRecoveryBuildQuery(page, { timeoutMs: 120000 }, "AB=QWER");
-  assert.deepEqual(calls, [["buildQuery", "AB=QWER"]]);
-  assert.equal(result.expr, "AB=QWER");
-  assert.equal(result.error_code, "unknown error");
-  assert.equal(result.status, "failed");
-});
-
-test("runParsedCommand restarts the current CLI when parse recovery requests it", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/async function runParsedCommand[\s\S]*?\n}\n\nfunction restartCurrentCli/);
-  assert.ok(match, "runParsedCommand source should be present");
-  assert.match(match[0], /isCliRestartRequestedError\(error\)/);
-  assert.match(match[0], /await closeSharedWosSession\(\)/);
-  assert.match(match[0], /error\.omitSidArgs \? omitSidArgs\(argv\) : argv/);
-  assert.equal(cli.isCliRestartRequestedError({ code: "CLI_RESTART_REQUESTED" }), true);
-});
-
 test("restart argv sanitization removes explicit SID values", () => {
   assert.deepEqual(
     cli.omitSidArgs(["node", "cli", "parse", "--sid", "bad", "--task", "demo"]),
@@ -540,27 +235,18 @@ test("restart argv sanitization removes explicit SID values", () => {
   );
 });
 
-test("parse progress detail is completion-oriented for concurrent workers", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  assert.match(source, /let recordProgressStatus = "ok"/);
-  assert.match(source, /recordProgressStatus = sessionRecoveryError \? "deferred" : "failed"/);
-  assert.doesNotMatch(source, /consecutiveFailures \+= 1/);
-  assert.match(source, /parseProgress\.update\(processed, `\$\{recordProgressStatus\} \$\{wosid\}`, failures\.length\)/);
-  assert.doesNotMatch(source, /parseProgress\.update\(processed, `source \$\{index\}/);
-});
-
 test("detects readline Ctrl+C abort errors", () => {
   assert.equal(cli.isUserAbortError({ name: "AbortError", message: "Aborted with Ctrl+C" }), true);
   assert.equal(cli.isUserAbortError({ code: "ABORT_ERR", message: "aborted" }), true);
   assert.equal(cli.isUserAbortError(new Error("normal failure")), false);
 });
 
-test("calculates WOS download batches in 200-record chunks", () => {
+test("calculates WOS download batches in 500-record chunks by default", () => {
   assert.equal(cli.downloadBatchCount(0), 0);
   assert.equal(cli.downloadBatchCount(1), 1);
-  assert.equal(cli.downloadBatchCount(200), 1);
-  assert.equal(cli.downloadBatchCount(201), 2);
-  assert.equal(cli.downloadBatchCount(401), 3);
+  assert.equal(cli.downloadBatchCount(500), 1);
+  assert.equal(cli.downloadBatchCount(501), 2);
+  assert.equal(cli.downloadBatchCount(1001), 3);
 });
 
 test("calculates bounded WOS record ranges before download planning", () => {
@@ -740,22 +426,24 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(workflowMatch[0], /Download literature/);
   assert.match(workflowMatch[0], /1\.1", "UUID - TXT format/);
   assert.match(workflowMatch[0], /1\.2", "UUID - BIB format/);
-  assert.match(workflowMatch[0], /workflowTopItem\("2", "WOS IDs to SQL/);
-  assert.match(workflowMatch[0], /2\.1", "Resume/);
+  assert.match(workflowMatch[0], /1\.3", "Batch UUID CSV - TXT/);
+  assert.doesNotMatch(workflowMatch[0], /WOS IDs to SQL/);
+  assert.doesNotMatch(workflowMatch[0], /2\.1", "Resume/);
   assert.doesNotMatch(workflowMatch[0], /Parse"\)/);
   assert.doesNotMatch(workflowMatch[0], /2\.2/);
   assert.doesNotMatch(workflowMatch[0], /WOSID CSV/);
   assert.match(workflowMatch[0], /3\.1", "New/);
   assert.match(workflowMatch[0], /3\.2", "Switch/);
   assert.match(workflowMatch[0], /3\.3", "Clear/);
-  assert.match(workflowMatch[0], /SQL database/);
-  assert.match(workflowMatch[0], /4\.1", "Status/);
-  assert.match(workflowMatch[0], /4\.2", "Merge database/);
-  assert.match(workflowMatch[0], /4\.3", "Query WOSID/);
+  assert.doesNotMatch(workflowMatch[0], /SQL database/);
+  assert.doesNotMatch(workflowMatch[0], /Merge database/);
+  assert.doesNotMatch(workflowMatch[0], /Query WOSID/);
   assert.match(workflowMatch[0], /Settings/);
   assert.match(workflowMatch[0], /5\.1", "Playwright visible/);
-  assert.match(workflowMatch[0], /5\.2", "Parse tabs/);
-  assert.match(workflowMatch[0], /5\.3", "Add SIDs/);
+  assert.match(workflowMatch[0], /5\.2", "Add SIDs/);
+  assert.match(workflowMatch[0], /5\.3", "Clear all SIDs/);
+  assert.match(workflowMatch[0], /5\.4", "Clear dead SIDs/);
+  assert.doesNotMatch(workflowMatch[0], /Parse tabs/);
   assert.match(workflowMatch[0], /Auth producer/);
   assert.match(workflowMatch[0], /6\.1", "MUST login/);
   assert.match(workflowMatch[0], /6\.2", "MUST monitor/);
@@ -767,44 +455,40 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.doesNotMatch(workflowMatch[0], /Probe the saved SID/);
   assert.doesNotMatch(workflowMatch[0], /Install the latest release/);
   assert.doesNotMatch(workflowMatch[0], /Return to the workspace menu/);
-  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 2, 2\.1, 3\.1, 3\.2, 3\.3, 4\.1, 4\.2, 4\.3, 5\.1, 5\.2, 5\.3, 6\.1, 6\.2, c to check SID, u to update, B to go back/);
+  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 1\.3, 3\.1, 3\.2, 3\.3, 5\.1, 5\.2, 5\.3, 5\.4, 6\.1, 6\.2, c to check SID, u to update, B to go back/);
   assert.doesNotMatch(workflowMatch[0], /Download WOS IDs/);
   assert.match(argsMatch[0], /choice === "c"/);
   assert.match(argsMatch[0], /return \["check", "--tasks-root", activeWorkspace\.tasksRoot\]/);
   assert.match(argsMatch[0], /choice === "u"/);
   assert.match(argsMatch[0], /return \["update"\]/);
+  assert.match(argsMatch[0], /choice === "1\.3"/);
+  assert.match(argsMatch[0], /return \["batch-run", "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot\]/);
   assert.match(argsMatch[0], /choice === "3\.1"/);
   assert.match(argsMatch[0], /mode: "new"/);
   assert.match(argsMatch[0], /choice === "3\.2"/);
   assert.match(argsMatch[0], /choice === "3\.3"/);
-  assert.match(argsMatch[0], /choice === "4\.1"/);
-  assert.match(argsMatch[0], /printWosDataDbStatus\(activeWorkspace\)/);
-  assert.match(argsMatch[0], /appendWosDataDbArg/);
-  assert.match(argsMatch[0], /choice === "4\.2"/);
-  assert.match(argsMatch[0], /Source SQLite database/);
-  assert.match(argsMatch[0], /\["wosdata", "--merge-db", sourceDb, "--tasks-root", activeWorkspace\.tasksRoot\]/);
-  assert.match(argsMatch[0], /choice === "4\.3"/);
-  assert.match(argsMatch[0], /WOSID/);
-  assert.match(argsMatch[0], /\["wosdata", "--wosid", wosid, "--tasks-root", activeWorkspace\.tasksRoot\]/);
+  assert.doesNotMatch(argsMatch[0], /choice === "4\.1"/);
+  assert.doesNotMatch(argsMatch[0], /appendWosDataDbArg/);
+  assert.doesNotMatch(argsMatch[0], /wosdata/);
   assert.match(argsMatch[0], /choice === "5\.1"/);
   assert.match(argsMatch[0], /helpers\.setPlaywrightVisible/);
   assert.match(argsMatch[0], /choice === "5\.2"/);
-  assert.match(argsMatch[0], /helpers\.setParseConcurrency/);
   assert.match(argsMatch[0], /choice === "5\.3"/);
+  assert.match(argsMatch[0], /helpers\.clearSids/);
+  assert.match(argsMatch[0], /choice === "5\.4"/);
+  assert.match(argsMatch[0], /helpers\.clearDeadSids/);
+  assert.doesNotMatch(argsMatch[0], /helpers\.setParseConcurrency/);
+  assert.doesNotMatch(argsMatch[0], /choice === "5\.5"/);
   assert.match(argsMatch[0], /choice === "6\.1"/);
   assert.match(argsMatch[0], /choice === "6\.2"/);
   assert.match(argsMatch[0], /helpers\.addSids/);
   assert.match(argsMatch[0], /\["auth", "login", "--provider", "must", "--tasks-root", activeWorkspace\.tasksRoot\]/);
   assert.match(argsMatch[0], /\["auth", "monitor", "--provider", "must", "--tasks-root", activeWorkspace\.tasksRoot\]/);
   assert.doesNotMatch(argsMatch[0], /SQL SELECT query/);
-  assert.match(argsMatch[0], /Force overwrite existing SQL rows/);
-  assert.match(argsMatch[0], /choice === "2\.1"/);
-  assert.match(argsMatch[0], /\["parse", "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot\]/);
-  assert.match(argsMatch[0], /choice === "2"/);
-  assert.match(argsMatch[0], /CSV path, WOS URL, or UUID/);
-  assert.match(argsMatch[0], /classifyWosIdsToSqlInput\(input\)/);
-  assert.match(argsMatch[0], /\["parse", "--csv", parsed\.value, "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot\]/);
-  assert.match(argsMatch[0], /"parse-pipeline"/);
+  assert.doesNotMatch(argsMatch[0], /Force overwrite existing SQL rows/);
+  assert.doesNotMatch(argsMatch[0], /choice === "2"/);
+  assert.doesNotMatch(argsMatch[0], /classifyWosIdsToSqlInput/);
+  assert.doesNotMatch(argsMatch[0], /"parse-pipeline"/);
   assert.doesNotMatch(argsMatch[0], /askParseOptions/);
   assert.doesNotMatch(argsMatch[0], /Change parse options/);
   assert.match(argsMatch[0], /choice === "1\.2" \? "bib"/);
@@ -818,21 +502,6 @@ test("interactive saved source only accepts WOS-like values", () => {
   assert.equal(isWosSourceLike("01455913-d57e-4730-aa74-a3cbffe7014c-01b861c2bc"), true);
 });
 
-test("interactive WOS IDs to SQL input detects CSV or WOS source", () => {
-  assert.deepEqual(classifyWosIdsToSqlInput("./input/wosids.csv"), {
-    kind: "csv",
-    value: "./input/wosids.csv",
-  });
-  assert.deepEqual(classifyWosIdsToSqlInput("01455913-d57e-4730-aa74-a3cbffe7014c-01b861c2bc"), {
-    kind: "wos-source",
-    value: "01455913-d57e-4730-aa74-a3cbffe7014c-01b861c2bc",
-  });
-  assert.deepEqual(classifyWosIdsToSqlInput("not-a-source.txt"), {
-    kind: "unknown",
-    value: "not-a-source.txt",
-  });
-});
-
 test("interactive downloads use the current task selection", () => {
   const workspace = {
     currentTask: "selected",
@@ -842,20 +511,6 @@ test("interactive downloads use the current task selection", () => {
   const selection = currentTaskSelection(workspace);
   assert.equal(selection.taskId, "selected");
   assert.equal(selection.task.taskId, "selected");
-});
-
-test("interactive WOS IDs to SQL can auto-resume after SID refill", () => {
-  assert.equal(canResumeWosIdsToSqlTask({ uniqueCount: 113386 }), true);
-  assert.equal(canResumeWosIdsToSqlTask({ uniqueCount: 0 }), false);
-  assert.equal(canResumeWosIdsToSqlTask({}), false);
-
-  const source = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
-  const branch = source.match(/if \(choice === "2"\) \{[\s\S]*?const input = await askParameterOrCancel/);
-  assert.ok(branch, "WOS IDs to SQL branch should be present");
-  assert.match(branch[0], /sid && canResumeWosIdsToSqlTask\(task\)/);
-  assert.match(branch[0], /SID ready:/);
-  assert.match(branch[0], /\["parse", "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot\]/);
-  assert.match(branch[0], /result\.push\("--sid", sid\)/);
 });
 
 test("interactive header shows WOS browser mode and profile name", () => {
@@ -890,18 +545,18 @@ test("interactive header shows WOS browser mode and profile name", () => {
   }
 
   assert.match(output, /Playwright\s+background/);
-  assert.match(output, /Parse Tabs\s+1/);
+  assert.doesNotMatch(output, /Parse Tabs/);
   assert.match(output, /SID Value\s+curr...-sid/);
   assert.match(output, /SID Pool\s+2\/3/);
   assert.match(output, /SID Producer\s+must monitor running, min-sids 2/);
   assert.doesNotMatch(output, /Dead SIDs/);
   assert.match(output, /Profile\s+\.browser-profile/);
   assert.match(output, /Task ID\s+TID20260610120000/);
-  assert.match(output, /WOS DB\s+none/);
-  assert.match(output, /WOS IDs\s+0/);
-  assert.match(output, /Blacklist DB\s+none/);
-  assert.match(output, /Blacklist\s+0/);
-  assert.match(output, /DB Size\s+0 B/);
+  assert.doesNotMatch(output, /WOS DB/);
+  assert.doesNotMatch(output, /WOS IDs\s+0/);
+  assert.doesNotMatch(output, /Blacklist DB/);
+  assert.doesNotMatch(output, /Blacklist\s+0/);
+  assert.doesNotMatch(output, /DB Size/);
   assert.doesNotMatch(output, /Tasks\s+\d+ tasks/);
   assert.match(output, /Runtime\s+1m 05s/);
   assert.match(output, /iiaide-wos CLI/);
@@ -928,7 +583,7 @@ test("interactive header shows WOS browser mode and profile name", () => {
   const panelRows = output
     .split(/\r?\n/)
     .filter((line) => /\|.*\|\s+\|.*\|/.test(line));
-  assert.equal(panelRows.length, 18);
+  assert.equal(panelRows.length, 11);
   assert.match(panelRows[0], /^\| {50}\|/);
   const logoRowIndex = panelRows.findIndex((line) => line.includes("[ W O S - C L I ]"));
   assert.ok(logoRowIndex > 0);
@@ -991,10 +646,7 @@ test("formats runtime for the interactive dashboard", () => {
 
 test("uses one workspace-scoped WOS Playwright profile", () => {
   const root = temporaryDirectory();
-  const dbPath = path.join(root, "global.sqlite");
-  const blacklistDbPath = path.join(root, "blacklist.sqlite");
-  cli.recordWosDataBlacklist({ dbPath, blacklistDbPath, wosid: "WOS:BAD", error: "No full-record JSON parsed" });
-  const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root, "--db", dbPath, "--blacklist-db", blacklistDbPath]);
+  const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
   assert.equal(cli.wosUserDataDir(args), path.join(root, ".browser-profile"));
   assert.equal(cli.wosProfileName(args), ".browser-profile");
   assert.equal(cli.wosBrowserMode(args), "background");
@@ -1005,10 +657,7 @@ test("uses one workspace-scoped WOS Playwright profile", () => {
   assert.equal(status.wosBrowserMode, "background");
   assert.equal(typeof status.runtimeMs, "number");
   assert.ok(status.runtimeMs >= 0);
-  assert.equal(status.wosDataDb.dbPath, dbPath);
-  assert.equal(status.wosDataDb.blacklistDbPath, blacklistDbPath);
-  assert.equal(status.wosDataDb.recordCount, 0);
-  assert.equal(status.wosDataDb.blacklistCount, 1);
+  assert.equal("wosDataDb" in status, false);
 });
 
 test("persists visible Playwright mode in workspace config", () => {
@@ -1324,6 +973,21 @@ test("normalizes protocol-less WOS summary strings passed as UUID input", () => 
   );
 });
 
+test("extracts UUIDs from free-form CSV text", () => {
+  const uuids = cli.extractUuidsFromText([
+    "uuid",
+    "01455913-d57e-4730-aa74-a3cbffe7014c-01b861c2bc",
+    "ignore,this,cell",
+    "https://www.webofscience.com/wos/woscc/summary/11111111-2222-3333-4444-555555555555-6666666666/relevance/1",
+    "01455913-d57e-4730-aa74-a3cbffe7014c-01b861c2bc",
+  ].join("\n"));
+
+  assert.deepEqual(uuids, [
+    "01455913-d57e-4730-aa74-a3cbffe7014c-01b861c2bc",
+    "11111111-2222-3333-4444-555555555555-6666666666",
+  ]);
+});
+
 test("normalizes protocol-less WOS summary strings passed as URL input", () => {
   const root = temporaryDirectory();
   const source = "ofscience.com/wos/woscc/summary/01455913-d57e-4730-aa74-a3cbffe7014c-01b861c2bc/date-descending/1";
@@ -1384,20 +1048,6 @@ test("detects WOS full-record redirects back to the WOS root", () => {
   assert.equal(cli.isWosRootRecordRedirect("https://other.example/wos/", "https://www.webofscience.com"), false);
 });
 
-test("record extraction uses injected wos.js page parser", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/async function extractOneRecordInfo[\s\S]*?\n}\n\nasync function runPoolWithReusableRecordPages/);
-  assert.ok(match, "extractOneRecordInfo source should be present");
-  assert.match(match[0], /window\.wos\.record\.viewFullRecordByWosId\(targetWosId\)/);
-  assert.match(match[0], /parseCurrentFullRecordPage\(targetWosId\)/);
-  assert.match(match[0], /fetchFullRecordJsonByWosId\(targetWosId\)/);
-  assert.match(match[0], /_parseMethod: parseMethod/);
-  assert.match(match[0], /diagnostics\.join/);
-  assert.doesNotMatch(match[0], /context\.newPage/);
-  assert.match(source, /runPoolWithReusableRecordPages\(chunk, args\.concurrency/);
-  assert.doesNotMatch(source, /EXTRACT_AUTHOR_INFO/);
-});
-
 test("browser-side wos.js preserves externally prepared WOSIDs", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
   const helper = source.match(/function prepareWosRecordId\(value = ''\) \{[\s\S]*?\n\}/);
@@ -1456,53 +1106,6 @@ test("browser-side wos.js streams TXT batch text through awaited progress", () =
   assert.match(txtMethod[0], /return \{ resultLength: batches\.length, text \};/);
 });
 
-test("parse workers reuse one WOS page per worker", async () => {
-  const pages = [];
-  const context = {
-    async newPage() {
-      const page = {
-        id: pages.length + 1,
-        closed: false,
-        gotoCalls: 0,
-        async goto() {
-          this.gotoCalls += 1;
-        },
-        setDefaultTimeout() {},
-        async evaluate(fn) {
-          if (fn.toString().includes("Boolean(window.wos")) return true;
-          return null;
-        },
-        isClosed() {
-          return this.closed;
-        },
-        async close() {
-          this.closed = true;
-        },
-      };
-      pages.push(page);
-      return page;
-    },
-  };
-  const seen = [];
-
-  await cli.runPoolWithReusableRecordPages(
-    [1, 2, 3, 4],
-    2,
-    () => ({ session: { context }, generation: 1 }),
-    { baseUrl: "https://www.webofscience.com", timeoutMs: 1000, recordTimeoutMs: 1000 },
-    async (item, _index, page) => {
-      seen.push([item, page.id]);
-      await Promise.resolve();
-    }
-  );
-
-  assert.equal(pages.length, 2);
-  assert.deepEqual(pages.map((page) => page.gotoCalls), [2, 2]);
-  assert.deepEqual(pages.map((page) => page.closed), [true, true]);
-  assert.equal(seen.length, 4);
-  assert.ok(new Set(seen.map(([, pageId]) => pageId)).size <= 2);
-});
-
 test("releasing a WOS context blanks and closes every page before the context", async () => {
   const events = [];
   const makePage = (id) => ({
@@ -1544,367 +1147,6 @@ test("releasing a WOS context blanks and closes every page before the context", 
   assert.ok(events.includes("goto:2:about:blank"));
   assert.ok(events.includes("close:1"));
   assert.ok(events.includes("close:2"));
-});
-
-test("WOS data records import into global SQLite without raw TXT or BibTeX", () => {
-  const root = temporaryDirectory();
-  const dbPath = path.join(root, "global.sqlite");
-  const result = seedWosDataRecord(dbPath, "record-source", {
-    wosid: "WOS:ABC",
-    title: "SQLite Record",
-    source: { title: "Journal A", doi: "10.1000/demo", published: "2026" },
-    url: "https://www.webofscience.com/wos/woscc/full-record/WOS:ABC",
-    fetchedAt: "2026-06-10T00:00:00.000Z",
-  });
-
-  assert.equal(result.imported, 1);
-  assert.equal(result.dbPath, dbPath);
-  const db = new Database(result.dbPath, { readonly: true });
-  try {
-    assert.deepEqual(
-      db.prepare("SELECT wosid, title, year, doi, source_title FROM wos_records").all(),
-      [{ wosid: "WOS:ABC", title: "SQLite Record", year: 2026, doi: "10.1000/demo", source_title: "Journal A" }]
-    );
-    assert.deepEqual(
-      db.prepare("SELECT wosid, task_id FROM wos_record_sources").all(),
-      [{ wosid: "WOS:ABC", task_id: "record-source" }]
-    );
-  } finally {
-    db.close();
-  }
-});
-
-test("WOS data validation compares accession IDs without punctuation-only differences", () => {
-  const root = temporaryDirectory();
-  const dbPath = path.join(root, "global.sqlite");
-  const result = seedWosDataRecord(dbPath, "punctuation", {
-    wosid: "ALT:12345",
-    title: "Equivalent ID",
-  }, {
-    expectedWosId: "ALT:123-45",
-  });
-
-  assert.equal(result.imported, 1);
-  assert.equal(wosIdsEquivalent("ALT:123-45", "ALT12345"), true);
-});
-
-test("WOS data blacklist records parse-failed WOSIDs and can clear them", () => {
-  const root = temporaryDirectory();
-  const dbPath = path.join(root, "global.sqlite");
-  const blacklistDbPath = path.join(root, "blacklist.sqlite");
-  seedWosDataRecord(dbPath, "saved-record", {
-    wosid: "WOS:OK",
-    title: "Saved",
-  });
-  const first = cli.recordWosDataBlacklist({
-    dbPath,
-    blacklistDbPath,
-    wosid: "WOS:BAD",
-    taskId: "blacklist-task",
-    source: "parse:blacklist-task",
-    error: "No full-record JSON parsed for WOS:BAD",
-  });
-  assert.equal(first.wosid, "WOS:BAD");
-  assert.equal(first.blacklistDbPath, blacklistDbPath);
-  cli.recordWosDataBlacklist({
-    dbPath,
-    blacklistDbPath,
-    wosid: "WOS:BAD",
-    taskId: "blacklist-task",
-    error: "No full-record JSON parsed for WOS:BAD",
-  });
-
-  assert.equal(fs.existsSync(dbPath), true);
-  assert.equal(fs.existsSync(blacklistDbPath), true);
-  assert.deepEqual([...existingWosDataBlacklistedIds({ blacklistDbPath }, ["WOS:BAD", "WOS:OK"])], ["WOS:BAD"]);
-  const listed = cli.queryWosDataBlacklist({ dbPath, blacklistDbPath });
-  assert.equal(listed.total, 1);
-  assert.equal(listed.blacklistDbPath, blacklistDbPath);
-  assert.equal(listed.stats.recordCount, 1);
-  assert.equal(listed.stats.blacklistCount, 1);
-  assert.equal(listed.rows[0].wosid, "WOS:BAD");
-  assert.equal(listed.rows[0].failedCount, 2);
-
-  const removed = cli.removeWosDataBlacklist({ dbPath, blacklistDbPath, wosid: "WOS:BAD" });
-  assert.equal(removed.removed, 1);
-  assert.equal(removed.stats.blacklistCount, 0);
-  assert.equal(cli.queryWosDataBlacklist({ dbPath, blacklistDbPath }).total, 0);
-
-  cli.recordWosDataBlacklist({
-    dbPath,
-    blacklistDbPath,
-    wosid: "WOS:BAD",
-    taskId: "blacklist-task",
-    reason: "parse-failed",
-    error: "Full record timeout after 20000ms: WOS:BAD",
-  });
-  const cleared = cli.clearWosDataBlacklist({ dbPath, blacklistDbPath });
-  assert.equal(cleared.removed, 1);
-  assert.equal(cleared.stats.blacklistCount, 0);
-  assert.equal(cli.queryWosDataBlacklist({ dbPath, blacklistDbPath }).total, 0);
-});
-
-test("wosdata skips existing records by default and force overwrites them", () => {
-  const root = temporaryDirectory();
-  const dbPath = path.join(root, "global.sqlite");
-
-  assert.equal(seedWosDataRecord(dbPath, "first", {
-    wosid: "WOS:ABC",
-    title: "Original Title",
-  }).imported, 1);
-  const skipped = seedWosDataRecord(dbPath, "second", {
-    wosid: "WOS:ABC",
-    title: "Updated Title",
-  });
-  assert.equal(skipped.imported, 0);
-  assert.equal(skipped.skipped, 1);
-  let db = new Database(dbPath, { readonly: true });
-  try {
-    assert.equal(db.prepare("SELECT title FROM wos_records WHERE wosid = 'WOS:ABC'").get().title, "Original Title");
-  } finally {
-    db.close();
-  }
-
-  const forced = seedWosDataRecord(dbPath, "second", {
-    wosid: "WOS:ABC",
-    title: "Updated Title",
-  }, { force: true });
-  assert.equal(forced.imported, 1);
-  db = new Database(dbPath, { readonly: true });
-  try {
-    assert.equal(db.prepare("SELECT title FROM wos_records WHERE wosid = 'WOS:ABC'").get().title, "Updated Title");
-  } finally {
-    db.close();
-  }
-});
-
-test("wosdata merges another SQLite database and preserves skip-by-default behavior", () => {
-  const root = temporaryDirectory();
-  const targetDb = path.join(root, "target.sqlite");
-  const sourceDb = path.join(root, "source.sqlite");
-  seedWosDataRecord(targetDb, "target", {
-    wosid: "WOS:ABC",
-    title: "Target Title",
-  });
-  seedWosDataRecord(sourceDb, "source", {
-    wosid: "WOS:ABC",
-    title: "Source Title",
-  });
-  seedWosDataRecord(sourceDb, "source", {
-    wosid: "WOS:DEF",
-    title: "Source Only",
-  });
-
-  const merged = cli.runWosDataImport(cli.parseArgs([
-    "node", "cli", "wosdata", "--merge-db", sourceDb, "--db", targetDb, "--tasks-root", root,
-  ]));
-  assert.equal(merged.total, 2);
-  assert.equal(merged.imported, 1);
-  assert.equal(merged.skipped, 1);
-
-  let db = new Database(targetDb, { readonly: true });
-  try {
-    assert.deepEqual(
-      db.prepare("SELECT wosid, title FROM wos_records ORDER BY wosid").all(),
-      [
-        { wosid: "WOS:ABC", title: "Target Title" },
-        { wosid: "WOS:DEF", title: "Source Only" },
-      ]
-    );
-    assert.deepEqual(
-      db.prepare("SELECT wosid, task_id FROM wos_record_sources ORDER BY wosid, task_id").all(),
-      [
-        { wosid: "WOS:ABC", task_id: "source" },
-        { wosid: "WOS:ABC", task_id: "target" },
-        { wosid: "WOS:DEF", task_id: "source" },
-      ]
-    );
-  } finally {
-    db.close();
-  }
-
-  const forced = cli.runWosDataImport(cli.parseArgs([
-    "node", "cli", "wosdata", "--merge-db", sourceDb, "--db", targetDb, "--force", "--tasks-root", root,
-  ]));
-  assert.equal(forced.imported, 2);
-  db = new Database(targetDb, { readonly: true });
-  try {
-    assert.equal(db.prepare("SELECT title FROM wos_records WHERE wosid = 'WOS:ABC'").get().title, "Source Title");
-  } finally {
-    db.close();
-  }
-});
-
-test("wosdata query runs read-only SELECT statements", () => {
-  const root = temporaryDirectory();
-  const dbPath = path.join(root, "global.sqlite");
-  seedWosDataRecord(dbPath, "query-source", {
-    wosid: "WOS:ABC",
-    title: "Queryable",
-    source: { published: "2026" },
-  });
-
-  const wosidResult = cli.runWosDataImport(cli.parseArgs([
-    "node", "cli", "wosdata", "--wosid", "WOS:ABC", "--db", dbPath, "--tasks-root", root,
-  ]));
-  assert.equal(wosidResult.found, true);
-  assert.equal(wosidResult.row.wosid, "WOS:ABC");
-  assert.equal(wosidResult.row.title, "Queryable");
-  assert.equal(wosidResult.row.record.wosid, "WOS:ABC");
-
-  const result = cli.runWosDataImport(cli.parseArgs([
-    "node", "cli", "wosdata", "--query", "SELECT wosid, title, year FROM wos_records", "--db", dbPath, "--tasks-root", root,
-  ]));
-  assert.equal(result.rowCount, 1);
-  assert.deepEqual(result.rows, [{ wosid: "WOS:ABC", title: "Queryable", year: 2026 }]);
-  assert.throws(
-    () => cli.runWosDataImport(cli.parseArgs([
-      "node", "cli", "wosdata", "--query", "DELETE FROM wos_records", "--db", dbPath, "--tasks-root", root,
-    ])),
-    /Only SELECT queries are allowed/
-  );
-});
-
-test("WOS data SQLite writes validate record shape before insert", () => {
-  const root = temporaryDirectory();
-  const dbPath = path.join(root, "global.sqlite");
-
-  assert.throws(
-    () => cli.importWosDataRecord({ dbPath, record: { title: "Missing WOSID" }, taskId: "bad" }),
-    /Missing WOS ID/
-  );
-  assert.equal(fs.existsSync(dbPath), false);
-
-  assert.throws(
-    () => cli.importWosDataRecord({
-      dbPath,
-      record: { wosid: "WOS:OTHER" },
-      taskId: "bad",
-      expectedWosId: "WOS:EXPECTED",
-    }),
-    /WOS data record mismatch/
-  );
-});
-
-test("parse command skips WOS IDs already present in the global SQLite database", async () => {
-  const root = temporaryDirectory();
-  const tasksRoot = path.join(root, "tasks");
-  const dbPath = path.join(root, "global.sqlite");
-  const csvPath = path.join(root, "input.csv");
-  seedWosDataRecord(dbPath, "seed", {
-    wosid: "WOS:GLOBAL",
-    title: "Global Cache Record",
-    source: { title: "Shared Journal", published: "2026" },
-  });
-  fs.writeFileSync(csvPath, "wosid\nWOS:GLOBAL\n");
-  const importArgs = cli.parseArgs([
-    "node", "cli", "import", "--csv", csvPath, "--task", "global-skip", "--tasks-root", tasksRoot, "--db", dbPath,
-  ]);
-  cli.importWosIds(importArgs);
-
-  const result = await cli.runParse(cli.parseArgs([
-    "node", "cli", "parse", "--task", "global-skip", "--tasks-root", tasksRoot, "--db", dbPath,
-  ]));
-
-  assert.equal(result.selected, 0);
-  assert.equal(result.completed, 1);
-  assert.equal(result.sqlite.imported, 0);
-  assert.equal(result.sqlite.sourceLinked, 1);
-  assert.equal(fs.existsSync(path.join(tasksRoot, "global-skip", "raw", "wosdata", "WOS_GLOBAL.json")), false);
-  const db = new Database(dbPath, { readonly: true });
-  try {
-    assert.deepEqual(
-      db.prepare("SELECT wosid, task_id FROM wos_record_sources ORDER BY task_id").all(),
-      [
-        { wosid: "WOS:GLOBAL", task_id: "global-skip" },
-        { wosid: "WOS:GLOBAL", task_id: "seed" },
-      ]
-    );
-  } finally {
-    db.close();
-  }
-
-  const forcedTaskResult = await cli.runParse(cli.parseArgs([
-    "node", "cli", "parse", "--task", "global-skip", "--tasks-root", tasksRoot, "--db", dbPath, "--force",
-  ]));
-  assert.equal(forcedTaskResult.selected, 0);
-  assert.equal(forcedTaskResult.completed, 1);
-  assert.equal(forcedTaskResult.failed, 0);
-});
-
-test("parse command skips blacklisted WOS IDs unless retry is requested", async () => {
-  const root = temporaryDirectory();
-  const tasksRoot = path.join(root, "tasks");
-  const dbPath = path.join(root, "global.sqlite");
-  const blacklistDbPath = path.join(root, "blacklist.sqlite");
-  const csvPath = path.join(root, "input.csv");
-  fs.writeFileSync(csvPath, "wosid\nWOS:BAD\n");
-  cli.recordWosDataBlacklist({
-    dbPath,
-    blacklistDbPath,
-    wosid: "WOS:BAD",
-    taskId: "prior-task",
-    error: "No full-record JSON parsed for WOS:BAD",
-  });
-  cli.importWosIds(cli.parseArgs([
-    "node", "cli", "import", "--csv", csvPath, "--task", "blacklist-skip", "--tasks-root", tasksRoot, "--db", dbPath, "--blacklist-db", blacklistDbPath,
-  ]));
-
-  const result = await cli.runParse(cli.parseArgs([
-    "node", "cli", "parse", "--task", "blacklist-skip", "--tasks-root", tasksRoot, "--db", dbPath, "--blacklist-db", blacklistDbPath,
-  ]));
-
-  assert.equal(result.selected, 0);
-  assert.equal(result.completed, 0);
-  assert.equal(result.skippedBlacklist, 1);
-  assert.equal(result.blacklisted, 1);
-  assert.equal(result.failed, 0);
-  assert.equal(cli.parseArgs([
-    "node", "cli", "parse", "--task", "blacklist-skip", "--retry-blacklist", "--tasks-root", tasksRoot, "--db", dbPath, "--blacklist-db", blacklistDbPath,
-  ]).retryBlacklist, true);
-});
-
-test("parse command accepts a local WOSID CSV directly", async () => {
-  const root = temporaryDirectory();
-  const tasksRoot = path.join(root, "tasks");
-  const dbPath = path.join(root, "global.sqlite");
-  const csvPath = path.join(root, "input.csv");
-  fs.writeFileSync(csvPath, "UT\nWOS:CSV001\n");
-  const args = cli.parseArgs([
-    "node", "cli", "parse", "--csv", csvPath, "--task", "csv-parse", "--tasks-root", tasksRoot, "--db", dbPath,
-  ]);
-  seedWosDataRecord(dbPath, "seed", {
-    wosid: "WOS:CSV001",
-    identifiers: { accessionNumber: "WOS:CSV001" },
-  });
-
-  const originalLog = console.log;
-  const originalError = console.error;
-  let output = "";
-  const errors = [];
-  console.log = (value = "") => {
-    output += `${value}\n`;
-  };
-  console.error = (message = "") => {
-    errors.push(String(message));
-  };
-  try {
-    const exitCode = await cli.executeCommand(args);
-    assert.equal(exitCode, 0);
-  } finally {
-    console.log = originalLog;
-    console.error = originalError;
-  }
-
-  assert.equal(output.trim(), dbPath);
-  assert.equal(
-    fs.readFileSync(path.join(tasksRoot, "csv-parse", "raw", "csv-parse", "full-record", "csv-parse_wosid.csv"), "utf8").trim(),
-    "wosid\nWOS:CSV001"
-  );
-  assert.ok(errors.join("\n").includes("  skipped             1"));
-  assert.ok(errors.join("\n").includes("  dbBlacklist         "));
-  assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].status, "parse-completed");
-  assert.equal(fs.existsSync(path.join(tasksRoot, "csv-parse", "raw", "wosdata")), false);
 });
 
 test("counts BibTeX entries without treating metadata directives as records", () => {
@@ -1963,7 +1205,7 @@ test("generates alphanumeric TID timestamp task IDs", () => {
   const taskId = cli.makeTaskId(new Date(2026, 5, 9, 20, 30, 40));
   assert.equal(taskId, "TID20260609203040");
   assert.match(cli.parseArgs(["node", "cli", "run", "--uuid", "abc"]).taskId, /^TID\d{14}$/);
-  assert.match(cli.parseArgs(["node", "cli", "parse", "--csv", "wosids.csv"]).taskId, /^TID\d{14}$/);
+  assert.match(cli.parseArgs(["node", "cli", "import", "--csv", "wosids.csv"]).taskId, /^TID\d{14}$/);
 });
 
 test("initializes and reports a cwd-scoped workspace", () => {
@@ -2174,6 +1416,57 @@ test("SID pool parses, deduplicates, and migrates legacy saved SID config", () =
   assert.equal(status.playwrightVisible, true);
 });
 
+test("settings command can clear the saved SID pool", () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "settings", "--clear-sids", "--tasks-root", root]);
+  cli.addSidsToConfig(args, ["one two"], { activate: true });
+
+  const cleared = cli.clearSavedSidConfig(args);
+  const config = readJson(cli.globalConfigPath(), {});
+
+  assert.equal(args.clearSids, true);
+  assert.equal(cleared, true);
+  assert.deepEqual(config.sids, undefined);
+  assert.equal(args.sid, "");
+  assert.equal(args.sidPoolCount, 0);
+});
+
+test("settings command can clear saved dead SID history", () => {
+  const root = temporaryDirectory();
+  writeJson(cli.globalConfigPath(), {
+    sids: ["live"],
+    sidCursor: 0,
+    deadSids: [{ sid: "dead", reason: "expired", removedAt: "2026-06-14T00:00:00.000Z" }],
+  });
+  const args = cli.parseArgs(["node", "cli", "settings", "--clear-dead-sids", "--tasks-root", root]);
+
+  const cleared = cli.clearDeadSidHistory(args);
+  const config = readJson(cli.globalConfigPath(), {});
+
+  assert.equal(args.clearDeadSids, true);
+  assert.equal(cleared, true);
+  assert.deepEqual(config.sids, ["live"]);
+  assert.equal(config.deadSids, undefined);
+});
+
+test("advanceSavedSid rotates to the next saved SID", () => {
+  const root = temporaryDirectory();
+  writeJson(cli.globalConfigPath(), { sids: ["one", "two", "three"], sidCursor: 0 });
+  const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", root]);
+  args.sid = "one";
+  args.sidSource = "config";
+  args.sidPoolIndex = 0;
+  args.sidPoolCount = 3;
+
+  const rotated = cli.advanceSavedSid(args);
+  const config = readJson(cli.globalConfigPath(), {});
+
+  assert.equal(rotated.activeSid, "two");
+  assert.equal(args.sid, "two");
+  assert.equal(args.sidPoolIndex, 1);
+  assert.equal(config.sidCursor, 1);
+});
+
 test("SID pool is shared across task roots through global config", () => {
   const firstRoot = temporaryDirectory();
   const globalConfig = cli.globalConfigPath();
@@ -2361,6 +1654,23 @@ test("quick SID validation classifies lightweight WOS responses", async () => {
   assert.equal(invalid.ok, false);
 });
 
+test("quick SID validation treats undefined WOS session shell as invalid", async () => {
+  const args = cli.parseArgs(["node", "cli", "workspace", "--sid", "expired", "--tasks-root", temporaryDirectory()]);
+  const result = await cli.quickValidateSid(args, {
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      url: "https://www.webofscience.com/wos/",
+      async text() {
+        return "<script>window.sessionData = undefined;</script>";
+      },
+    }),
+  });
+
+  assert.equal(result.status, "invalid");
+  assert.equal(result.ok, false);
+});
+
 test("quick SID validation reports missing or unknown without prompting", async () => {
   const missingArgs = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", temporaryDirectory()]);
   assert.equal((await cli.quickValidateSid(missingArgs)).status, "missing");
@@ -2399,7 +1709,11 @@ test("quick SID validation treats login pages as unknown without HTTP rejection"
 
 test("checkSid returns immediately when the lightweight SID probe is valid", async () => {
   const args = cli.parseArgs(["node", "cli", "check", "--tasks-root", temporaryDirectory()]);
+  const messages = [];
   const result = await cli.checkSid(args, {
+    report(message) {
+      messages.push(message);
+    },
     async quickValidateSid() {
       return {
         status: "valid",
@@ -2417,6 +1731,34 @@ test("checkSid returns immediately when the lightweight SID probe is valid", asy
   assert.equal(result.status, "valid");
   assert.equal(result.checkedWith, "http-probe");
   assert.equal(result.sidSource, "config");
+  assert.equal(messages.length, 0);
+});
+
+test("checkSid reports which SID is being validated", async () => {
+  const root = temporaryDirectory();
+  writeJson(cli.globalConfigPath(), { sids: ["USW2EC0B24fGZzu0fzuFeJTlS61zb"], sidCursor: 0 });
+  const args = cli.parseArgs(["node", "cli", "check", "--tasks-root", root]);
+  const messages = [];
+
+  await cli.checkSid(args, {
+    report(message) {
+      messages.push(message);
+    },
+    async quickValidateSid() {
+      return {
+        status: "valid",
+        sidSource: "config",
+        href: "https://www.webofscience.com/wos/",
+        message: "SID accepted by WOS",
+      };
+    },
+    async validateAndSaveSid() {
+      assert.fail("valid SID should not trigger browser validation");
+    },
+  });
+
+  assert.match(messages[0], /Validating WOS authentication/);
+  assert.match(messages[0], /USW2\.\.\.61zb/);
 });
 
 test("check command output does not expose SID details", () => {
@@ -2547,6 +1889,35 @@ test("reads WOS IDs from a named CSV column and deduplicates them", () => {
   assert.deepEqual(cli.readWosIdsCsv(csvPath), ["WOS:ABC", "ALT:1234"]);
 });
 
+test("reads UUIDs from a uuid.csv file by regex extraction", () => {
+  const root = temporaryDirectory();
+  const csvPath = path.join(root, "uuid.csv");
+  fs.writeFileSync(csvPath, [
+    "label,notes",
+    "first,01455913-d57e-4730-aa74-a3cbffe7014c-01b861c2bc",
+    "second,https://www.webofscience.com/wos/woscc/summary/11111111-2222-3333-4444-555555555555-6666666666/relevance/1",
+  ].join("\n"));
+
+  assert.deepEqual(cli.readUuidCsv(csvPath), [
+    "01455913-d57e-4730-aa74-a3cbffe7014c-01b861c2bc",
+    "11111111-2222-3333-4444-555555555555-6666666666",
+  ]);
+});
+
+test("finds uuid.csv files recursively", () => {
+  const root = temporaryDirectory();
+  fs.mkdirSync(path.join(root, "a", "b"), { recursive: true });
+  fs.writeFileSync(path.join(root, "uuid.csv"), "uuid\n");
+  fs.writeFileSync(path.join(root, "a", "b", "UUID.csv"), "uuid\n");
+  fs.mkdirSync(path.join(root, "node_modules"), { recursive: true });
+  fs.writeFileSync(path.join(root, "node_modules", "uuid.csv"), "uuid\n");
+
+  assert.deepEqual(cli.findUuidCsvFiles(root), [
+    path.join(root, "a", "b", "UUID.csv"),
+    path.join(root, "uuid.csv"),
+  ]);
+});
+
 test("imports an external WOS ID CSV as a complete task", () => {
   const root = temporaryDirectory();
   const csvPath = path.join(root, "input.csv");
@@ -2646,6 +2017,46 @@ test("raw batch plan identifies arbitrary missing TXT ranges", () => {
   ]);
 });
 
+test("BibTeX batch plan identifies arbitrary missing ranges", () => {
+  const root = temporaryDirectory();
+  const paths = cli.getRunPaths(root);
+  const bibDir = path.join(paths.rawRoot, "query", "bib");
+  fs.mkdirSync(bibDir, { recursive: true });
+  fs.writeFileSync(path.join(bibDir, "query_1_500.bib"), "@article{a}\n");
+  fs.writeFileSync(path.join(bibDir, "query_1001_1500.bib"), "@article{b}\n");
+
+  const plan = cli.bibBatchPlanForRange(paths, "query", 1, 2000, 500);
+
+  assert.equal(plan.plannedBatchCount, 4);
+  assert.equal(plan.complete, false);
+  assert.equal(plan.coveredCount, 1000);
+  assert.deepEqual(plan.presentFiles, ["query_1_500.bib", "query_1001_1500.bib"]);
+  assert.deepEqual(plan.missingBatches, [
+    { markFrom: 501, markTo: 1000 },
+    { markFrom: 1501, markTo: 2000 },
+  ]);
+});
+
+test("writes and reads per-UUID TXT completion markers", () => {
+  const root = temporaryDirectory();
+  const paths = cli.getRunPaths(root);
+  const uuid = "01455913-d57e-4730-aa74-a3cbffe7014c-01b861c2bc";
+  fs.mkdirSync(cli.rawBatchDir(paths, uuid), { recursive: true });
+
+  const markerPath = cli.writeRawUuidCompleteMarker(paths, {
+    uuid,
+    expectedCount: 1000,
+    rangeStart: 1,
+    rangeEnd: 1000,
+  });
+  const marker = cli.readRawUuidCompleteMarker(paths, uuid);
+
+  assert.equal(markerPath, cli.rawUuidCompleteMarkerPath(paths, uuid));
+  assert.equal(marker.uuid, uuid);
+  assert.equal(marker.expectedCount, 1000);
+  assert.equal(marker.rangeEnd, 1000);
+});
+
 test("raw batch parsing handles large existing files without spreading rows", () => {
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
@@ -2715,6 +2126,7 @@ test("failed TXT summaries do not short-circuit raw resume", () => {
   assert.match(runMethod[0], /const priorRunFailed = isFailedTxtRunSummary\(samePriorSummary\);/);
   assert.match(runMethod[0], /const priorRunUnverifiedPartial = isUnverifiedPartialTxtSummary\(samePriorSummary, args\);/);
   assert.match(runMethod[0], /const priorSummary = \(priorRunFailed \|\| priorRunUnverifiedPartial\) \? \{\} : samePriorSummary;/);
+  assert.match(runMethod[0], /const canRepairFromRaw = !args\.force &&/);
   assert.match(runMethod[0], /\(\(args\.reuseRaw && !priorRunFailed && !priorRunUnverifiedPartial\) \|\| canRepairFromRaw\)/);
 });
 
@@ -2903,7 +2315,6 @@ test("validate accepts BibTeX batch tasks", () => {
   const paths = cli.withRawSource(cli.getRunPaths(taskDir), "query");
   const queryBibDir = path.join(paths.rawRoot, "query", "bib");
   fs.mkdirSync(queryBibDir, { recursive: true });
-  fs.mkdirSync(paths.bibExportDir, { recursive: true });
   writeJson(path.join(tasksRoot, "index.json"), {
     version: 1,
     tasks: [{ taskId: "bib-task", taskDir: "bib-task", uuid: "query" }],
@@ -2915,9 +2326,10 @@ test("validate accepts BibTeX batch tasks", () => {
     uuid: "query",
     expectedCount: 2,
     batchCount: 1,
+    rangeStart: 1,
+    rangeEnd: 2,
   });
   fs.writeFileSync(path.join(queryBibDir, "query_1_2.bib"), "@article{demo}\n");
-  fs.writeFileSync(path.join(paths.bibExportDir, "query.bib"), "@article{demo}\n");
 
   const result = cli.validateTask(cli.parseArgs([
     "node", "cli", "validate", "--task", "bib-task", "--tasks-root", tasksRoot,
@@ -2925,7 +2337,7 @@ test("validate accepts BibTeX batch tasks", () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.bibBatches, 1);
-  assert.equal(result.bibFile, path.join(paths.bibExportDir, "query.bib"));
+  assert.equal(result.bibDir, queryBibDir);
   assert.equal(result.wosids, 0);
 });
 
@@ -3024,12 +2436,11 @@ test("reuse-raw preserves expected count and stores a relative task path", async
   const result = await cli.run(args);
   assert.equal(result.ok, true);
   assert.equal(result.expectedCount, 2);
-  assert.equal(result.uniqueCount, 2);
-  assert.equal(result.files.wosidsCsv, path.join(queryPaths.wosIdsDir, "query_wosid.csv"));
-  assert.deepEqual(cli.readWosIdsCsv(result.files.wosidsCsv), ["WOS:A", "WOS:B"]);
+  assert.equal(result.files.rawDir, queryRawDir);
   assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "wosids_detailed.csv")), false);
   assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "wosids.json")), false);
   assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "full_records.txt")), false);
+  assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "query_wosid.csv")), false);
   assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].taskDir, "reuse");
 });
 
@@ -3088,17 +2499,16 @@ test("missing WOS ID export is rebuilt from existing raw batches", async () => {
     taskId: "repair-run",
     uuid: "query",
     expectedCount: 2,
-    uniqueCount: 2,
+    rangeStart: 1,
+    rangeEnd: 2,
     summaryHref: args.url,
-    files: { wosidsCsv: path.join(queryPaths.wosIdsDir, "query_wosid.csv") },
   });
   fs.writeFileSync(path.join(queryRawDir, "query_1_2.txt"), "UT WOS:A\nUT WOS:B\n");
 
   const result = await cli.run(args);
 
   assert.equal(result.ok, true);
-  assert.equal(result.files.wosidsCsv, path.join(queryPaths.wosIdsDir, "query_wosid.csv"));
-  assert.deepEqual(cli.readWosIdsCsv(result.files.wosidsCsv), ["WOS:A", "WOS:B"]);
+  assert.equal(result.files.rawDir, queryRawDir);
 });
 
 test("completed WOS ID task is reused without refetching", async () => {
@@ -3111,8 +2521,6 @@ test("completed WOS ID task is reused without refetching", async () => {
   fs.mkdirSync(paths.dataDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
   writeJson(paths.manifest, { command: "iiaide-wos" });
-  const csvPath = path.join(paths.dataDir, "query_wosid.csv");
-  fs.writeFileSync(csvPath, "wosid\nWOS:A\n");
   fs.writeFileSync(path.join(paths.dataDir, "query_1_1.txt"), "UT WOS:A\n");
   writeJson(paths.summary, {
     ok: true,
@@ -3120,11 +2528,9 @@ test("completed WOS ID task is reused without refetching", async () => {
     taskId: "complete-run",
     uuid: "query",
     expectedCount: 1,
-    uniqueCount: 1,
     rangeStart: 1,
     rangeEnd: 1,
     rowText: "1 result",
-    files: { wosidsCsv: csvPath },
   });
 
   const errors = [];
@@ -3137,9 +2543,9 @@ test("completed WOS ID task is reused without refetching", async () => {
     console.error = originalError;
   }
 
-  assert.equal(result.files.wosidsCsv, csvPath);
+  assert.equal(result.files.rawDir, paths.dataDir);
   assert.equal(result.uuid, "query");
-  assert.deepEqual(errors, ["WOS ID CSV already exists; skipping download."]);
+  assert.deepEqual(errors, ["WOS raw TXT batches already exist; skipping download."]);
 });
 
 test("completed WOS ID command returns before SID preparation", async () => {
@@ -3152,8 +2558,6 @@ test("completed WOS ID command returns before SID preparation", async () => {
   fs.mkdirSync(paths.dataDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
   writeJson(paths.manifest, { command: "iiaide-wos" });
-  const csvPath = path.join(paths.dataDir, "query_wosid.csv");
-  fs.writeFileSync(csvPath, "wosid\nWOS:A\n");
   fs.writeFileSync(path.join(paths.dataDir, "query_1_1.txt"), "UT WOS:A\n");
   writeJson(paths.summary, {
     ok: true,
@@ -3161,11 +2565,9 @@ test("completed WOS ID command returns before SID preparation", async () => {
     taskId: "complete-command",
     uuid: "query",
     expectedCount: 1,
-    uniqueCount: 1,
     rangeStart: 1,
     rangeEnd: 1,
     rowText: "1 result",
-    files: { wosidsCsv: csvPath },
   });
 
   const originalLog = console.log;
@@ -3184,8 +2586,8 @@ test("completed WOS ID command returns before SID preparation", async () => {
     console.error = originalError;
   }
 
-  assert.equal(output.trim(), csvPath);
-  assert.deepEqual(errors, ["WOS ID CSV already exists; skipping download."]);
+  assert.equal(output.trim(), paths.dataDir);
+  assert.deepEqual(errors, ["WOS raw TXT batches already exist; skipping download."]);
 });
 
 test("completed BibTeX task is reused without refetching", async () => {
@@ -3195,18 +2597,18 @@ test("completed BibTeX task is reused without refetching", async () => {
     "--tasks-root", tasksRoot,
   ]);
   const paths = cli.withRawSource(cli.getRunPaths(args.outDir), "query");
-  fs.mkdirSync(paths.bibExportDir, { recursive: true });
+  fs.mkdirSync(paths.bibDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
   writeJson(paths.manifest, { command: "iiaide-wos", operation: "bib" });
-  const bibPath = path.join(paths.bibExportDir, "query.bib");
-  fs.writeFileSync(bibPath, "@article{demo}\n");
+  fs.writeFileSync(path.join(paths.bibDir, "query_1_1.bib"), "@article{demo}\n");
   writeJson(paths.summary, {
     ok: true,
     method: "wos-js-export-fetchBibBatches",
     taskId: "complete-bib",
     uuid: "query",
     expectedCount: 1,
-    files: { bibFile: bibPath },
+    rangeStart: 1,
+    rangeEnd: 1,
   });
 
   const errors = [];
@@ -3219,9 +2621,9 @@ test("completed BibTeX task is reused without refetching", async () => {
     console.error = originalError;
   }
 
-  assert.equal(result.files.bibFile, bibPath);
+  assert.equal(result.files.bibDir, paths.bibDir);
   assert.equal(result.uuid, "query");
-  assert.deepEqual(errors, ["BibTeX already exists; skipping download."]);
+  assert.deepEqual(errors, ["BibTeX raw batches already exist; skipping download."]);
 });
 
 test("missing combined BibTeX export is rebuilt from existing raw batches", async () => {
@@ -3242,14 +2644,14 @@ test("missing combined BibTeX export is rebuilt from existing raw batches", asyn
     taskId: "repair-bib",
     uuid: "query",
     expectedCount: 1,
-    files: { bibFile: path.join(queryPaths.bibExportDir, "query.bib") },
+    rangeStart: 1,
+    rangeEnd: 1,
   });
   fs.writeFileSync(path.join(queryBibDir, "query_1_1.bib"), "@article{demo,\n  title={Demo}\n}\n");
 
   const result = await cli.runBib(args);
 
-  assert.equal(result.files.bibFile, path.join(queryPaths.bibExportDir, "query.bib"));
-  assert.equal(fs.readFileSync(result.files.bibFile, "utf8"), "@article{demo,\n  title={Demo}\n}\n");
+  assert.equal(result.files.bibDir, queryBibDir);
 });
 
 test("completed BibTeX command returns before SID preparation", async () => {
@@ -3259,18 +2661,18 @@ test("completed BibTeX command returns before SID preparation", async () => {
     "--tasks-root", tasksRoot,
   ]);
   const paths = cli.withRawSource(cli.getRunPaths(args.outDir), "query");
-  fs.mkdirSync(paths.bibExportDir, { recursive: true });
+  fs.mkdirSync(paths.bibDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
   writeJson(paths.manifest, { command: "iiaide-wos", operation: "bib" });
-  const bibPath = path.join(paths.bibExportDir, "query.bib");
-  fs.writeFileSync(bibPath, "@article{demo}\n");
+  fs.writeFileSync(path.join(paths.bibDir, "query_1_1.bib"), "@article{demo}\n");
   writeJson(paths.summary, {
     ok: true,
     method: "wos-js-export-fetchBibBatches",
     taskId: "complete-bib-command",
     uuid: "query",
     expectedCount: 1,
-    files: { bibFile: bibPath },
+    rangeStart: 1,
+    rangeEnd: 1,
   });
 
   const originalLog = console.log;
@@ -3289,8 +2691,8 @@ test("completed BibTeX command returns before SID preparation", async () => {
     console.error = originalError;
   }
 
-  assert.equal(output.trim(), bibPath);
-  assert.deepEqual(errors, ["BibTeX already exists; skipping download."]);
+  assert.equal(output.trim(), paths.bibDir);
+  assert.deepEqual(errors, ["BibTeX raw batches already exist; skipping download."]);
 });
 
 test("managed current task placeholder can be reused without force", async () => {
@@ -3311,7 +2713,7 @@ test("managed current task placeholder can be reused without force", async () =>
   const result = await cli.run(args);
 
   assert.equal(result.ok, true);
-  assert.equal(result.files.wosidsCsv, path.join(queryPaths.wosIdsDir, "query_wosid.csv"));
+  assert.equal(result.files.rawDir, queryRawDir);
 });
 
 test("reuse-raw refuses partial batches without marking complete", async () => {
@@ -3340,6 +2742,10 @@ test("BibTeX export refuses incomplete downloaded record counts", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
   const match = source.match(/async function exportBibFromWos[\s\S]*?\n}\n\nfunction combineBibFiles/);
   assert.ok(match, "exportBibFromWos source should be present");
+  assert.match(match[0], /const resumePlan = bibBatchPlanForRange/);
+  assert.match(match[0], /resume-bib-raw/);
+  assert.match(match[0], /for \(const missingBatch of resumePlan\.missingBatches\)/);
+  assert.match(match[0], /Incomplete raw BibTeX batches after export/);
   assert.match(match[0], /downloadedEntries < selectedCount/);
   assert.match(match[0], /Incomplete BibTeX export/);
   assert.match(match[0], /throw new Error/);
@@ -3422,6 +2828,17 @@ test("interactive URL or UUID prompt supports saved source fallback", () => {
   assert.match(workflowMatch[0], /return \{ refresh: true \}/);
 });
 
+test("interactive WOS workflows ask for source before SID setup", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
+  const method = source.match(/async function interactiveArgs[\s\S]*?\n}\n\nmodule\.exports = \{/);
+  assert.ok(method, "interactiveArgs should be present");
+  const sourcePromptIndex = method[0].indexOf('const source = await askParameterOrCancel(');
+  const sidPromptIndex = method[0].indexOf('sid = await askSidFromBrowserOrManual(');
+  assert.ok(sourcePromptIndex >= 0, "source prompt should be present");
+  assert.ok(sidPromptIndex >= 0, "SID prompt should be present");
+  assert.ok(sourcePromptIndex < sidPromptIndex, "source prompt should happen before SID setup");
+});
+
 test("interactive workflow does not print saved SID noise", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
   assert.doesNotMatch(source, /saved SID will be used/);
@@ -3439,7 +2856,7 @@ test("interactive startup does not force SID setup before workflow selection", (
 test("interactive WOS workflows set up SID on demand and continue current flow", () => {
   const interactiveSource = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
   const menuSource = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const sidBranch = interactiveSource.match(/let sid = ""[\s\S]*?const sourceFallback/);
+  const sidBranch = interactiveSource.match(/const sourceFlag[\s\S]*?if \(sid\) result\.push\("--sid", sid\);/);
   const helperBranch = menuSource.match(/readBrowserSid: \(\) => readSidFromBrowser\(menuArgs\)[\s\S]*?setCurrentTask/);
   assert.ok(sidBranch, "interactive on-demand SID branch should be present");
   assert.ok(helperBranch, "interactive saveSid helper should be present");
@@ -3456,19 +2873,21 @@ test("interactive WOS workflows set up SID on demand and continue current flow",
   assert.match(helperBranch[0], /workspaceStatus\(menuArgs, refreshedSidCheck\)/);
 });
 
-test("interactive parse restart resumes the selected command instead of menu", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
-  const match = source.match(/const args = parseArgs\(\[argv\[0\], argv\[1\], \.\.\.selectedArgs\]\);[\s\S]*?const exitCode = await runParsedCommand\(args, \{ argv: \[argv\[0\], argv\[1\], \.\.\.selectedArgs\] \}\);/);
-  assert.ok(match, "interactive selected command execution should be present");
-  assert.match(match[0], /runParsedCommand\(args, \{ argv: \[argv\[0\], argv\[1\], \.\.\.selectedArgs\] \}\)/);
-});
-
 test("interactive startup no longer auto-opens a browser when SID is invalid", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
   const match = source.match(/async function runInteractiveMenu[\s\S]*?\n}\n\nasync function main/);
   assert.ok(match, "runInteractiveMenu source should be present");
   assert.match(match[0], /const sidCheck = await quickValidateSid\(menuArgs\)/);
   assert.doesNotMatch(match[0], /prepareWosSession\(menuArgs, \{ keepAlive: true, visible: true \}\)/);
+});
+
+test("prepareWosSession rotates to the next saved SID when a kept-alive session switches UUID", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const match = source.match(/async function prepareWosSession[\s\S]*?\n}\n\nasync function waitForUsableWosSession/);
+  assert.ok(match, "prepareWosSession should be present");
+  assert.match(match[0], /sharedWosSession\.lastUuid/);
+  assert.match(match[0], /advanceSavedSid\(args\)/);
+  assert.match(match[0], /WOS UUID changed from/);
 });
 
 test("interactive update restarts the CLI after a successful update", () => {
