@@ -331,9 +331,10 @@ to export a slice of WOS records. Re-running the
 same task first reads the WOS record count, converts the selected range into
 500-record TXT batch files, then skips any batch file already present on disk
 and downloads only the missing files. During long exports, each completed batch
-is written to disk immediately, so an interrupted browser session still leaves
-resumable raw TXT batches behind. The task is complete once the selected TXT
-batch plan is complete. If WOS rejects a TXT export request for
+is written to disk immediately, and progress details show the current batch
+ordinal, total batches, and remaining batches. An interrupted browser session
+still leaves resumable raw TXT batches behind. The task is complete once the
+selected TXT batch plan is complete. If WOS rejects a TXT export request for
 a missing batch, the CLI treats the active SID as expired, removes it from the
 saved pool, reopens WOS with the next saved SID, and requests that same missing
 batch again.
@@ -362,8 +363,9 @@ The wos.js helper owns WOS request details; the CLI writes task files and
 displays progress. Re-running the same BibTeX task reads the selected WOS
 record range, skips any existing 500-record raw `.bib` batch, and downloads
 only missing ranges. The task is complete once the selected raw BibTeX batch
-plan is complete. Incomplete BibTeX batch coverage is not marked completed. Use
-`--from-index` and `--limit` for an explicit range.
+plan is complete. BibTeX progress details show the current batch ordinal, total
+batches, and remaining batches. Incomplete BibTeX batch coverage is not marked
+completed. Use `--from-index` and `--limit` for an explicit range.
 
 You can also start the batch UUID TXT workflow directly:
 
@@ -374,7 +376,9 @@ iiaide-wos batch-run --task "batch-demo" --search-root "."
 `batch-run` recursively searches `--search-root` (default: the current working
 directory) for files named `uuid.csv`, extracts UUID-shaped values from their
 contents, de-duplicates them, and downloads each UUID through the same
-500-record resumable TXT checklist flow used by `run`.
+500-record resumable TXT checklist flow used by `run`. Its outer progress
+details also show the current UUID batch ordinal, total UUID batches, and
+remaining UUID batches.
 
 ### 2D. Create A Task From An Existing WOS ID CSV
 

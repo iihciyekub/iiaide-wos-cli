@@ -158,6 +158,9 @@ a fast hint, but still validate the raw batch checklist for the recorded window
 plan before skipping a UUID; if files are missing, the UUID is resumed instead
 of being skipped.
 The two-sort large export can cover at most 200,000 records for a UUID.
+Batch UUID TXT progress details show the current UUID batch ordinal, total UUID
+batches, and remaining UUID batches. The per-UUID TXT export progress uses the
+same current/total/remaining batch detail format when it is shown directly.
 
 CLI form:
 

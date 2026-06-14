@@ -3,6 +3,11 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.94 - 2026-06-15
+
+- Show current batch ordinal, total batch count, and remaining batch count in
+  TXT, BibTeX, and batch UUID TXT progress details.
+
 ## 0.4.93 - 2026-06-15
 
 - Change the WOS TXT export window limit to 200 files per sort, so the

@@ -252,6 +252,12 @@ test("calculates WOS download batches in 500-record chunks by default", () => {
   assert.equal(cli.downloadBatchCount(1001), 3);
 });
 
+test("formats batch progress with ordinal and remaining count", () => {
+  assert.equal(cli.formatBatchProgressDetail(3, 10, "1001-1500"), "batch 3/10, 7 left 1001-1500");
+  assert.equal(cli.formatBatchProgressDetail(12, 10), "batch 10/10, 0 left");
+  assert.equal(cli.formatBatchProgressDetail(0, 0), "batch 0/0, 0 left");
+});
+
 test("calculates bounded WOS record ranges before download planning", () => {
   assert.equal(cli.boundedRecordCount(800, 1, 0), 800);
   assert.equal(cli.boundedRecordCount(800, 1, 200), 200);
@@ -1200,6 +1206,7 @@ test("BibTeX export path uses injected wos.js export API while reading summary c
   assert.match(match[0], /reportDownloadPlan/);
   assert.match(match[0], /batchSize = DEFAULT_BATCH_SIZE/);
   assert.match(match[0], /exportBibBatchesViaWosJs/);
+  assert.match(match[0], /formatBatchProgressDetail\(currentBatch, progressTotal/);
   assert.doesNotMatch(source, /api\/wosnx\/indic\/export\/saveToFile/);
   assert.doesNotMatch(source, /action:\s*["']saveTo(?:Bibtex|FieldTagged)["']/);
 });
@@ -2209,12 +2216,14 @@ test("batch UUID TXT runs per-UUID inspect and downloads quietly", () => {
   assert.ok(exportMethod, "exportFromWos should be present");
   assert.match(batchMethod[0], /quiet: true,/);
   assert.match(batchMethod[0], /shortUuid\(uuid\)/);
+  assert.match(batchMethod[0], /formatBatchProgressDetail\(index \+ 1, uuids\.length/);
   assert.match(exportMethod[0], /createSpinner\(authValidationMessage\(args\), \{ quiet \}\)/);
-  assert.match(exportMethod[0], /createProgress\("Exporting records", batchCount, \{ quiet \}\)/);
+  assert.match(exportMethod[0], /createProgress\("Exporting records", batchProgressTotal, \{ quiet \}\)/);
   assert.match(exportMethod[0], /const useWindowProgress = useSortWindowDirs/);
   assert.match(exportMethod[0], /txtExportProgressLabel\(window\.sortBy\)/);
-  assert.match(exportMethod[0], /createProgress\(windowLabel, window\.plan\.plannedBatchCount, \{ quiet \}\)/);
+  assert.match(exportMethod[0], /createProgress\(windowLabel, batchProgressTotal, \{ quiet \}\)/);
   assert.match(exportMethod[0], /batchOrdinalInRange\(markTo, currentWindowStartIndex, batchSize\)/);
+  assert.match(exportMethod[0], /formatBatchProgressDetail\(currentBatch, batchProgressTotal/);
   assert.match(exportMethod[0], /batchOrdinalInRange\(firstMissing\.markFrom - 1, currentWindowStartIndex, batchSize\)/);
   assert.match(source, /if \(sortBy === "author-ascending"\) return "A-Z TXT"/);
   assert.match(source, /if \(sortBy === "author-descending"\) return "Z-A TXT"/);
