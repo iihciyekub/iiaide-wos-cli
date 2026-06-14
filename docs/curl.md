@@ -83,7 +83,15 @@ Raw batch naming:
 
 ```text
 raw/<uuid>/full-record/<uuid>_<start>_<end>.txt
+raw/<uuid>/full-record/author-ascending/<uuid>_<start>_<end>.txt
+raw/<uuid>/full-record/author-descending/<uuid>_<start>_<end>.txt
 ```
+
+The per-sort layout is used only for large UUID exports that exceed the
+200,000-record single-sort WOS window. The CLI passes `sortBy` to the
+browser-side export helper for each window and writes `_wos_export_window.json`
+inside each sort directory so resume planning can distinguish A-Z and Z-A
+batches with the same numeric range.
 
 ## BibTeX Export
 

@@ -25,6 +25,11 @@ const { DEFAULT_MUST_LOGIN_URL, loginAndExtractMustSid } = require("./lib/wos-mu
 const { version: VERSION } = require("../package.json");
 
 const DEFAULT_BATCH_SIZE = 500;
+const MAX_WOS_EXPORT_BATCHES = 400;
+const MAX_WOS_EXPORT_RECORDS = MAX_WOS_EXPORT_BATCHES * DEFAULT_BATCH_SIZE;
+const MAX_WOS_DUAL_SORT_RECORDS = MAX_WOS_EXPORT_RECORDS * 2;
+const WOS_LARGE_EXPORT_SORTS = ["author-ascending", "author-descending"];
+const WOS_EXPORT_WINDOW_MARKER_FILE = "_wos_export_window.json";
 const DEFAULT_TIMEOUT_MS = 120000;
 const SID_POOL_WAIT_INTERVAL_MS = 10000;
 const DEFAULT_WOS_PROTOCOL = "https";
@@ -169,6 +174,7 @@ Output management:
 Export options:
   --sort-by <sort>        Summary sort key. Default: relevance
   --batch-size <n>        WOS export API batch size. Default: 500, max: 500
+  --allow-large-export    For UUID result sets over 200,000 records, use author ascending/descending windows up to 400,000 records
   --timeout-ms <n>        Navigation/API timeout. Default: 120000
   --wos-domain <domain>   WOS domain. Default: www.webofscience.com
   --wosjs <file>          Browser-side wos.js injection file. Default: ./import/wos.js
@@ -224,6 +230,7 @@ function parseArgs(argv) {
     tasksRoot: path.resolve(process.cwd(), "tasks"),
     sortBy: "relevance",
     batchSize: DEFAULT_BATCH_SIZE,
+    allowLargeExport: false,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     wosDomain: normalizeWosDomain(process.env.WOS_DOMAIN || DEFAULT_WOS_DOMAIN),
     wosJsPath: process.env.WOSJS_PATH || DEFAULT_WOSJS_PATH,
@@ -319,6 +326,7 @@ function parseArgs(argv) {
     else if (arg === "--tasks-root" || arg === "--output-root") args.tasksRoot = readValue(arg, i++);
     else if (arg === "--sort-by") args.sortBy = readValue(arg, i++);
     else if (arg === "--batch-size") args.batchSize = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--allow-large-export") args.allowLargeExport = true;
     else if (arg === "--timeout-ms" || arg === "--timeout") args.timeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--wos-domain" || arg === "--domain") {
       args.wosDomain = normalizeWosDomain(readValue(arg, i++));
@@ -1857,8 +1865,16 @@ function readCompletedRunSummary(paths, args) {
   const rangeEnd = Math.max(0, Number(summary.rangeEnd) || 0) ||
     (summary.expectedCount ? rangeStart + Math.max(0, Number(summary.expectedCount) || 0) - 1 : 0);
   if (!rangeEnd) return null;
-  const plan = rawBatchPlanForRange(paths, identifier, rangeStart, rangeEnd, DEFAULT_BATCH_SIZE);
-  if (plan.missingBatches.length) return null;
+  if (Array.isArray(summary.exportWindows) && summary.exportWindows.length) {
+    for (const window of summary.exportWindows) {
+      const sortOptions = isLargeExportSort(window.sortBy) ? { sortBy: window.sortBy } : {};
+      const plan = rawBatchPlanForRange(paths, identifier, window.startIndex || 1, window.endIndex || 0, DEFAULT_BATCH_SIZE, sortOptions);
+      if (plan.missingBatches.length) return null;
+    }
+  } else {
+    const plan = rawBatchPlanForRange(paths, identifier, rangeStart, rangeEnd, DEFAULT_BATCH_SIZE);
+    if (plan.missingBatches.length) return null;
+  }
   return {
     ...summary,
     files: {
@@ -2054,6 +2070,95 @@ function selectedRecordRange(totalRecords, startIndex = 1, limit = 0) {
   };
 }
 
+function planWosExportWindows(totalRecords, batchSize = DEFAULT_BATCH_SIZE, options = {}) {
+  const selectedCount = Math.max(0, Number(totalRecords) || 0);
+  const size = Math.max(1, Number(batchSize) || DEFAULT_BATCH_SIZE);
+  const preferredSortBy = options.sortBy || "relevance";
+  if (!selectedCount) return [];
+  if (selectedCount <= MAX_WOS_EXPORT_RECORDS) {
+    return [{
+      sortBy: preferredSortBy,
+      startIndex: 1,
+      endIndex: selectedCount,
+      selectedCount,
+      batchCount: downloadBatchCount(selectedCount, size),
+      limitedByWosWindow: false,
+    }];
+  }
+
+  const totalBatches = downloadBatchCount(selectedCount, size);
+  const firstBatchCount = MAX_WOS_EXPORT_BATCHES;
+  const remainingBatchCount = Math.max(0, totalBatches - MAX_WOS_EXPORT_BATCHES);
+  const overlapBatchCount = remainingBatchCount ? 1 : 0;
+  const secondBatchCount = Math.min(MAX_WOS_EXPORT_BATCHES, remainingBatchCount + overlapBatchCount);
+  const coveredCount = Math.min(selectedCount, MAX_WOS_DUAL_SORT_RECORDS);
+
+  return [
+    {
+      sortBy: WOS_LARGE_EXPORT_SORTS[0],
+      startIndex: 1,
+      endIndex: MAX_WOS_EXPORT_RECORDS,
+      selectedCount: MAX_WOS_EXPORT_RECORDS,
+      batchCount: firstBatchCount,
+      limitedByWosWindow: true,
+    },
+    {
+      sortBy: WOS_LARGE_EXPORT_SORTS[1],
+      startIndex: 1,
+      endIndex: secondBatchCount * size,
+      selectedCount: secondBatchCount * size,
+      batchCount: secondBatchCount,
+      overlapBatchCount,
+      limitedByWosWindow: true,
+    },
+  ].filter((window) => window.selectedCount > 0).map((window, index) => ({
+    ...window,
+    windowIndex: index + 1,
+    coveredCount,
+    incompleteBeyondWosLimit: selectedCount > MAX_WOS_DUAL_SORT_RECORDS,
+  }));
+}
+
+function usesLargeExportWindows(windows = []) {
+  return windows.length > 1 || windows.some((window) => window.limitedByWosWindow);
+}
+
+function largeExportWarningLines(totalRecords, windows = []) {
+  const total = Math.max(0, Number(totalRecords) || 0);
+  const plannedRecords = windows.reduce((sum, window) => sum + Math.max(0, Number(window.selectedCount) || 0), 0);
+  const plannedBatches = windows.reduce((sum, window) => sum + Math.max(0, Number(window.batchCount) || 0), 0);
+  return [
+    `WOS UUID result set has ${total} records, over the ${MAX_WOS_EXPORT_RECORDS} record single-sort export window.`,
+    `A normal 500-record batch export would be incomplete after ${MAX_WOS_EXPORT_BATCHES} files.`,
+    `Large-export mode will download at most ${MAX_WOS_DUAL_SORT_RECORDS} records using ${WOS_LARGE_EXPORT_SORTS.join(" + ")}.`,
+    `Planned request windows: ${plannedBatches} files / ${plannedRecords} requested records, including one overlap batch when needed.`,
+    total > MAX_WOS_DUAL_SORT_RECORDS
+      ? `This UUID still exceeds ${MAX_WOS_DUAL_SORT_RECORDS}; records beyond that limit cannot be guaranteed.`
+      : "",
+  ].filter(Boolean);
+}
+
+async function confirmLargeWosExport(args, totalRecords, windows, options = {}) {
+  if (args.allowLargeExport) return true;
+  const message = largeExportWarningLines(totalRecords, windows).join("\n");
+  if (options.skipInsteadOfThrow) {
+    console.error(message);
+    console.error("Skipping this UUID. Re-run with --allow-large-export to download up to the 400,000-record maximum.");
+    return false;
+  }
+  if (!process.stdin.isTTY || !isInteractive(process.stdout)) {
+    throw new CliMessageError(`${message}\nRe-run with --allow-large-export to download up to the 400,000-record maximum, or reduce the query/range.`);
+  }
+  console.error(message);
+  const answer = String(await (options.prompt || promptConfirmationText)("Type max to continue up to 400,000 records, or skip to cancel")).trim().toLowerCase();
+  if (["max", "yes", "y"].includes(answer)) {
+    args.allowLargeExport = true;
+    return true;
+  }
+  if (["skip", "cancel", "c", ""].includes(answer)) return false;
+  throw new CliMessageError("Large WOS export cancelled. Type max to continue or skip to cancel.");
+}
+
 function reportDownloadPlan(label, availableCount, selectedCount, batchSize = DEFAULT_BATCH_SIZE) {
   const batches = downloadBatchCount(selectedCount, batchSize);
   console.error(`${label} available: ${availableCount}`);
@@ -2219,18 +2324,52 @@ function batchKey(markFrom, markTo) {
   return `${markFrom}-${markTo}`;
 }
 
-function rawBatchDir(paths, uuid) {
-  if (!uuid) throw new Error("Missing raw batch UUID");
-  const safeUuid = safeFilePart(uuid);
-  return path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), safeUuid, "full-record");
+function isLargeExportSort(sortBy) {
+  return WOS_LARGE_EXPORT_SORTS.includes(String(sortBy || ""));
 }
 
-function rawBatchPath(paths, uuid, markFrom, markTo) {
-  return path.join(rawBatchDir(paths, uuid), batchFileName(uuid, markFrom, markTo));
+function rawBatchDir(paths, uuid, options = {}) {
+  if (!uuid) throw new Error("Missing raw batch UUID");
+  const safeUuid = safeFilePart(uuid);
+  const baseDir = path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), safeUuid, "full-record");
+  return isLargeExportSort(options.sortBy) ? path.join(baseDir, safeFilePart(options.sortBy)) : baseDir;
+}
+
+function rawBatchPath(paths, uuid, markFrom, markTo, options = {}) {
+  return path.join(rawBatchDir(paths, uuid, options), batchFileName(uuid, markFrom, markTo));
 }
 
 function rawUuidCompleteMarkerPath(paths, uuid) {
   return path.join(rawBatchDir(paths, uuid), `${safeFilePart(uuid)}_complete.json`);
+}
+
+function rawWindowDirs(paths, uuid, exportWindows = []) {
+  if (!uuid || !Array.isArray(exportWindows)) return [];
+  return exportWindows
+    .filter((window) => isLargeExportSort(window.sortBy))
+    .map((window) => ({
+      sortBy: window.sortBy,
+      dir: rawBatchDir(paths, uuid, { sortBy: window.sortBy }),
+      marker: path.join(rawBatchDir(paths, uuid, { sortBy: window.sortBy }), WOS_EXPORT_WINDOW_MARKER_FILE),
+      rangeStart: Number(window.startIndex) || 1,
+      rangeEnd: Number(window.endIndex) || 0,
+    }));
+}
+
+function writeRawWindowMarkers(paths, uuid, exportWindows = []) {
+  for (const entry of rawWindowDirs(paths, uuid, exportWindows)) {
+    writeJson(entry.marker, {
+      ok: true,
+      uuid,
+      sortBy: entry.sortBy,
+      direction: entry.sortBy === "author-ascending" ? "a-z" : "z-a",
+      rangeStart: entry.rangeStart,
+      rangeEnd: entry.rangeEnd,
+      batchSize: DEFAULT_BATCH_SIZE,
+      marker: "wos-export-window",
+      updatedAt: new Date().toISOString(),
+    });
+  }
 }
 
 function bibBatchDir(paths, uuid) {
@@ -2266,15 +2405,30 @@ function parseBibBatchFileName(fileName) {
   return parseBatchFileName(fileName, "bib");
 }
 
-function rawBatchFiles(paths, uuid) {
+function rawBatchFiles(paths, uuid, options = {}) {
   if (!uuid) throw new Error("Missing raw batch UUID");
-  const directory = rawBatchDir(paths, uuid);
-  if (!fs.existsSync(directory)) return [];
   const prefix = `${safeFilePart(uuid)}_`;
-  return fs
-    .readdirSync(directory)
-    .filter((name) => name.startsWith(prefix) && /_(\d+)_(\d+)\.txt$/.test(name))
-    .sort((a, b) => batchFileStart(a) - batchFileStart(b));
+  const readDirectory = (directory, relativePrefix = "", sortBy = "") => {
+    if (!fs.existsSync(directory)) return [];
+    return fs
+      .readdirSync(directory, { withFileTypes: true })
+      .flatMap((entry) => {
+        const fullPath = path.join(directory, entry.name);
+        const relativeName = relativePrefix ? path.join(relativePrefix, entry.name) : entry.name;
+        if (entry.isDirectory() && !options.sortBy && options.includeSortDirs !== false && isLargeExportSort(entry.name)) {
+          return readDirectory(fullPath, relativeName, entry.name);
+        }
+        if (!entry.isFile() || !entry.name.startsWith(prefix) || !/_(\d+)_(\d+)\.txt$/.test(entry.name)) return [];
+        return [{ fileName: relativeName, sortBy }];
+      });
+  };
+  const files = readDirectory(rawBatchDir(paths, uuid, options), "", options.sortBy || "");
+  if (options.detailed) {
+    return files.sort((a, b) => batchFileStart(a.fileName) - batchFileStart(b.fileName) || a.fileName.localeCompare(b.fileName));
+  }
+  return files
+    .map((file) => file.fileName)
+    .sort((a, b) => batchFileStart(a) - batchFileStart(b) || a.localeCompare(b));
 }
 
 function firstRawBatchRange(paths, uuid) {
@@ -2373,7 +2527,7 @@ function splitBatchRanges(startIndex, endIndex, batchSize = DEFAULT_BATCH_SIZE) 
   return batches;
 }
 
-function batchPlanForRange(paths, uuid, startIndex, endIndex, batchSize, fileList, fileParser) {
+function batchPlanForRange(paths, uuid, startIndex, endIndex, batchSize, fileList, fileParser, options = {}) {
   const start = Math.max(1, Number(startIndex) || 1);
   const end = Math.max(0, Number(endIndex) || 0);
   const selectedCount = end && end >= start ? end - start + 1 : 0;
@@ -2392,7 +2546,7 @@ function batchPlanForRange(paths, uuid, startIndex, endIndex, batchSize, fileLis
   };
   if (!uuid || !selectedCount) return empty;
 
-  const ranges = fileList(paths, uuid)
+  const ranges = fileList(paths, uuid, options)
     .map(fileParser)
     .filter(Boolean)
     .filter((range) => range.batchEnd >= start && range.batchStart <= end)
@@ -2441,8 +2595,9 @@ function batchPlanForRange(paths, uuid, startIndex, endIndex, batchSize, fileLis
   };
 }
 
-function rawBatchPlanForRange(paths, uuid, startIndex = 1, endIndex = 0, batchSize = DEFAULT_BATCH_SIZE) {
-  return batchPlanForRange(paths, uuid, startIndex, endIndex, batchSize, rawBatchFiles, parseRawBatchFileName);
+function rawBatchPlanForRange(paths, uuid, startIndex = 1, endIndex = 0, batchSize = DEFAULT_BATCH_SIZE, options = {}) {
+  const planOptions = options.sortBy ? options : { ...options, includeSortDirs: false };
+  return batchPlanForRange(paths, uuid, startIndex, endIndex, batchSize, rawBatchFiles, parseRawBatchFileName, planOptions);
 }
 
 function bibBatchPlanForRange(paths, uuid, startIndex = 1, endIndex = 0, batchSize = DEFAULT_BATCH_SIZE) {
@@ -2454,9 +2609,14 @@ function parseExistingRawBatches(paths, uuid, options = {}) {
   const files = options.files || rawBatchCoverage(paths, uuid).files;
   const startIndex = Math.max(1, Number(options.startIndex) || 1);
   const endIndex = Math.max(0, Number(options.endIndex) || 0);
-  for (const fileName of files) {
+  for (const fileEntry of files) {
+    const fileName = typeof fileEntry === "string" ? fileEntry : fileEntry.fileName;
+    const sortBy = typeof fileEntry === "string" ? options.sortBy : fileEntry.sortBy;
     const { batchStart, batchEnd } = parseRawBatchFileName(fileName);
-    const text = fs.readFileSync(path.join(rawBatchDir(paths, uuid), fileName), "utf8");
+    const filePath = sortBy && !String(fileName).includes(path.sep)
+      ? path.join(rawBatchDir(paths, uuid, { sortBy }), fileName)
+      : path.join(rawBatchDir(paths, uuid), fileName);
+    const text = fs.readFileSync(filePath, "utf8");
     appendRows(rows, parseExportText(text, batchStart, batchEnd).filter((row) => {
       const recordIndex = batchStart + row.batchPosition - 1;
       if (recordIndex < startIndex) return false;
@@ -2489,12 +2649,14 @@ function finalBibExists(paths, uuid) {
 function writeRunSummary(paths, meta) {
   const outputId = meta.uuid || meta.taskId;
   const outputPaths = withRawSource(paths, outputId);
+  const windowDirs = rawWindowDirs(paths, outputId, meta.exportWindows);
   const summary = {
     ok: true,
     method: "wos-js-export-fetchTxtBatches",
     ...meta,
     files: {
       rawDir: rawBatchDir(paths, outputId),
+      rawWindowDirs: windowDirs,
       wosIdsDir: outputPaths.wosIdsDir,
       progressLog: paths.progressLog,
     },
@@ -2508,6 +2670,8 @@ function writeRawUuidCompleteMarker(paths, meta = {}) {
   const uuid = meta.uuid || "";
   if (!uuid) return "";
   const markerPath = rawUuidCompleteMarkerPath(paths, uuid);
+  const exportWindows = Array.isArray(meta.exportWindows) ? meta.exportWindows : [];
+  writeRawWindowMarkers(paths, uuid, exportWindows);
   writeJson(markerPath, {
     ok: true,
     uuid,
@@ -2517,6 +2681,10 @@ function writeRawUuidCompleteMarker(paths, meta = {}) {
     fromIndex: Number(meta.fromIndex) || 1,
     rangeStart: Number(meta.rangeStart) || Number(meta.fromIndex) || 1,
     rangeEnd: Number(meta.rangeEnd) || 0,
+    largeExport: Boolean(meta.largeExport),
+    limitedByWosWindow: Boolean(meta.limitedByWosWindow),
+    incompleteBeyondWosLimit: Boolean(meta.incompleteBeyondWosLimit),
+    exportWindows,
     completedAt: new Date().toISOString(),
   });
   return markerPath;
@@ -2971,33 +3139,69 @@ async function exportFromWos(args, paths) {
     if (range.startIndex !== args.fromIndex) {
       console.error(`WOS record start inferred from raw batches: ${range.startIndex}`);
     }
-    const resumePlan = rawBatchPlanForRange(paths, info.uuid, range.startIndex, range.endIndex, batchSize);
-    const resumedCount = resumePlan.coveredCount;
-    if (resumePlan.presentFiles.length) {
+    const largeWindowPlan = range.selectedCount > MAX_WOS_EXPORT_RECORDS;
+    if (largeWindowPlan && (range.startIndex !== 1 || args.limit)) {
+      throw new CliMessageError(
+        `WOS UUID has ${range.selectedCount} selected records, which exceeds the ${MAX_WOS_EXPORT_RECORDS} single-sort export window. Large dual-sort export is only supported for full UUID downloads without --from-index/--limit.`
+      );
+    }
+    const plannedWindows = largeWindowPlan
+      ? planWosExportWindows(range.selectedCount, batchSize, { sortBy: args.sortBy })
+      : [{
+        sortBy: args.sortBy,
+        startIndex: range.startIndex,
+        endIndex: range.endIndex,
+        selectedCount: range.selectedCount,
+        batchCount: downloadBatchCount(range.selectedCount, batchSize),
+      }];
+    if (largeWindowPlan) {
+      const proceed = await confirmLargeWosExport(args, info.expectedCount, plannedWindows);
+      if (!proceed) throw new CliMessageError("Large WOS export skipped by user.");
+    }
+    const useSortWindowDirs = usesLargeExportWindows(plannedWindows);
+    const windowPlans = plannedWindows.map((window) => {
+      const sortOptions = useSortWindowDirs ? { sortBy: window.sortBy } : {};
+      const plan = rawBatchPlanForRange(paths, info.uuid, window.startIndex, window.endIndex, batchSize, sortOptions);
+      return { ...window, sortOptions, plan };
+    });
+    const resumedCount = windowPlans.reduce((total, window) => total + window.plan.coveredCount, 0);
+    const remainingCount = windowPlans.reduce((total, window) => total + window.plan.missingCount, 0);
+    const plannedBatchCount = windowPlans.reduce((total, window) => total + window.plan.plannedBatchCount, 0);
+    const presentBatchCount = windowPlans.reduce((total, window) => total + window.plan.presentFiles.length, 0);
+    const missingBatchCount = windowPlans.reduce((total, window) => total + window.plan.missingBatches.length, 0);
+    const firstMissingWindow = windowPlans.find((window) => window.plan.missingBatches.length);
+    const exportWindowsForSummary = windowPlans.map(({ plan, sortOptions, ...window }) => ({
+      ...window,
+      presentBatches: plan.presentFiles.length,
+      missingBatchCount: plan.missingBatches.length,
+      coveredCount: plan.coveredCount,
+    }));
+    writeRawWindowMarkers(paths, info.uuid, exportWindowsForSummary);
+    if (presentBatchCount) {
       appendProgress(paths, {
         phase: "resume-raw",
         uuid: info.uuid,
         startIndex: range.startIndex,
         endIndex: range.endIndex,
-        files: resumePlan.presentFiles.length,
-        plannedBatches: resumePlan.plannedBatchCount,
-        missingBatchCount: resumePlan.missingBatches.length,
-        coveredCount: resumePlan.coveredCount,
+        files: presentBatchCount,
+        plannedBatches: plannedBatchCount,
+        missingBatchCount,
+        coveredCount: resumedCount,
+        exportWindows: exportWindowsForSummary,
       });
-      console.error(`WOS raw resume: ${resumePlan.presentFiles.length}/${resumePlan.plannedBatchCount} TXT batches present; ${resumePlan.missingBatches.length} missing`);
+      console.error(`WOS raw resume: ${presentBatchCount}/${plannedBatchCount} TXT batches present; ${missingBatchCount} missing`);
     }
-    const remainingCount = resumePlan.missingCount;
     const persistedBatchKeys = new Set();
-    const persistTxtBatch = (batch, sourcePhase = "batch") => {
+    const persistTxtBatch = (batch, sourcePhase = "batch", sortOptions = {}) => {
       const markFrom = Number(batch.markFrom) || 0;
       const markTo = Number(batch.markTo) || 0;
       if (!markFrom || !markTo) return { saved: false };
-      const key = batchKey(markFrom, markTo);
+      const key = `${sortOptions.sortBy || ""}:${batchKey(markFrom, markTo)}`;
       if (persistedBatchKeys.has(key)) return { saved: false };
-      const rawPath = rawBatchPath(paths, info.uuid, markFrom, markTo);
+      const rawPath = rawBatchPath(paths, info.uuid, markFrom, markTo, sortOptions);
       writeFileAtomic(rawPath, String(batch.text || ""));
       persistedBatchKeys.add(key);
-      appendProgress(paths, { phase: sourcePhase, markFrom, markTo, rawPath });
+      appendProgress(paths, { phase: sourcePhase, sortBy: sortOptions.sortBy || args.sortBy, markFrom, markTo, rawPath });
       if (!isInteractive()) console.error(`export ${markFrom}-${markTo}: saved ${rawPath}`);
       return { saved: true };
     };
@@ -3105,7 +3309,7 @@ async function exportFromWos(args, paths) {
       remainingCount,
       batchSize
     );
-    const batchCount = resumePlan.missingBatches.length;
+    const batchCount = missingBatchCount;
     appendProgress(paths, {
       phase: "download-plan",
       label: "WOS records",
@@ -3116,11 +3320,12 @@ async function exportFromWos(args, paths) {
       resumedCount,
       remainingCount,
       batchCount,
-      plannedBatches: resumePlan.plannedBatchCount,
-      presentBatches: resumePlan.presentFiles.length,
-      missingBatchCount: resumePlan.missingBatches.length,
-      firstMissingBatch: resumePlan.missingBatches[0] || null,
+      plannedBatches: plannedBatchCount,
+      presentBatches: presentBatchCount,
+      missingBatchCount,
+      firstMissingBatch: firstMissingWindow?.plan.missingBatches[0] || null,
       batchSize,
+      exportWindows: exportWindowsForSummary,
     });
     if (remainingCount) {
       batchProgress = createProgress("Exporting records", batchCount);
@@ -3130,14 +3335,15 @@ async function exportFromWos(args, paths) {
         completedMissingBatches += 1;
         batchProgress.update(completedMissingBatches, `${markFrom}-${markTo}`);
       };
-      const consumeExistingMissingBatch = (missingBatch, sourcePhase = "resume-raw-before-request") => {
-        const targetRawPath = rawBatchPath(paths, info.uuid, missingBatch.markFrom, missingBatch.markTo);
+      const consumeExistingMissingBatch = (missingBatch, sortOptions = {}, sourcePhase = "resume-raw-before-request") => {
+        const targetRawPath = rawBatchPath(paths, info.uuid, missingBatch.markFrom, missingBatch.markTo, sortOptions);
         if (!fs.existsSync(targetRawPath)) return false;
-        const key = batchKey(missingBatch.markFrom, missingBatch.markTo);
+        const key = `${sortOptions.sortBy || ""}:${batchKey(missingBatch.markFrom, missingBatch.markTo)}`;
         if (persistedBatchKeys.has(key)) return true;
         appendProgress(paths, {
           phase: sourcePhase,
           uuid: info.uuid,
+          sortBy: sortOptions.sortBy || args.sortBy,
           markFrom: missingBatch.markFrom,
           markTo: missingBatch.markTo,
           rawPath: targetRawPath,
@@ -3145,57 +3351,64 @@ async function exportFromWos(args, paths) {
         updateMissingProgress({ saved: true }, missingBatch.markFrom, missingBatch.markTo);
         return true;
       };
-      for (const missingBatch of resumePlan.missingBatches) {
-        if (consumeExistingMissingBatch(missingBatch)) continue;
-        let exportResult = null;
-        for (;;) {
-          if (consumeExistingMissingBatch(missingBatch, "resume-raw-after-export-error")) {
-            exportResult = { batches: [] };
-            break;
+      for (const window of windowPlans) {
+        for (const missingBatch of window.plan.missingBatches) {
+          if (consumeExistingMissingBatch(missingBatch, window.sortOptions)) continue;
+          let exportResult = null;
+          for (;;) {
+            if (consumeExistingMissingBatch(missingBatch, window.sortOptions, "resume-raw-after-export-error")) {
+              exportResult = { batches: [] };
+              break;
+            }
+            try {
+              exportResult = await exportTxtBatchesViaWosJs(page, {
+                uuid: info.uuid,
+                markFrom: missingBatch.markFrom,
+                markTo: missingBatch.markTo,
+                batchSize,
+                sortBy: window.sortBy,
+                onProgress(event) {
+                  const { text, ...progressEvent } = event || {};
+                  if (progressEvent.phase === "batch" && typeof text === "string") {
+                    const markFrom = Number(progressEvent.current) || 0;
+                    const markTo = Number(progressEvent.batchEnd) || 0;
+                    const result = persistTxtBatch({
+                      uuid: progressEvent.uuid || info.uuid,
+                      markFrom,
+                      markTo,
+                      text,
+                    }, "batch", window.sortOptions);
+                    if (markFrom && markTo) progressEvent.rawPath = rawBatchPath(paths, info.uuid, markFrom, markTo, window.sortOptions);
+                    progressEvent.parsed = result.parsed;
+                    updateMissingProgress(result, markFrom, markTo);
+                  }
+                  appendProgress(paths, { phase: "wosjs-export-progress", sidSwitchCount, sortBy: window.sortBy, ...progressEvent });
+                },
+              });
+              break;
+            } catch (error) {
+              await switchSidAfterTxtExportFailure(missingBatch, error);
+            }
           }
-          try {
-            exportResult = await exportTxtBatchesViaWosJs(page, {
-              uuid: info.uuid,
-              markFrom: missingBatch.markFrom,
-              markTo: missingBatch.markTo,
-              batchSize,
-              sortBy: args.sortBy,
-              onProgress(event) {
-                const { text, ...progressEvent } = event || {};
-                if (progressEvent.phase === "batch" && typeof text === "string") {
-                  const markFrom = Number(progressEvent.current) || 0;
-                  const markTo = Number(progressEvent.batchEnd) || 0;
-                  const result = persistTxtBatch({
-                    uuid: progressEvent.uuid || info.uuid,
-                    markFrom,
-                    markTo,
-                    text,
-                  }, "batch");
-                  if (markFrom && markTo) progressEvent.rawPath = rawBatchPath(paths, info.uuid, markFrom, markTo);
-                  progressEvent.parsed = result.parsed;
-                  updateMissingProgress(result, markFrom, markTo);
-                }
-                appendProgress(paths, { phase: "wosjs-export-progress", sidSwitchCount, ...progressEvent });
-              },
-            });
-            break;
-          } catch (error) {
-            await switchSidAfterTxtExportFailure(missingBatch, error);
+          if (!exportResult) {
+            throw new Error(`Export request failed for ${window.sortBy} records ${missingBatch.markFrom}-${missingBatch.markTo}`);
           }
-        }
-        if (!exportResult) {
-          throw new Error(`Export request failed for records ${missingBatch.markFrom}-${missingBatch.markTo}`);
-        }
 
-        for (const batch of exportResult.batches) {
-          const result = persistTxtBatch(batch, "batch");
-          updateMissingProgress(result, Number(batch.markFrom) || 0, Number(batch.markTo) || 0);
+          for (const batch of exportResult.batches) {
+            const result = persistTxtBatch(batch, "batch", window.sortOptions);
+            updateMissingProgress(result, Number(batch.markFrom) || 0, Number(batch.markTo) || 0);
+          }
         }
       }
-      const finalPlan = rawBatchPlanForRange(paths, info.uuid, range.startIndex, range.endIndex, batchSize);
-      if (finalPlan.missingBatches.length) {
-        const firstMissing = finalPlan.missingBatches[0];
-        throw new Error(`Incomplete raw TXT batches after export: missing ${firstMissing.markFrom}-${firstMissing.markTo}`);
+      const incompleteWindow = windowPlans
+        .map((window) => ({
+          ...window,
+          plan: rawBatchPlanForRange(paths, info.uuid, window.startIndex, window.endIndex, batchSize, window.sortOptions),
+        }))
+        .find((window) => window.plan.missingBatches.length);
+      if (incompleteWindow) {
+        const firstMissing = incompleteWindow.plan.missingBatches[0];
+        throw new Error(`Incomplete raw TXT batches after export: missing ${incompleteWindow.sortBy} ${firstMissing.markFrom}-${firstMissing.markTo}`);
       }
       batchProgress.stop("Export complete");
       batchProgress = null;
@@ -3210,8 +3423,12 @@ async function exportFromWos(args, paths) {
       fromIndex: range.startIndex,
       limit: args.limit || 0,
       rangeStart: range.startIndex,
-      rangeEnd: range.endIndex,
+      rangeEnd: largeWindowPlan ? Math.min(range.selectedCount, MAX_WOS_DUAL_SORT_RECORDS) : range.endIndex,
       resumedCount,
+      largeExport: largeWindowPlan,
+      limitedByWosWindow: largeWindowPlan,
+      incompleteBeyondWosLimit: largeWindowPlan && range.selectedCount > MAX_WOS_DUAL_SORT_RECORDS,
+      exportWindows: exportWindowsForSummary,
     };
   } finally {
     authSpinner.stop();
@@ -3470,6 +3687,25 @@ function plannedTxtRangeFromMeta(meta = {}) {
 }
 
 function rawUuidDownloadState(paths, uuid, meta = {}) {
+  if (Array.isArray(meta.exportWindows) && meta.exportWindows.length) {
+    const plans = meta.exportWindows.map((window) => {
+      const sortOptions = isLargeExportSort(window.sortBy) ? { sortBy: window.sortBy } : {};
+      return {
+        ...window,
+        plan: rawBatchPlanForRange(paths, uuid, window.startIndex || 1, window.endIndex || 0, DEFAULT_BATCH_SIZE, sortOptions),
+      };
+    });
+    return {
+      complete: plans.every((window) => window.plan.complete),
+      rangeStart: Math.min(...plans.map((window) => Math.max(1, Number(window.startIndex) || 1))),
+      rangeEnd: Math.max(...plans.map((window) => Math.max(0, Number(window.endIndex) || 0))),
+      plan: {
+        exportWindows: plans,
+        complete: plans.every((window) => window.plan.complete),
+        missingBatches: plans.flatMap((window) => window.plan.missingBatches.map((batch) => ({ ...batch, sortBy: window.sortBy }))),
+      },
+    };
+  }
   const { rangeStart, rangeEnd } = plannedTxtRangeFromMeta(meta);
   if (!uuid || !rangeEnd) return { complete: false, rangeStart, rangeEnd, plan: null };
   const plan = rawBatchPlanForRange(paths, uuid, rangeStart, rangeEnd, DEFAULT_BATCH_SIZE);
@@ -3542,6 +3778,24 @@ async function runBatchUuidTxt(args) {
           outDir: args.outDir,
         };
         meta = await inspectWosUuid(inspectArgs);
+        if (meta.expectedCount > MAX_WOS_EXPORT_RECORDS && !args.allowLargeExport) {
+          const windows = planWosExportWindows(meta.expectedCount, DEFAULT_BATCH_SIZE, { sortBy: args.sortBy });
+          await confirmLargeWosExport(args, meta.expectedCount, windows, { skipInsteadOfThrow: true });
+          skipped += 1;
+          completed += 1;
+          progress.update(index + 1, `${step} skipped-large ${uuid}`);
+          appendProgress(paths, {
+            phase: "batch-uuid-skip-large-export",
+            uuid,
+            index: index + 1,
+            total: uuids.length,
+            expectedCount: meta.expectedCount,
+            maxSingleSortRecords: MAX_WOS_EXPORT_RECORDS,
+            maxDualSortRecords: MAX_WOS_DUAL_SORT_RECORDS,
+          });
+          results.push({ uuid, status: "skipped-large", expectedCount: meta.expectedCount });
+          continue;
+        }
         state = rawUuidDownloadState(paths, uuid, meta);
         if (state.complete) {
           writeRawUuidCompleteMarker(paths, { ...meta, uuid });
@@ -3661,7 +3915,7 @@ function validateTask(args) {
       const state = rawUuidDownloadState(basePaths, item.uuid, marker);
       if (!state.complete && state.plan?.missingBatches?.length) {
         const firstMissing = state.plan.missingBatches[0];
-        issues.push(`incomplete batch UUID ${item.uuid}: missing ${firstMissing.markFrom}-${firstMissing.markTo}`);
+        issues.push(`incomplete batch UUID ${item.uuid}: missing ${firstMissing.sortBy ? `${firstMissing.sortBy} ` : ""}${firstMissing.markFrom}-${firstMissing.markTo}`);
       }
     }
   }
@@ -3681,7 +3935,16 @@ function validateTask(args) {
     issues.push(`WOSID CSV rows mismatch: csv=${wosids.length} summary.uniqueCount=${summary.uniqueCount}`);
   }
   if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && !rawFiles.length) issues.push("missing raw/<uuid>/full-record batches");
-  if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && txtRangeEnd) {
+  if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && Array.isArray(summary.exportWindows) && summary.exportWindows.length) {
+    for (const window of summary.exportWindows) {
+      const sortOptions = isLargeExportSort(window.sortBy) ? { sortBy: window.sortBy } : {};
+      const plan = rawBatchPlanForRange(paths, rawUuid, window.startIndex || 1, window.endIndex || 0, DEFAULT_BATCH_SIZE, sortOptions);
+      if (plan.missingBatches.length) {
+        const firstMissing = plan.missingBatches[0];
+        issues.push(`missing raw TXT batch: ${window.sortBy} ${firstMissing.markFrom}-${firstMissing.markTo}`);
+      }
+    }
+  } else if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && txtRangeEnd) {
     const plan = rawBatchPlanForRange(paths, rawUuid, txtRangeStart, txtRangeEnd, DEFAULT_BATCH_SIZE);
     if (plan.missingBatches.length) {
       const firstMissing = plan.missingBatches[0];
@@ -3798,15 +4061,21 @@ async function run(args) {
     limit: priorSummary.limit || args.limit || 0,
     rangeStart: inferredRangeStart,
     rangeEnd: priorSummary.rangeEnd || 0,
+    largeExport: Boolean(priorSummary.largeExport),
+    limitedByWosWindow: Boolean(priorSummary.limitedByWosWindow),
+    incompleteBeyondWosLimit: Boolean(priorSummary.incompleteBeyondWosLimit),
+    exportWindows: Array.isArray(priorSummary.exportWindows) ? priorSummary.exportWindows : [],
     href: priorSummary.summaryHref || args.url,
     rowText: priorSummary.rowText || "",
   };
   if (!info.rangeEnd && info.expectedCount) {
     info.rangeEnd = (info.rangeStart || 1) + info.expectedCount - 1;
   }
+  const priorRawState = rawUuid ? rawUuidDownloadState(paths, rawUuid, info) : { complete: false, plan: null };
   const canRepairFromRaw = !args.force &&
     rawUuid &&
-    canRepairWosIdsFromRaw(paths, rawUuid, info.expectedCount, info.rangeStart, info.rangeEnd);
+    rawBatchFiles(paths, rawUuid).length &&
+    (priorRawState.complete || canRepairWosIdsFromRaw(paths, rawUuid, info.expectedCount, info.rangeStart, info.rangeEnd));
 
   if (((args.reuseRaw && !priorRunFailed && !priorRunUnverifiedPartial) || canRepairFromRaw) && rawUuid && rawBatchFiles(paths, rawUuid).length) {
     info.uuid = rawUuid;
@@ -3814,21 +4083,29 @@ async function run(args) {
       throw new Error("Cannot reuse raw batches without a known WOS record count. Re-run without --reuse-raw to refresh from WOS.");
     }
     const expectedEnd = info.rangeEnd || (info.rangeStart || 1) + info.expectedCount - 1;
-    const plan = rawBatchPlanForRange(paths, rawUuid, info.rangeStart || 1, expectedEnd, DEFAULT_BATCH_SIZE);
-    if (!plan.presentFiles.length) throw new Error(`No raw batches found for UUID: ${rawUuid}`);
-    if (!plan.complete) {
+    const state = rawUuidDownloadState(paths, rawUuid, info);
+    const flatPlan = state.plan?.exportWindows ? null : rawBatchPlanForRange(paths, rawUuid, info.rangeStart || 1, expectedEnd, DEFAULT_BATCH_SIZE);
+    const plan = state.plan || flatPlan;
+    const presentFiles = state.plan?.exportWindows
+      ? state.plan.exportWindows.reduce((total, window) => total + window.plan.presentFiles.length, 0)
+      : plan.presentFiles.length;
+    if (!presentFiles) throw new Error(`No raw batches found for UUID: ${rawUuid}`);
+    if (!state.complete) {
       const firstMissing = plan.missingBatches[0];
       throw new Error(
-        `Incomplete raw batches for UUID ${rawUuid}: missing ${firstMissing.markFrom}-${firstMissing.markTo}, expected ${info.rangeStart || 1}-${expectedEnd}. Re-run without --reuse-raw to resume from WOS.`
+        `Incomplete raw batches for UUID ${rawUuid}: missing ${firstMissing.sortBy ? `${firstMissing.sortBy} ` : ""}${firstMissing.markFrom}-${firstMissing.markTo}, expected ${info.rangeStart || 1}-${expectedEnd}. Re-run without --reuse-raw to resume from WOS.`
       );
     }
-    info.resumedCount = plan.coveredCount;
+    info.resumedCount = state.plan?.exportWindows
+      ? state.plan.exportWindows.reduce((total, window) => total + window.plan.coveredCount, 0)
+      : plan.coveredCount;
     appendProgress(paths, {
       phase: canRepairFromRaw && !args.reuseRaw ? "repair-run-from-raw" : "reuse-raw",
       uuid: rawUuid,
       rawDir: rawBatchDir(paths, rawUuid),
-      batches: plan.presentFiles.length,
-      coveredCount: plan.coveredCount,
+      batches: presentFiles,
+      coveredCount: info.resumedCount,
+      exportWindows: info.exportWindows,
     });
     if (!isInteractive()) {
       console.error(args.reuseRaw
@@ -3856,6 +4133,10 @@ async function run(args) {
     rangeStart: info.rangeStart || args.fromIndex || 1,
     rangeEnd: info.rangeEnd || info.expectedCount || 0,
     resumedCount: info.resumedCount || 0,
+    largeExport: Boolean(info.largeExport),
+    limitedByWosWindow: Boolean(info.limitedByWosWindow),
+    incompleteBeyondWosLimit: Boolean(info.incompleteBeyondWosLimit),
+    exportWindows: Array.isArray(info.exportWindows) ? info.exportWindows : [],
     rowText: info.rowText || "",
     summaryHref: info.href || args.url,
     runDir: paths.runDir,
@@ -4619,6 +4900,11 @@ module.exports = {
   parseBibEntryCount,
   parseWosCount,
   downloadBatchCount,
+  planWosExportWindows,
+  usesLargeExportWindows,
+  MAX_WOS_EXPORT_BATCHES,
+  MAX_WOS_EXPORT_RECORDS,
+  MAX_WOS_DUAL_SORT_RECORDS,
   boundedRecordCount,
   selectedRecordRange,
   reportDownloadPlan,
@@ -4652,10 +4938,12 @@ module.exports = {
   withRawSource,
   cleanRunLayout,
   rawBatchDir,
+  rawWindowDirs,
   rawBatchFiles,
   rawUuidCompleteMarkerPath,
   readRawUuidCompleteMarker,
   writeRawUuidCompleteMarker,
+  rawUuidDownloadState,
   firstRawBatchRange,
   inferTxtRangeStart,
   rawBatchCoverageFromStart,
