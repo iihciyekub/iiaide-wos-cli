@@ -257,6 +257,10 @@ test("formats per-UUID download window progress details without batch wording", 
   assert.equal(cli.formatDownloadWindowDetail(2, 2), "download 2/2");
   assert.equal(cli.formatUuidRemainingDetail(1, 4), "uuids 1/4 done, 3 left");
   assert.equal(cli.formatUuidRemainingDetail(5, 4), "uuids 4/4 done, 0 left");
+  assert.equal(
+    cli.formatBatchUuidDownloadDetail({ batchUuidProgress: { completed: 1, total: 4 } }, "download 1/2 79001-79500"),
+    "uuids 1/4 done, 3 left | download 1/2 79001-79500"
+  );
 });
 
 test("counts batch UUID download windows from missing work", () => {
@@ -2246,13 +2250,16 @@ test("batch UUID TXT runs per-UUID inspect and downloads quietly", () => {
   assert.match(batchMethod[0], /totalDownloadBatches = jobs\.reduce/);
   assert.match(batchMethod[0], /createProgress\("Batch UUID TXT", totalDownloadBatches\)/);
   assert.match(batchMethod[0], /formatUuidRemainingDetail\(completedDownloadUuids, totalDownloadUuids\)/);
+  assert.match(batchMethod[0], /showDownloadProgress: true/);
+  assert.match(batchMethod[0], /batchUuidProgress: \{\s*completed: completedDownloadUuids,\s*total: totalDownloadUuids,/);
   assert.match(exportMethod[0], /createSpinner\(authValidationMessage\(args\), \{ quiet \}\)/);
-  assert.match(exportMethod[0], /createProgress\("Exporting records", batchCount, \{ quiet \}\)/);
+  assert.match(exportMethod[0], /const progressQuiet = quiet && !args\.showDownloadProgress/);
+  assert.match(exportMethod[0], /createProgress\("Exporting records", batchCount, \{ quiet: progressQuiet \}\)/);
   assert.match(exportMethod[0], /const useWindowProgress = useSortWindowDirs/);
   assert.match(exportMethod[0], /txtExportProgressLabel\(window\.sortBy\)/);
-  assert.match(exportMethod[0], /createProgress\(windowLabel, window\.plan\.plannedBatchCount, \{ quiet \}\)/);
+  assert.match(exportMethod[0], /createProgress\(windowLabel, window\.plan\.plannedBatchCount, \{ quiet: progressQuiet \}\)/);
   assert.match(exportMethod[0], /batchOrdinalInRange\(markTo, currentWindowStartIndex, batchSize\)/);
-  assert.match(exportMethod[0], /formatDownloadWindowDetail\(currentDownloadWindow, downloadWindowCount/);
+  assert.match(exportMethod[0], /formatBatchUuidDownloadDetail\(args, formatDownloadWindowDetail\(currentDownloadWindow, downloadWindowCount/);
   assert.match(exportMethod[0], /batchOrdinalInRange\(firstMissing\.markFrom - 1, currentWindowStartIndex, batchSize\)/);
   assert.match(source, /if \(sortBy === "author-ascending"\) return "A-Z TXT"/);
   assert.match(source, /if \(sortBy === "author-descending"\) return "Z-A TXT"/);

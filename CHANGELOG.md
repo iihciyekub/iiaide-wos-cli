@@ -3,6 +3,13 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.96 - 2026-06-15
+
+- Show UUID completion/remaining counts inside the active TXT download progress
+  detail during batch UUID TXT runs.
+- Restore the per-UUID 500-record TXT chunk progress bar during batch UUID TXT
+  downloads while keeping inspect/planning output quiet.
+
 ## 0.4.95 - 2026-06-15
 
 - Make batch UUID TXT progress count actual UUID download windows, so a normal

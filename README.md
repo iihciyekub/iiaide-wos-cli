@@ -381,7 +381,9 @@ counts actual UUID download windows: a normal UUID contributes one batch, while
 a very large UUID may contribute two batches when the actual WOS export plan
 needs both A-Z and Z-A windows. Completed UUIDs do not add download batches.
 The progress detail shows only UUID completion and remaining counts, for example
-`uuids 1/4 done, 3 left`.
+`uuids 1/4 done, 3 left`. During an active UUID download, that UUID's normal
+500-record TXT progress remains visible and includes the same UUID remaining
+detail, for example `uuids 1/4 done, 3 left | download 1/2 79001-79500`.
 
 ### 2D. Create A Task From An Existing WOS ID CSV
 

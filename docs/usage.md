@@ -163,7 +163,9 @@ contributes one batch, while a large UUID can contribute two batches when the
 actual WOS export plan needs both A-Z and Z-A windows. Completed UUIDs do not
 add download batches. The progress detail shows only UUID completion and
 remaining counts, such as `uuids 1/4 done, 3 left`. Per-UUID A-Z/Z-A windows
-are labeled as downloads, not UUID batches.
+are labeled as downloads, not UUID batches. During active downloads, the
+per-UUID 500-record TXT progress remains visible and includes the UUID
+remaining detail.
 
 CLI form:
 
