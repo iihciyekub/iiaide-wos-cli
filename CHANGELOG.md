@@ -3,10 +3,18 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.92 - 2026-06-15
+
+- Use English-only large TXT export progress labels (`A-Z TXT` and `Z-A TXT`).
+- Keep resumed large export progress on the original window batch ordinal, so a
+  resumed window that already has 160 batches continues at 161/400 instead of
+  renumbering the remaining work.
+- Document terminal progress label and resume ordinal rules in `AGENTS.md`.
+
 ## 0.4.91 - 2026-06-15
 
-- Show large TXT export progress per sort window, using `正序 TXT` and
-  `反序 TXT` progress bars capped to each window's own batch count instead of a
+- Show large TXT export progress per sort window, using per-sort progress bars
+  capped to each window's own batch count instead of a
   combined total across both windows.
 
 ## 0.4.90 - 2026-06-15

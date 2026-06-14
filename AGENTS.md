@@ -40,6 +40,12 @@ and easy to reuse from other commands.
   preparation helper instead of adding per-command print logic.
 - Long-running downloads should use the existing terminal progress helpers and
   append progress events to the task log.
+- User-facing terminal progress labels should be English-only. For large TXT
+  export windows, use clear sort labels such as `A-Z TXT` and `Z-A TXT`, not
+  localized labels.
+- Resume progress should display the original batch ordinal within the planned
+  window. For example, if batches 1-160 already exist, the resumed download
+  should continue at 161/400, not renumber the remaining work as 1/N.
 - WOS operations should run through the same workspace-scoped persistent
   Playwright profile at `<tasksRoot>/.browser-profile`. Use the shared session
   preparation helper; do not launch short-lived per-command browsers, isolated

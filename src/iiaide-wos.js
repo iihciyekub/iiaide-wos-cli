@@ -574,9 +574,17 @@ function shortUuid(value) {
 }
 
 function txtExportProgressLabel(sortBy) {
-  if (sortBy === "author-ascending") return "正序 TXT";
-  if (sortBy === "author-descending") return "反序 TXT";
+  if (sortBy === "author-ascending") return "A-Z TXT";
+  if (sortBy === "author-descending") return "Z-A TXT";
   return "Exporting records";
+}
+
+function batchOrdinalInRange(markTo, rangeStart, batchSize = DEFAULT_BATCH_SIZE) {
+  const start = Math.max(1, Number(rangeStart) || 1);
+  const end = Number(markTo) || 0;
+  if (end < start) return 0;
+  const size = Math.max(1, Number(batchSize) || DEFAULT_BATCH_SIZE);
+  return Math.max(1, Math.ceil((end - start + 1) / size));
 }
 
 function formatTaskIdDate(date = new Date(), config = DEFAULT_TASK_ID_CONFIG) {
@@ -3365,12 +3373,14 @@ async function exportFromWos(args, paths) {
         batchProgress = createProgress("Exporting records", batchCount, { quiet });
       }
       let completedMissingBatches = 0;
-      let completedWindowBatches = 0;
+      let currentWindowStartIndex = 1;
       const updateMissingProgress = (result, markFrom, markTo) => {
         if (!result.saved) return;
         if (useWindowProgress) {
-          completedWindowBatches += 1;
-          batchProgress?.update(completedWindowBatches, `${markFrom}-${markTo}`);
+          batchProgress?.update(
+            batchOrdinalInRange(markTo, currentWindowStartIndex, batchSize),
+            `${markFrom}-${markTo}`
+          );
         } else {
           completedMissingBatches += 1;
           batchProgress.update(completedMissingBatches, `${markFrom}-${markTo}`);
@@ -3395,8 +3405,13 @@ async function exportFromWos(args, paths) {
       for (const window of windowPlans) {
         const windowLabel = txtExportProgressLabel(window.sortBy);
         if (useWindowProgress && window.plan.missingBatches.length) {
-          completedWindowBatches = 0;
-          batchProgress = createProgress(windowLabel, window.plan.missingBatches.length, { quiet });
+          currentWindowStartIndex = window.startIndex || 1;
+          const firstMissing = window.plan.missingBatches[0];
+          const resumeOrdinal = firstMissing
+            ? batchOrdinalInRange(firstMissing.markFrom - 1, currentWindowStartIndex, batchSize)
+            : 0;
+          batchProgress = createProgress(windowLabel, window.plan.plannedBatchCount, { quiet });
+          if (resumeOrdinal) batchProgress.update(resumeOrdinal, "resume");
         }
         for (const missingBatch of window.plan.missingBatches) {
           if (consumeExistingMissingBatch(missingBatch, window.sortOptions)) continue;

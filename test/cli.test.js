@@ -2213,9 +2213,11 @@ test("batch UUID TXT runs per-UUID inspect and downloads quietly", () => {
   assert.match(exportMethod[0], /createProgress\("Exporting records", batchCount, \{ quiet \}\)/);
   assert.match(exportMethod[0], /const useWindowProgress = useSortWindowDirs/);
   assert.match(exportMethod[0], /txtExportProgressLabel\(window\.sortBy\)/);
-  assert.match(exportMethod[0], /createProgress\(windowLabel, window\.plan\.missingBatches\.length, \{ quiet \}\)/);
-  assert.match(source, /if \(sortBy === "author-ascending"\) return "正序 TXT"/);
-  assert.match(source, /if \(sortBy === "author-descending"\) return "反序 TXT"/);
+  assert.match(exportMethod[0], /createProgress\(windowLabel, window\.plan\.plannedBatchCount, \{ quiet \}\)/);
+  assert.match(exportMethod[0], /batchOrdinalInRange\(markTo, currentWindowStartIndex, batchSize\)/);
+  assert.match(exportMethod[0], /batchOrdinalInRange\(firstMissing\.markFrom - 1, currentWindowStartIndex, batchSize\)/);
+  assert.match(source, /if \(sortBy === "author-ascending"\) return "A-Z TXT"/);
+  assert.match(source, /if \(sortBy === "author-descending"\) return "Z-A TXT"/);
   assert.match(exportMethod[0], /if \(!quiet\) \{\s*reportDownloadPlan/);
 });
 
