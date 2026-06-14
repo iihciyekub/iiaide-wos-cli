@@ -573,6 +573,12 @@ function shortUuid(value) {
   return `${text.slice(0, 8)}...${text.slice(-8)}`;
 }
 
+function txtExportProgressLabel(sortBy) {
+  if (sortBy === "author-ascending") return "正序 TXT";
+  if (sortBy === "author-descending") return "反序 TXT";
+  return "Exporting records";
+}
+
 function formatTaskIdDate(date = new Date(), config = DEFAULT_TASK_ID_CONFIG) {
   const pad = (value, width = 2) => String(value).padStart(width, "0");
   if (config.pattern !== "yyyyMMddHHmmss") {
@@ -3354,12 +3360,21 @@ async function exportFromWos(args, paths) {
       exportWindows: exportWindowsForSummary,
     });
     if (remainingCount) {
-      batchProgress = createProgress("Exporting records", batchCount, { quiet });
+      const useWindowProgress = useSortWindowDirs;
+      if (!useWindowProgress) {
+        batchProgress = createProgress("Exporting records", batchCount, { quiet });
+      }
       let completedMissingBatches = 0;
+      let completedWindowBatches = 0;
       const updateMissingProgress = (result, markFrom, markTo) => {
         if (!result.saved) return;
-        completedMissingBatches += 1;
-        batchProgress.update(completedMissingBatches, `${markFrom}-${markTo}`);
+        if (useWindowProgress) {
+          completedWindowBatches += 1;
+          batchProgress?.update(completedWindowBatches, `${markFrom}-${markTo}`);
+        } else {
+          completedMissingBatches += 1;
+          batchProgress.update(completedMissingBatches, `${markFrom}-${markTo}`);
+        }
       };
       const consumeExistingMissingBatch = (missingBatch, sortOptions = {}, sourcePhase = "resume-raw-before-request") => {
         const targetRawPath = rawBatchPath(paths, info.uuid, missingBatch.markFrom, missingBatch.markTo, sortOptions);
@@ -3378,6 +3393,11 @@ async function exportFromWos(args, paths) {
         return true;
       };
       for (const window of windowPlans) {
+        const windowLabel = txtExportProgressLabel(window.sortBy);
+        if (useWindowProgress && window.plan.missingBatches.length) {
+          completedWindowBatches = 0;
+          batchProgress = createProgress(windowLabel, window.plan.missingBatches.length, { quiet });
+        }
         for (const missingBatch of window.plan.missingBatches) {
           if (consumeExistingMissingBatch(missingBatch, window.sortOptions)) continue;
           let exportResult = null;
@@ -3425,6 +3445,10 @@ async function exportFromWos(args, paths) {
             updateMissingProgress(result, Number(batch.markFrom) || 0, Number(batch.markTo) || 0);
           }
         }
+        if (useWindowProgress && batchProgress) {
+          batchProgress.stop(`${windowLabel} complete`);
+          batchProgress = null;
+        }
       }
       const incompleteWindow = windowPlans
         .map((window) => ({
@@ -3436,8 +3460,10 @@ async function exportFromWos(args, paths) {
         const firstMissing = incompleteWindow.plan.missingBatches[0];
         throw new Error(`Incomplete raw TXT batches after export: missing ${incompleteWindow.sortBy} ${firstMissing.markFrom}-${firstMissing.markTo}`);
       }
-      batchProgress.stop("Export complete");
-      batchProgress = null;
+      if (batchProgress) {
+        batchProgress.stop("Export complete");
+        batchProgress = null;
+      }
     } else if (!quiet && !isInteractive()) {
       console.error("WOS records already covered by raw batches; rebuilding WOS ID CSV.");
     }

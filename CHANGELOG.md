@@ -3,6 +3,12 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.91 - 2026-06-15
+
+- Show large TXT export progress per sort window, using `正序 TXT` and
+  `反序 TXT` progress bars capped to each window's own batch count instead of a
+  combined total across both windows.
+
 ## 0.4.90 - 2026-06-15
 
 - Make batch UUID TXT output quieter and easier to read by suppressing normal
