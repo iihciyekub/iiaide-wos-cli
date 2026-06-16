@@ -3,6 +3,64 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.103 - 2026-06-16
+
+- Remove the interactive Settings menu item `5.3 Clear all SIDs` to simplify
+  the panel and avoid accidental full SID-pool clearing.
+- Keep `5.4 Clear dead SIDs` in the interactive panel and keep the scriptable
+  `settings --clear-sids` command available.
+
+## 0.4.102 - 2026-06-16
+
+- Merge the remote `0.4.97` batch UUID TXT planning progress behavior into the
+  current `0.4.101` command set without removing Query/Record or LLM output
+  features.
+- Rename the batch UUID TXT preflight progress to `Planning UUID downloads` and
+  remove per-UUID `checking` details from that planning line so it is not
+  confused with active TXT download progress.
+- Document how to keep the SID pool filled by running `auth monitor` as a
+  separate SID producer process.
+
+## 0.4.101 - 2026-06-15
+
+- Add `query batch --expr-file` for running many WOS advanced-search queries
+  through one prepared WOS session.
+- Add `--jsonl` item output for query batches and final `--json` summary output
+  for agent workflows.
+- Document query batch as the preferred repeated-query path for LLM/tool calls.
+
+## 0.4.100 - 2026-06-15
+
+- Add a shared LLM JSON envelope for supported `--json` command output and
+  error responses.
+- Add `docs/llm.md` with agent calling rules, error codes, recovery actions,
+  and command recipes.
+- Extend `--json` output for key Query/Record and artifact commands without
+  changing their default stdout conventions.
+
+## 0.4.99 - 2026-06-15
+
+- Restructure `--help` output around command groups, stdout conventions, and
+  common automation flags.
+- Add `docs/commands.md` as the structured command reference for users,
+  scripts, and LLM agents.
+- Link the command reference from the documentation guide and README.
+
+## 0.4.98 - 2026-06-15
+
+- Document the default private GitHub Release distribution policy in
+  `AGENTS.md`, including the explicit checklist required before preparing npm
+  Registry publication.
+
+## 0.4.97 - 2026-06-15
+
+- Add first-stage `query` and `record` command families for WOS browser-side
+  query construction and record relation UUID discovery.
+- Add a guarded browser API bridge for invoking injected `window.wos` methods
+  from CLI workflows.
+- Write Query/Record task manifest, summary, and progress metadata while
+  keeping default stdout to the resolved UUID.
+
 ## 0.4.96 - 2026-06-15
 
 - Show UUID completion/remaining counts inside the active TXT download progress

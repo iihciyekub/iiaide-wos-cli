@@ -9,6 +9,12 @@ This directory stays lightweight on purpose. Each file has one role.
 - `docs/usage.md`
   User-facing workflows, task lifecycle, task states, artifact layout, and
   command behavior.
+- `docs/commands.md`
+  Structured CLI command reference for humans, scripts, and LLM agents. Use it
+  when adding or changing command flags, stdout contracts, or examples.
+- `docs/llm.md`
+  Agent-specific calling rules, JSON envelope, error codes, recovery actions,
+  and command recipes.
 - `docs/curl.md`
   Request-level WOS reference for debugging, reproducing exports, and keeping
   CLI behavior aligned with the browser-side `wos.js` methods.
@@ -26,6 +32,9 @@ This directory stays lightweight on purpose. Each file has one role.
 Update docs in the same change as code:
 
 - If install, command names, or quick-start commands change, update `README.md`.
+- If command flags, stdout contracts, or examples change, update
+  `docs/commands.md`; if the change affects agent behavior, update
+  `docs/llm.md`.
 - If task flow, task outputs, prompts, progress, confirmation, or lifecycle
   behavior changes, update `docs/usage.md`.
 - If SID init, summary preparation, export endpoints, payload shape, or

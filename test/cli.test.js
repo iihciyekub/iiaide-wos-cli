@@ -8,10 +8,13 @@ const test = require("node:test");
 const cli = require("../src/iiaide-wos");
 const playwrightInstall = require("../src/lib/playwright-install");
 const { readJson, writeJson } = require("../src/lib/io");
+const { errorCode, llmErrorResult, llmResult } = require("../src/lib/llm-output");
 const { askSidFromBrowserOrManual, currentTaskSelection, formatBytes, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
 const { createProgress, createSpinner } = require("../src/lib/terminal");
+const { callWosBrowserApi } = require("../src/lib/wos-browser-bridge");
 const { normalizeBatchResult } = require("../src/lib/wos-browser-export");
 const { wosIdsEquivalent } = require("../src/lib/wos-ids");
+const { normalizeUuidResult, publicResult, queryTextForIds } = require("../src/lib/wos-query-record");
 function temporaryDirectory() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "iiaide-wos-test-"));
   process.env.IIAIDE_WOS_CONFIG = path.join(root, "global-config.json");
@@ -64,6 +67,199 @@ test("parses batch UUID TXT tasks", () => {
   const quietArgs = cli.parseArgs(["node", "cli", "batch-run", "--task", "batch-demo", "--tasks-root", root, "--quiet"]);
   assert.equal(quietArgs.quiet, true);
   assert.equal(quietArgs.authQuiet, true);
+});
+
+test("parses Query and Record command families", () => {
+  const root = temporaryDirectory();
+  const queryArgs = cli.parseArgs(["node", "cli", "query", "build", "--expr", "PY=(2026)", "--task", "q1", "--tasks-root", root]);
+  assert.equal(queryArgs.command, "query");
+  assert.equal(queryArgs.queryCommand, "build");
+  assert.equal(queryArgs.queryExpr, "PY=(2026)");
+  assert.equal(queryArgs.outDir, path.join(root, "q1"));
+
+  const batchArgs = cli.parseArgs(["node", "cli", "query", "batch", "--expr-file", "queries.txt", "--jsonl", "--task", "qb1", "--tasks-root", root]);
+  assert.equal(batchArgs.command, "query");
+  assert.equal(batchArgs.queryCommand, "batch");
+  assert.equal(batchArgs.queryExprFile, path.resolve("queries.txt"));
+  assert.equal(batchArgs.jsonl, true);
+  assert.equal(batchArgs.outDir, path.join(root, "qb1"));
+
+  const recordArgs = cli.parseArgs(["node", "cli", "record", "relations", "--wosid", "WOS:ABC", "--type", "citations", "--task", "r1", "--tasks-root", root]);
+  assert.equal(recordArgs.command, "record");
+  assert.equal(recordArgs.recordCommand, "relations");
+  assert.deepEqual(recordArgs.wosIds, ["WOS:ABC"]);
+  assert.equal(recordArgs.relationType, "citations");
+});
+
+test("help output groups command families for automation", () => {
+  const result = spawnSync(process.execPath, [path.join(__dirname, "..", "bin", "iiaide-wos.js"), "--help"], {
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Command groups:/);
+  assert.match(result.stdout, /Query UUID discovery:/);
+  assert.match(result.stdout, /Record relation UUID discovery:/);
+  assert.match(result.stdout, /Output conventions:/);
+  assert.match(result.stdout, /docs\/commands\.md/);
+});
+
+test("documentation guide links the structured command reference", () => {
+  const docsReadme = fs.readFileSync(path.join(__dirname, "..", "docs", "README.md"), "utf8");
+  const rootReadme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
+  assert.match(docsReadme, /docs\/commands\.md/);
+  assert.match(docsReadme, /docs\/llm\.md/);
+  assert.match(rootReadme, /CLI Command Reference/);
+  assert.match(rootReadme, /LLM Calling Guide/);
+});
+
+test("LLM output helpers normalize success and error envelopes", () => {
+  assert.deepEqual(llmResult({ command: "run", taskId: "t1" }, {
+    artifact: "/tmp/raw",
+    uuid: "uuid",
+    count: 10,
+    message: "ready",
+  }), {
+    ok: true,
+    code: "OK",
+    command: "run",
+    taskId: "t1",
+    artifact: "/tmp/raw",
+    uuid: "uuid",
+    count: 10,
+    message: "ready",
+    data: {},
+  });
+  assert.equal(errorCode(new Error("wos.js browser API missing: window.wos.query.buildQuery")), "WOS_API_MISSING");
+  assert.equal(errorCode(new Error("Query expression file not found: /tmp/queries.txt")), "INVALID_ARGS");
+  const errorResult = llmErrorResult({ command: "query", queryCommand: "build", taskId: "q1" }, new Error("Saved SID is invalid"));
+  assert.equal(errorResult.ok, false);
+  assert.equal(errorResult.command, "query build");
+  assert.equal(errorResult.code, "SID_INVALID");
+  assert.match(errorResult.nextAction, /sid --from-browser/);
+});
+
+test("JSON command errors use the LLM envelope on stdout", () => {
+  const root = temporaryDirectory();
+  const result = spawnSync(process.execPath, [
+    path.join(__dirname, "..", "bin", "iiaide-wos.js"),
+    "query", "build", "--json", "--tasks-root", root,
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 1);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.command, "query build");
+  assert.equal(parsed.code, "WOS_QUERY_FAILED");
+  assert.match(parsed.message, /Missing --expr/);
+});
+
+test("browser bridge invokes injected window.wos APIs and reports missing methods", async () => {
+  const fakePage = {
+    async evaluate(fn, payload) {
+      global.window = {
+        wos: {
+          query: {
+            buildQuery(expr) {
+              return { uuid: "abc", ref_count: 3, rowText: expr, status: "success" };
+            },
+          },
+        },
+      };
+      try {
+        return await fn(payload);
+      } finally {
+        delete global.window;
+      }
+    },
+  };
+  const result = await callWosBrowserApi(fakePage, "query.buildQuery", ["PY=(2026)"]);
+  assert.equal(result.uuid, "abc");
+  assert.equal(result.ref_count, 3);
+
+  await assert.rejects(
+    () => callWosBrowserApi(fakePage, "query.missing", []),
+    /wos\.js browser API missing: window\.wos\.query\.missing/
+  );
+});
+
+test("normalizes Query and Record UUID metadata without leaking SID", () => {
+  const result = normalizeUuidResult(
+    { uuid: "uuid-1", ref_count: "1,234", rowText: "PY=(2026)", status: "success" },
+    { taskId: "task-one", operation: "query build", source: { kind: "expr" } }
+  );
+  result.sid = "SECRET";
+  assert.equal(result.ok, true);
+  assert.equal(result.count, 1234);
+  const output = publicResult(result);
+  assert.deepEqual(Object.keys(output), ["ok", "taskId", "operation", "uuid", "count", "rowText", "source"]);
+  assert.equal(JSON.stringify(output).includes("SECRET"), false);
+  assert.equal(queryTextForIds(["WOS:A", "WOS:B"], ["10.1/a"]), "UT=(WOS:A OR WOS:B) OR DO=(10.1/a)");
+});
+
+test("Query workflow writes only task metadata and returns resolved UUID", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "query", "build", "--expr", "PY=(2026)", "--task", "query-demo", "--tasks-root", root]);
+  const summary = await cli.runQueryRecord(args, {
+    prepareWosSession: async () => ({ page: {}, close: async () => {} }),
+    runQueryBrowserCommand: async () => ({
+      ok: true,
+      taskId: args.taskId,
+      operation: "query build",
+      uuid: "12345678-1234-1234-1234-123456789abc-123456789a",
+      count: 42,
+      rowText: "PY=(2026)",
+      source: { kind: "expr", value: "PY=(2026)" },
+    }),
+  });
+  assert.equal(summary.ok, true);
+  assert.equal(summary.uuid, "12345678-1234-1234-1234-123456789abc-123456789a");
+  assert.equal(fs.existsSync(path.join(args.outDir, "manifest.json")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "summary.json")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "logs", "progress.jsonl")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "raw")), true);
+});
+
+test("Query batch workflow reuses one session and prints JSONL items", async () => {
+  const root = temporaryDirectory();
+  const exprFile = path.join(root, "queries.txt");
+  fs.writeFileSync(exprFile, "\n# ignored\nPY=(2025)\nPY=(2026)\n", "utf8");
+  const args = cli.parseArgs(["node", "cli", "query", "batch", "--expr-file", exprFile, "--jsonl", "--task", "query-batch", "--tasks-root", root]);
+  let prepareCount = 0;
+  const stdout = [];
+  const summary = await cli.runQueryBatch(args, {
+    prepareWosSession: async () => {
+      prepareCount += 1;
+      return { page: { id: "fake-page" }, close: async () => {} };
+    },
+    runQueryBrowserCommand: async (_page, itemArgs) => ({
+      ok: true,
+      taskId: itemArgs.taskId,
+      operation: "query build",
+      uuid: itemArgs.queryExpr.includes("2025")
+        ? "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-aaaaaaaaaa"
+        : "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb-bbbbbbbbbb",
+      count: itemArgs.queryExpr.includes("2025") ? 25 : 26,
+      rowText: itemArgs.queryExpr,
+      source: { kind: "expr", value: itemArgs.queryExpr },
+    }),
+    writeStdout: (line) => stdout.push(line),
+  });
+
+  assert.equal(prepareCount, 1);
+  assert.equal(summary.ok, true);
+  assert.equal(summary.total, 2);
+  assert.equal(summary.completed, 2);
+  assert.equal(summary.failed, 0);
+  assert.equal(stdout.length, 2);
+  const first = JSON.parse(stdout[0]);
+  assert.equal(first.command, "query batch");
+  assert.equal(first.uuid, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-aaaaaaaaaa");
+  assert.equal(first.data.index, 1);
+  assert.equal(first.data.total, 2);
+  assert.equal(first.data.expr, "PY=(2025)");
+  assert.equal(JSON.stringify(first).includes("SECRET"), false);
+  assert.equal(fs.existsSync(path.join(args.outDir, "manifest.json")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "summary.json")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "logs", "progress.jsonl")), true);
 });
 
 test("parses SID check tasks", () => {
@@ -482,7 +678,7 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(workflowMatch[0], /Settings/);
   assert.match(workflowMatch[0], /5\.1", "Playwright visible/);
   assert.match(workflowMatch[0], /5\.2", "Add SIDs/);
-  assert.match(workflowMatch[0], /5\.3", "Clear all SIDs/);
+  assert.doesNotMatch(workflowMatch[0], /5\.3", "Clear all SIDs/);
   assert.match(workflowMatch[0], /5\.4", "Clear dead SIDs/);
   assert.doesNotMatch(workflowMatch[0], /Parse tabs/);
   assert.match(workflowMatch[0], /Auth producer/);
@@ -496,7 +692,8 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.doesNotMatch(workflowMatch[0], /Probe the saved SID/);
   assert.doesNotMatch(workflowMatch[0], /Install the latest release/);
   assert.doesNotMatch(workflowMatch[0], /Return to the workspace menu/);
-  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 1\.3, 3\.1, 3\.2, 3\.3, 5\.1, 5\.2, 5\.3, 5\.4, 6\.1, 6\.2, c to check SID, u to update, B to go back/);
+  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 1\.3, 3\.1, 3\.2, 3\.3, 5\.1, 5\.2, 5\.4, 6\.1, 6\.2, c to check SID, u to update, B to go back/);
+  assert.doesNotMatch(workflowMatch[0], /choose .*5\.3/);
   assert.doesNotMatch(workflowMatch[0], /Download WOS IDs/);
   assert.match(argsMatch[0], /choice === "c"/);
   assert.match(argsMatch[0], /return \["check", "--tasks-root", activeWorkspace\.tasksRoot\]/);
@@ -514,8 +711,8 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(argsMatch[0], /choice === "5\.1"/);
   assert.match(argsMatch[0], /helpers\.setPlaywrightVisible/);
   assert.match(argsMatch[0], /choice === "5\.2"/);
-  assert.match(argsMatch[0], /choice === "5\.3"/);
-  assert.match(argsMatch[0], /helpers\.clearSids/);
+  assert.doesNotMatch(argsMatch[0], /choice === "5\.3"/);
+  assert.doesNotMatch(argsMatch[0], /helpers\.clearSids/);
   assert.match(argsMatch[0], /choice === "5\.4"/);
   assert.match(argsMatch[0], /helpers\.clearDeadSids/);
   assert.doesNotMatch(argsMatch[0], /helpers\.setParseConcurrency/);
@@ -1328,7 +1525,8 @@ test("no-argument non-interactive invocation prints help without creating a work
   });
 
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /Usage:\s+iiaide-wos menu/);
+  assert.match(result.stdout, /Usage:\s+iiaide-wos <command> \[options\]/);
+  assert.match(result.stdout, /Command groups:/);
   assert.match(result.stdout, /iiaide-wos latest \[--tasks-root <dir>\]/);
   assert.equal(fs.existsSync(path.join(root, "tasks")), false);
 });
@@ -1978,6 +2176,48 @@ test("imports an external WOS ID CSV as a complete task", () => {
   assert.deepEqual(cli.readWosIdsCsv(summary.files.wosidsCsv), ["WOS:ABC", "WOS:DEF"]);
 });
 
+test("import --json prints the LLM artifact envelope", () => {
+  const root = temporaryDirectory();
+  const csvPath = path.join(root, "input.csv");
+  fs.writeFileSync(csvPath, "wosid\nWOS:ABC\n");
+  const result = spawnSync(process.execPath, [
+    path.join(__dirname, "..", "bin", "iiaide-wos.js"),
+    "import", "--csv", csvPath, "--task", "json-import", "--tasks-root", path.join(root, "tasks"), "--json",
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 0);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.code, "OK");
+  assert.equal(parsed.command, "import");
+  assert.equal(parsed.taskId, "json-import");
+  assert.match(parsed.artifact, /json-import_wosid\.csv$/);
+  assert.equal(parsed.count, 1);
+});
+
+test("list --json prints task data in the LLM envelope", () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const csvPath = path.join(root, "input.csv");
+  fs.writeFileSync(csvPath, "wosid\nWOS:ABC\n");
+  spawnSync(process.execPath, [
+    path.join(__dirname, "..", "bin", "iiaide-wos.js"),
+    "import", "--csv", csvPath, "--task", "listed-task", "--tasks-root", tasksRoot,
+  ], { encoding: "utf8" });
+
+  const result = spawnSync(process.execPath, [
+    path.join(__dirname, "..", "bin", "iiaide-wos.js"),
+    "list", "--tasks-root", tasksRoot, "--json",
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 0);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.command, "list");
+  assert.equal(parsed.count, 1);
+  assert.equal(parsed.data.tasks[0].taskId, "listed-task");
+});
+
 test("reports corrupt JSON instead of silently replacing it", () => {
   const root = temporaryDirectory();
   const filePath = path.join(root, "broken.json");
@@ -2246,7 +2486,9 @@ test("batch UUID TXT runs per-UUID inspect and downloads quietly", () => {
   assert.ok(batchMethod, "runBatchUuidTxt should be present");
   assert.ok(exportMethod, "exportFromWos should be present");
   assert.match(batchMethod[0], /quiet: true,/);
-  assert.match(batchMethod[0], /shortUuid\(uuid\)/);
+  assert.match(batchMethod[0], /createProgress\("Planning UUID downloads", uuids\.length\)/);
+  assert.doesNotMatch(batchMethod[0], /Batch UUID TXT prepare/);
+  assert.doesNotMatch(batchMethod[0], /checking \$\{shortUuid\(uuid\)\}/);
   assert.match(batchMethod[0], /totalDownloadBatches = jobs\.reduce/);
   assert.match(batchMethod[0], /createProgress\("Batch UUID TXT", totalDownloadBatches\)/);
   assert.match(batchMethod[0], /formatUuidRemainingDetail\(completedDownloadUuids, totalDownloadUuids\)/);

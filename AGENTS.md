@@ -28,6 +28,10 @@ and easy to reuse from other commands.
   record export, WOSID CSV generation, and author fetching.
 - Keep generated task artifacts minimal. Do not create extra JSON, detailed CSV,
   or combined text outputs unless they are the requested deliverable.
+- For LLM/tool callers, prefer structured stdout contracts. Use `--json` for
+  one-shot commands and `--jsonl` for batch commands; repeated advanced-search
+  queries should use `query batch --expr-file` instead of spawning one CLI
+  process per query.
 - Use deterministic names for artifacts:
   - raw full-record batches: `<uuid>_<start>_<end>.txt`
   - raw BibTeX batches: `<uuid>_<start>_<end>.bib`
@@ -80,6 +84,23 @@ and easy to reuse from other commands.
   dependencies.
 - Tests should cover the contract of each reusable step and the command workflow
   that composes it.
+
+## Release And Distribution
+
+- Treat this package as a private GitHub Release-distributed CLI by default.
+  Keep `package.json` private and keep the `prepublishOnly` guard unless the
+  user explicitly asks to prepare npm Registry publication.
+- Do not publish to the public npm Registry as an incidental release step. The
+  supported install/update path is GitHub tag/release installation plus the CLI
+  `update` command.
+- If the user explicitly chooses npm publication, make it a dedicated change:
+  decide the package name or scope, remove the private publish guard, update
+  install docs, run `npm pack --dry-run`, and document that users must run
+  `iiaide-wos install-browser` because Chromium is not bundled in the npm
+  package.
+- Keep WOS access expectations clear in public-facing docs: users need their
+  own valid WOS access/session, and the CLI only automates exports and metadata
+  retrieval that the authenticated user can already access.
 
 ## Suggested Module Shape
 

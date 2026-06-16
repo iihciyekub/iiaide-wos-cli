@@ -39,6 +39,42 @@ TXT and BibTeX batches are kept as task artifacts. The CLI no longer parses
 full-record TXT or page data into SQLite, and it no longer creates or manages a
 WOS data SQLite database.
 
+## Query And Record UUID Workflow
+
+Use Query/Record commands when the first step is to make or discover a WOS
+result-set UUID. They use the injected `window.wos` browser API, update task
+metadata, and print the resolved UUID. They do not download raw TXT or BibTeX
+batches.
+
+```bash
+iiaide-wos query build --expr 'PY=(2026)' --task "query-2026"
+iiaide-wos query batch --expr-file "./queries.txt" --task "query-batch" --jsonl
+iiaide-wos query parse --text "2026 AI safety papers" --task "query-ai"
+iiaide-wos query ids --wosid "WOS:000000000000001" --doi "10.1000/example" --task "query-ids"
+iiaide-wos record relations --wosid "WOS:000000000000001" --type references --task "record-refs"
+iiaide-wos record shared --wosid "WOS:000000000000001" --with "WOS:000000000000002" --task "record-shared"
+```
+
+Use `query batch --jsonl` for repeated advanced-search queries. The file uses
+one query per line, ignores blank/comment lines, and runs all items through one
+prepared WOS session.
+
+Default output is the UUID only. `--json` prints:
+
+```json
+{
+  "ok": true,
+  "taskId": "query-2026",
+  "operation": "query build",
+  "uuid": "<uuid>",
+  "count": 123,
+  "rowText": "PY=(2026)",
+  "source": { "kind": "expr" }
+}
+```
+
+After resolving the UUID, use `run` or `bib` for raw exports:
+
 ## TXT / WOSID Workflow
 
 ```bash
@@ -124,7 +160,6 @@ The interactive menu focuses on export, task, settings, and auth work:
 5 Settings
   5.1 Playwright visible
   5.2 Add SIDs
-  5.3 Clear all SIDs
   5.4 Clear dead SIDs
 6 Auth producer
   6.1 MUST login
@@ -158,7 +193,9 @@ a fast hint, but still validate the raw batch checklist for the recorded window
 plan before skipping a UUID; if files are missing, the UUID is resumed instead
 of being skipped.
 The two-sort large export can cover at most 200,000 records for a UUID.
-Batch UUID TXT progress counts actual UUID download windows: a normal UUID
+Before downloads start, the preflight line is labeled
+`Planning UUID downloads` and only tracks UUID planning progress. Batch UUID TXT
+download progress counts actual UUID download windows: a normal UUID
 contributes one batch, while a large UUID can contribute two batches when the
 actual WOS export plan needs both A-Z and Z-A windows. Completed UUIDs do not
 add download batches. The progress detail shows only UUID completion and
@@ -189,3 +226,16 @@ https://www.webofscience.com/wos/?Init=Yes&SrcApp=CR&SID=<SID>
 
 If a saved SID is invalid, interactive workflows offer manual SID input, waiting
 for the saved SID pool, or opening a visible WOS login browser.
+
+To keep the SID pool filled automatically, run the auth producer monitor in a
+separate terminal:
+
+```bash
+iiaide-wos auth monitor --provider must --min-sids 2 --interval-ms 3000
+```
+
+The monitor keeps running, logs in with the configured MUST account, writes fresh
+SIDs to `~/.iiaide-wos/config.json`, and refreshes when the saved pool count is
+at or below `--min-sids`. Use `iiaide-wos sid-pool` to inspect the current pool
+and `iiaide-wos settings --clear-dead-sids` when you only want to clear dead-SID
+history.

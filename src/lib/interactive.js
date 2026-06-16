@@ -480,7 +480,6 @@ async function askWorkflow(rl) {
   workflowGroup("5", "Settings");
   workflowItem("5.1", "Playwright visible", "Choose whether WOS browser work opens a visible window");
   workflowItem("5.2", "Add SIDs", "Paste one or more SIDs into the saved SID pool");
-  workflowItem("5.3", "Clear all SIDs", "Remove every saved SID from the global SID pool");
   workflowItem("5.4", "Clear dead SIDs", "Remove saved invalid-SID history without changing the active SID pool");
   workflowGroup("6", "Auth producer");
   workflowItem("6.1", "MUST login", "Run one MUST SSO login and save the produced SID");
@@ -494,8 +493,8 @@ async function askWorkflow(rl) {
     if (isQuitInput(choice)) return CONTROL_QUIT;
     if (choice === "c") return "c";
     if (choice === "u") return "u";
-    if (["1.1", "1.2", "1.3", "3.1", "3.2", "3.3", "5.1", "5.2", "5.3", "5.4", "6.1", "6.2"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 1.3, 3.1, 3.2, 3.3, 5.1, 5.2, 5.3, 5.4, 6.1, 6.2, c to check SID, u to update, B to go back, or q to quit\n`);
+    if (["1.1", "1.2", "1.3", "3.1", "3.2", "3.3", "5.1", "5.2", "5.4", "6.1", "6.2"].includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 1.3, 3.1, 3.2, 3.3, 5.1, 5.2, 5.4, 6.1, 6.2, c to check SID, u to update, B to go back, or q to quit\n`);
   }
 }
 
@@ -741,26 +740,6 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       if (typeof helpers.addSids === "function") {
         activeWorkspace = await helpers.addSids(sids);
         stdout.write(`${color("32", "SID pool:", stdout)} added. Refreshing workspace panel.\n\n`);
-        return { refresh: true };
-      }
-      return { refresh: true };
-    }
-
-    if (choice === "5.3") {
-      const confirmation = await askParameterOrCancel(
-        rl,
-        "Type CLEAR to remove all saved SIDs",
-        "type CLEAR to remove every saved SID from the pool"
-      );
-      if (isBackResult(confirmation)) return { refresh: true };
-      if (isQuitResult(confirmation)) return null;
-      if (String(confirmation || "").trim().toUpperCase() !== "CLEAR") {
-        stdout.write(`${color("33", "SID pool:", stdout)} unchanged.\n\n`);
-        return { refresh: true };
-      }
-      if (typeof helpers.clearSids === "function") {
-        activeWorkspace = await helpers.clearSids();
-        stdout.write(`${color("32", "SID pool:", stdout)} cleared. Refreshing workspace panel.\n\n`);
         return { refresh: true };
       }
       return { refresh: true };

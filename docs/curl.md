@@ -41,6 +41,36 @@ The CLI opens the WOS summary page, injects `import/wos.js`, reads page-exposed
 metadata such as the final UUID and record count, and then uses the browser-side
 export helper for the actual batch requests.
 
+## Query And Record UUID Discovery
+
+CLI bridge:
+
+```text
+callWosBrowserApi() -> window.wos.query.*
+callWosBrowserApi() -> window.wos.record.*
+callWosBrowserApi() -> window.wos.results.fetchCurrentPageInfo()
+```
+
+User commands:
+
+```bash
+iiaide-wos query build --expr "${WOS_QUERY}"
+iiaide-wos query batch --expr-file "./queries.txt" --jsonl
+iiaide-wos query parse --text "${SEARCH_TEXT}"
+iiaide-wos query ids --wosid "${WOS_ID}" --doi "${DOI}"
+iiaide-wos record relations --wosid "${WOS_ID}" --type citations
+iiaide-wos record shared --wosid "${WOS_ID_A}" --with "${WOS_ID_B}"
+```
+
+These commands use WOS browser-side route/query helpers, then read the current
+summary page UUID/count through `window.wos.results.fetchCurrentPageInfo()`.
+They write task metadata only and leave raw TXT/BibTeX downloading to `run` and
+`bib`.
+
+`query batch` does not introduce a separate WOS request shape. It prepares one
+WOS session, then calls the same browser-side advanced-query build path once
+per non-empty line in `--expr-file`.
+
 Summary URL shape:
 
 ```bash
