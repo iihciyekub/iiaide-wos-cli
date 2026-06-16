@@ -62,7 +62,7 @@ access before installing:
 ```bash
 gh auth login
 gh auth setup-git
-npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.74
+npm install --global github:iihciyekub/iiaide-wos-cli#v0.4.97
 iiaide-wos install-browser
 iiaide-wos
 # or
@@ -232,6 +232,16 @@ pool when it gets low:
 iiaide-wos auth monitor --provider must --min-sids 2 --interval-ms 3000
 ```
 
+To turn on automatic SID pool production, keep that monitor running in a second
+terminal while exports run in the first terminal. The monitor logs in through
+the configured MUST account, saves fresh SIDs into
+`~/.iiaide-wos/config.json`, and refreshes again whenever the saved pool count
+falls to `--min-sids` or below. Confirm the pool from any workspace with:
+
+```bash
+iiaide-wos sid-pool
+```
+
 The auth commands use a short-lived Playwright browser that is separate from the
 workspace WOS browser profile used for export and validation work. Repeated
 `--account` and `--password` pairs rotate across multiple MUST accounts. Prefer
@@ -286,11 +296,11 @@ until another process, such as `auth monitor`, adds one. The CLI then redraws
 the workspace dashboard so the refreshed authentication state is visible before
 the next workflow prompt. Download workflows prompt for the WOS URL/UUID first
 and only then ask for SID setup when authentication is missing. The Settings
-menu provides `5.2 Add SIDs` for one or more pasted values and `5.3 Clear all
-SIDs` to empty the global SID pool. `5.4 Clear dead SIDs` removes only the
-saved invalid-SID history. When the interactive CLI keeps one WOS browser
-session alive and you switch to downloading a different UUID, it automatically
-rotates to the next saved SID when more than one saved SID is available. The separate `6 Auth producer` group
+menu provides `5.2 Add SIDs` for one or more pasted values. `5.4 Clear dead
+SIDs` removes only the saved invalid-SID history. When the interactive CLI keeps
+one WOS browser session alive and you switch to downloading a different UUID, it
+automatically rotates to the next saved SID when more than one saved SID is
+available. The separate `6 Auth producer` group
 provides `6.1 MUST login` for one fresh MUST-produced SID and `6.2 MUST
 monitor` to keep the current CLI process refilling the pool. Settings, task
 management, auth producer, and update workflows can be used while `Auth no` is
@@ -316,7 +326,41 @@ sources use the same lightweight model: pass `--wos-domain access.example.edu`,
 set `WOS_DOMAIN`, or use the saved `wosDomain` in `tasks/config.json`.
 `--base-url` remains available when a full origin URL is needed.
 
-### 2A. Create A Task From A WOS URL
+### 2A. Resolve A UUID From WOS Query Or Record Links
+
+Query commands create or open WOS result sets and print only the resolved UUID
+on success:
+
+```bash
+iiaide-wos query build --expr 'PY=(2026)' --task "query-2026"
+iiaide-wos query batch --expr-file "./queries.txt" --task "query-batch" --jsonl
+iiaide-wos query parse --text "2026 AI safety papers" --task "query-ai"
+iiaide-wos query ids --wosid "WOS:000000000000001" --doi "10.1000/example" --task "query-ids"
+```
+
+For repeated advanced-search queries, `query batch` reads one query per line,
+uses one prepared WOS session for the whole file, and emits one JSONL result per
+query when `--jsonl` is set.
+
+Record relation commands open WOS citation/reference/related-record result
+sets for one record and print the resulting UUID:
+
+```bash
+iiaide-wos record relations --wosid "WOS:000000000000001" --type citations --task "record-citations"
+iiaide-wos record shared --wosid "WOS:000000000000001" --with "WOS:000000000000002" --task "record-shared"
+```
+
+Use `--json` when a script needs the count and query text:
+
+```bash
+iiaide-wos query build --expr 'PY=(2026)' --json
+```
+
+These commands write only task metadata (`manifest.json`, `summary.json`, and
+`logs/progress.jsonl`). They do not download TXT or BibTeX batches; pass the
+printed UUID to `run` or `bib` when you want raw exports.
+
+### 2B. Create A Task From A WOS URL
 
 ```bash
 iiaide-wos run \
@@ -340,7 +384,7 @@ a missing batch, the CLI treats the active SID as expired, removes it from the
 saved pool, reopens WOS with the next saved SID, and requests that same missing
 batch again.
 
-### 2B. Create A Task From A WOS UUID
+### 2C. Create A Task From A WOS UUID
 
 ```bash
 iiaide-wos run \
@@ -348,7 +392,7 @@ iiaide-wos run \
   --task "demo-uuid"
 ```
 
-### 2C. Download WOS BibTeX
+### 2D. Download WOS BibTeX
 
 ```bash
 iiaide-wos bib \
@@ -376,18 +420,18 @@ iiaide-wos batch-run --task "batch-demo" --search-root "."
 `batch-run` recursively searches `--search-root` (default: the current working
 directory) for files named `uuid.csv`, extracts UUID-shaped values from their
 contents, de-duplicates them, and downloads each UUID through the same
-500-record resumable TXT checklist flow used by `run`. Its outer progress
-first shows `Planning UUID downloads` while it inspects and builds the download
-plan. The active download progress counts actual UUID download windows: a normal
-UUID contributes one batch, while a very large UUID may contribute two batches
-when the actual WOS export plan needs both A-Z and Z-A windows. Completed UUIDs
-do not add download batches. The progress detail shows only UUID completion and
+500-record resumable TXT checklist flow used by `run`. It first shows
+`Planning UUID downloads` while it inspects UUIDs and builds the download plan.
+The active download progress counts actual UUID download windows: a normal UUID
+contributes one batch, while a very large UUID may contribute two batches when
+the actual WOS export plan needs both A-Z and Z-A windows. Completed UUIDs do
+not add download batches. The progress detail shows only UUID completion and
 remaining counts, for example `uuids 1/4 done, 3 left`. During an active UUID
 download, that UUID's normal 500-record TXT progress remains visible and
 includes the same UUID remaining detail, for example
 `uuids 1/4 done, 3 left | download 1/2 79001-79500`.
 
-### 2D. Create A Task From An Existing WOS ID CSV
+### 2E. Create A Task From An Existing WOS ID CSV
 
 The CSV may contain a `wosid` or `UT` column. If neither exists, the first
 column is used.
@@ -480,7 +524,6 @@ The interactive workflow menu is grouped by command family:
 5 Settings
   5.1 Playwright visible
   5.2 Add SIDs
-  5.3 Clear all SIDs
   5.4 Clear dead SIDs
 6 Auth producer
   6.1 MUST login
@@ -510,6 +553,8 @@ incomplete UUID to be skipped.
 ## Documentation
 
 - [Docs Guide](docs/README.md): what each document is for and when to update it
+- [CLI Command Reference](docs/commands.md): structured command contracts and examples for users, scripts, and LLM agents
+- [LLM Calling Guide](docs/llm.md): JSON output contract, error codes, and agent recipes
 - [Usage And Data Model](docs/usage.md): user workflows, task lifecycle, and output definitions
 - [MUST SID Producer Spec](docs/auth-must.md): integrated MUST SSO auth producer design
 - [WOS Curl Reference](docs/curl.md): request-level debugging and export method reference

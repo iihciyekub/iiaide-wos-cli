@@ -1,6 +1,6 @@
 {
   "name": "iiaide-wos-cli",
-  "version": "0.4.97",
+  "version": "0.4.103",
   "private": true,
   "description": "Task-oriented CLI for interacting with Web of Science, exporting resumable raw TXT and BibTeX batches, and delivering reusable data packages.",
   "repository": {
@@ -24,7 +24,7 @@
     "iiw": "bin/iiaide-wos.js"
   },
   "scripts": {
-    "lint": "node --check bin/iiaide-wos.js && node --check src/iiaide-wos.js && node --check src/lib/io.js && node --check src/lib/interactive.js && node --check src/lib/playwright-install.js && node --check src/lib/sid-pool-monitor.js && node --check src/lib/terminal.js && node --check src/lib/update.js && node --check src/lib/wos-browser-export.js && node --check src/lib/wos-ids.js && node --check src/lib/wos-must-auth.js && node --check import/wos.js",
+    "lint": "node --check bin/iiaide-wos.js && node --check src/iiaide-wos.js && node --check src/lib/io.js && node --check src/lib/interactive.js && node --check src/lib/llm-output.js && node --check src/lib/playwright-install.js && node --check src/lib/sid-pool-monitor.js && node --check src/lib/terminal.js && node --check src/lib/update.js && node --check src/lib/wos-browser-bridge.js && node --check src/lib/wos-browser-export.js && node --check src/lib/wos-ids.js && node --check src/lib/wos-must-auth.js && node --check src/lib/wos-query-record.js && node --check import/wos.js",
     "check": "npm run lint",
     "test": "node --test",
     "verify": "npm run check && npm test",

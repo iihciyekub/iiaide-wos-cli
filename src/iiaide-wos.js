@@ -6,6 +6,7 @@ const { spawn } = require("node:child_process");
 const { chromium } = require("playwright");
 const { readJson, writeFileAtomic, writeJson } = require("./lib/io");
 const { askSidFromBrowserOrManual, interactiveArgs, isBackResult, isQuitResult, isUserAbortError, promptConfirmationText, promptSid } = require("./lib/interactive");
+const { llmErrorResult, llmResult } = require("./lib/llm-output");
 const {
   PLAYWRIGHT_VERSION,
   bundledPlaywrightInstallCommand,
@@ -22,6 +23,10 @@ const { updateCli } = require("./lib/update");
 const { exportBibBatchesViaWosJs, exportTxtBatchesViaWosJs } = require("./lib/wos-browser-export");
 const { normalizeWosId } = require("./lib/wos-ids");
 const { DEFAULT_MUST_LOGIN_URL, loginAndExtractMustSid } = require("./lib/wos-must-auth");
+const {
+  runQueryBrowserCommand,
+  runRecordBrowserCommand,
+} = require("./lib/wos-query-record");
 const { version: VERSION } = require("../package.json");
 
 const DEFAULT_BATCH_SIZE = 500;
@@ -119,49 +124,81 @@ function isCliMessageError(error) {
 function usage() {
   return `
 Usage:
-  iiaide-wos menu
-  iiaide-wos init [--tasks-root <dir>]
-  iiaide-wos check [--sid <SID> | --from-browser] [--tasks-root <dir>] [--wos-domain <domain>] [--base-url <url>] [--headed]
-  iiaide-wos auth login [--provider must] [--account <email>] [--password <secret>] [options]
-  iiaide-wos auth monitor [--provider must] [--account <email>] [--password <secret>] [options]
-  iiaide-wos sid-pool [--tasks-root <dir>]
-  iiaide-wos workspace [--tasks-root <dir>]
-  iiaide-wos settings [--playwright-visible <on|off>] [--add-sid <SID>] [--add-sids "<SID...>"] [--clear-sids] [--clear-dead-sids] [--tasks-root <dir>]
-  iiaide-wos update [--check]
-  iiaide-wos install-browser [--with-deps]
-  iiaide-wos batch-run [--sid <SID>] [--task <task-id>] [--tasks-root <dir>] [options]
-  iiaide-wos run [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
-  iiaide-wos bib [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
-  iiaide-wos [--sid <SID>] (--url <summary-url> | --uuid <uuid>) [options]
-  iiaide-wos import --csv <wosids.csv> [--task <task-id>] [options]
-  iiaide-wos list [--tasks-root <dir>]
-  iiaide-wos latest [--tasks-root <dir>]
-  iiaide-wos show (--task <task-id> | --latest) [--tasks-root <dir>]
-  iiaide-wos path (--task <task-id> | --latest) [--tasks-root <dir>]
-  iiaide-wos validate (--task <task-id> | --latest) [--tasks-root <dir>]
-  iiaide-wos clear (--task <task-id> | --latest) [--tasks-root <dir>]
-  iiaide-wos sid [--sid <SID> | --from-browser] [--tasks-root <dir>] [--wos-domain <domain>] [--base-url <url>] [--headed]
+  iiaide-wos <command> [options]
+  iiw <command> [options]
 
-Inputs:
+Command groups:
+  Interactive:
+    iiaide-wos menu
+    iiaide-wos
+
+  Query UUID discovery:
+    iiaide-wos query build --expr <query> [--task <task-id>] [--json]
+    iiaide-wos query parse --text <text> [--task <task-id>] [--json]
+    iiaide-wos query ids [--wosid <id>...] [--doi <doi>...] [--csv <file>] [--task <task-id>] [--json]
+    iiaide-wos query batch --expr-file <file> [--task <task-id>] [--jsonl|--json]
+
+  Record relation UUID discovery:
+    iiaide-wos record relations --wosid <id> --type <citations|references|related> [--task <task-id>] [--json]
+    iiaide-wos record shared --wosid <id> --with <id> [--task <task-id>] [--json]
+
+  Raw export:
+    iiaide-wos run (--url <summary-url> | --uuid <uuid>) [--sid <SID>] [options]
+    iiaide-wos bib (--url <summary-url> | --uuid <uuid>) [--sid <SID>] [options]
+    iiaide-wos batch-run [--task <task-id>] [--search-root <dir>] [options]
+
+  Import:
+    iiaide-wos import --csv <wosids.csv> [--task <task-id>] [options]
+
+  Workspace and task management:
+    iiaide-wos init [--tasks-root <dir>]
+    iiaide-wos workspace [--tasks-root <dir>]
+    iiaide-wos list [--tasks-root <dir>]
+    iiaide-wos latest [--tasks-root <dir>]
+    iiaide-wos show (--task <task-id> | --latest) [--tasks-root <dir>]
+    iiaide-wos path (--task <task-id> | --latest) [--tasks-root <dir>]
+    iiaide-wos validate (--task <task-id> | --latest) [--tasks-root <dir>]
+    iiaide-wos clear (--task <task-id> | --latest) [--tasks-root <dir>]
+
+  Authentication and settings:
+    iiaide-wos check [--sid <SID> | --from-browser] [--tasks-root <dir>] [--headed]
+    iiaide-wos sid [--sid <SID> | --from-browser] [--tasks-root <dir>] [--headed]
+    iiaide-wos sid-pool [--tasks-root <dir>]
+    iiaide-wos auth login [--provider must] [--account <email>] [--password <secret>] [options]
+    iiaide-wos auth monitor [--provider must] [--account <email>] [--password <secret>] [options]
+    iiaide-wos settings [--playwright-visible <on|off>] [--add-sid <SID>] [--add-sids "<SID...>"] [--clear-sids] [--clear-dead-sids]
+
+  Maintenance:
+    iiaide-wos update [--check]
+    iiaide-wos install-browser [--with-deps]
+    iiaide-wos --help
+    iiaide-wos --version
+
+Output conventions:
+  --json             Prints { ok, code, command, taskId, artifact, uuid, count, message, data } where supported.
+  query/record       Prints UUID by default.
+  run                Prints raw TXT batch directory on success.
+  bib                Prints raw BibTeX batch directory on success.
+  import             Prints managed WOSID CSV path on success.
+  task/status cmds   Print JSON or the requested task id/path.
+
+Common inputs:
   --sid <SID>             Web of Science SID. Interactive commands prompt when missing or expired
   --from-browser          Open a browser login window and auto-detect WOS SID
-  --provider <name>       Auth provider for auth commands. Default: must
-  --account <value>       MUST account email; repeat with --password for rotation
-  --password <value>      Matching MUST password; prefer prompt/env when possible
-  --auth-url <url>        Override the MUST SSO login URL
-  --no-save               Auth login only: do not save the captured SID
-  --retries <n>           Auth login retry count. Default: 1
-  --interval-ms <n>       Auth monitor interval. Default: 3000
-  --min-sids <n>          Auth monitor low-water mark; refresh when pool <= n. Default: 2
-  --threshold <n>         Alias for --min-sids
-  --retry-delay-ms <n>    Auth monitor delay after a refresh failure. Default: 60000
-  --max-checks <n>        Auth monitor stop after n checks. Default: 0 = infinite
-  --quiet                 Auth commands: suppress progress lines
-  --json                  Auth commands: print machine-readable JSON
   --url <summary-url>     WOS summary URL
   --uuid <uuid>           WOS result-set UUID; used when --url is not provided
   --csv <file>            Existing CSV containing a wosid/UT column or WOS IDs in its first column
+  --expr <query>          WOS advanced-search query expression for query build
+  --expr-file <file>      Text file with one WOS advanced-search query per line
+  --text <text>           Search text for query parse
+  --wosid <id>            WOS record id; repeat for query ids
+  --doi <doi>             DOI; repeat for query ids
+  --type <name>           Record relation type: citations, references, or related
+  --with <id>             Second WOS ID for shared-reference queries
   --search-root <dir>     Batch UUID search root. Default: current working directory
+  --json                  Machine-readable output where supported
+  --jsonl                 Machine-readable JSON Lines output for batch commands
+  --quiet                 Suppress progress lines where supported
 
 Output management:
   --task <task-id>        Stable task id. If omitted, creates a timestamp-based task id
@@ -192,6 +229,19 @@ Export options:
   --check                 Check for an update without installing it
   --with-deps             Install Playwright Linux system packages with Chromium
 
+Auth producer options:
+  --provider <name>       Auth provider for auth commands. Default: must
+  --account <value>       MUST account email; repeat with --password for rotation
+  --password <value>      Matching MUST password; prefer prompt/env when possible
+  --auth-url <url>        Override the MUST SSO login URL
+  --no-save               Auth login only: do not save the captured SID
+  --retries <n>           Auth login retry count. Default: 1
+  --interval-ms <n>       Auth monitor interval. Default: 3000
+  --min-sids <n>          Auth monitor low-water mark; refresh when pool <= n. Default: 2
+  --threshold <n>         Alias for --min-sids
+  --retry-delay-ms <n>    Auth monitor delay after a refresh failure. Default: 60000
+  --max-checks <n>        Auth monitor stop after n checks. Default: 0 = infinite
+
 Range options:
   --from-index <n>        Start from 1-based WOS record/WOSID index
   --limit <n>             Process only n records/WOS IDs
@@ -203,16 +253,25 @@ Task directory layout:
   logs/progress.jsonl
   manifest.json
   summary.json
+
+Detailed command reference:
+  docs/commands.md
 `.trim();
 }
 
 function parseArgs(argv) {
   const command = argv[2] && !argv[2].startsWith("--") ? argv[2] : "run";
   const authCommand = command === "auth" && argv[3] && !argv[3].startsWith("--") ? argv[3] : "login";
-  const startIndex = command === "run" ? (argv[2] === "run" ? 3 : 2) : (command === "auth" && argv[3] === authCommand ? 4 : 3);
+  const queryCommand = command === "query" && argv[3] && !argv[3].startsWith("--") ? argv[3] : "";
+  const recordCommand = command === "record" && argv[3] && !argv[3].startsWith("--") ? argv[3] : "";
+  const startIndex = command === "run"
+    ? (argv[2] === "run" ? 3 : 2)
+    : (command === "auth" && argv[3] === authCommand ? 4 : ((command === "query" && queryCommand) || (command === "record" && recordCommand) ? 4 : 3));
   const args = {
     command,
     authCommand,
+    queryCommand,
+    recordCommand,
     sid: "",
     sidSource: "",
     sidPoolIndex: -1,
@@ -223,6 +282,13 @@ function parseArgs(argv) {
     urlHadProtocol: false,
     uuid: "",
     csvPath: "",
+    queryExpr: "",
+    queryExprFile: "",
+    queryText: "",
+    wosIds: [],
+    dois: [],
+    relationType: "",
+    withWosId: "",
     searchRoot: path.resolve(process.cwd()),
     taskId: "",
     taskLabel: "",
@@ -268,6 +334,7 @@ function parseArgs(argv) {
     authQuiet: false,
     quiet: false,
     json: false,
+    jsonl: false,
     help: false,
     version: false,
   };
@@ -316,12 +383,20 @@ function parseArgs(argv) {
       args.quiet = true;
     }
     else if (arg === "--json") args.json = true;
+    else if (arg === "--jsonl") args.jsonl = true;
     else if (arg === "--url") {
       args.url = readValue(arg, i++);
       args.urlHadProtocol = /^https?:\/\//i.test(args.url);
     }
     else if (arg === "--uuid") args.uuid = readValue(arg, i++);
     else if (arg === "--csv") args.csvPath = readValue(arg, i++);
+    else if (arg === "--expr" || arg === "--query") args.queryExpr = readValue(arg, i++);
+    else if (arg === "--expr-file" || arg === "--query-file") args.queryExprFile = readValue(arg, i++);
+    else if (arg === "--text") args.queryText = readValue(arg, i++);
+    else if (arg === "--wosid" || arg === "--wos-id") args.wosIds.push(readValue(arg, i++));
+    else if (arg === "--doi") args.dois.push(readValue(arg, i++));
+    else if (arg === "--type") args.relationType = readValue(arg, i++);
+    else if (arg === "--with") args.withWosId = readValue(arg, i++);
     else if (arg === "--search-root") args.searchRoot = path.resolve(readValue(arg, i++));
     else if (arg === "--task") args.taskId = normalizeTaskId(readValue(arg, i++));
     else if (arg === "--latest") args.latest = true;
@@ -394,9 +469,11 @@ function parseArgs(argv) {
   applySavedRuntimeSettings(args);
   assertIntegerRange("--concurrency", args.concurrency, 1, 10);
   if (args.csvPath) args.csvPath = path.resolve(args.csvPath);
+  if (args.queryExprFile) args.queryExprFile = path.resolve(args.queryExprFile);
   if (!args.taskId && args.uuid) args.taskId = makeTaskId();
   if (!args.taskId && command === "import" && args.csvPath) args.taskId = makeTaskId();
   if (!args.taskId && command === "batch-run") args.taskId = makeTaskId();
+  if (!args.taskId && (command === "query" || command === "record")) args.taskId = makeTaskId();
   if (args.outDir) {
     args.outDir = path.resolve(args.outDir);
   } else if (args.taskId) {
@@ -4161,6 +4238,295 @@ function importWosIds(args) {
   return summary;
 }
 
+function queryRecordOperation(args) {
+  if (args.command === "query") return `query ${args.queryCommand || ""}`.trim();
+  if (args.command === "record") return `record ${args.recordCommand || ""}`.trim();
+  return args.command;
+}
+
+function writeQueryRecordManifest(paths, args) {
+  writeJson(paths.manifest, {
+    command: "iiaide-wos",
+    operation: queryRecordOperation(args),
+    args: manifestArgs(args),
+    task: {
+      taskId: args.taskId,
+      label: args.taskLabel,
+      taskDir: paths.taskDir,
+      tasksRoot: args.tasksRoot,
+    },
+    createdAt: new Date().toISOString(),
+  });
+}
+
+function writeQueryRecordSummary(paths, args, result) {
+  const summary = {
+    ok: Boolean(result.ok),
+    method: "wos-js-browser-api",
+    command: args.command,
+    subcommand: args.command === "query" ? args.queryCommand : args.recordCommand,
+    taskId: args.taskId,
+    taskLabel: args.taskLabel,
+    operation: result.operation || queryRecordOperation(args),
+    uuid: result.uuid || "",
+    expectedCount: Number(result.count || 0),
+    count: Number(result.count || 0),
+    rowText: result.rowText || "",
+    source: result.source || {},
+    files: {
+      progressLog: paths.progressLog,
+    },
+    finishedAt: new Date().toISOString(),
+  };
+  if (result.error) summary.error = result.error;
+  writeJson(paths.summary, summary);
+  return summary;
+}
+
+function assertQueryRecordArgs(args) {
+  if (args.command === "query") {
+    if (!["build", "parse", "ids", "batch"].includes(args.queryCommand)) {
+      throw new CliMessageError(`Unknown query command: ${args.queryCommand || "(missing)"}`);
+    }
+    if (args.queryCommand === "build" && !args.queryExpr) throw new CliMessageError("Missing --expr for query build");
+    if (args.queryCommand === "parse" && !args.queryText) throw new CliMessageError("Missing --text for query parse");
+    if (args.queryCommand === "batch" && !args.queryExprFile) throw new CliMessageError("Missing --expr-file for query batch");
+    if (args.queryCommand === "ids" && !args.csvPath && !args.wosIds.length && !args.dois.length) {
+      throw new CliMessageError("Missing query ids input. Use --wosid, --doi, or --csv.");
+    }
+    return;
+  }
+  if (args.command === "record") {
+    args.wosId = args.wosIds[0] || "";
+    if (!["relations", "shared"].includes(args.recordCommand)) {
+      throw new CliMessageError(`Unknown record command: ${args.recordCommand || "(missing)"}`);
+    }
+    if (!args.wosId) throw new CliMessageError(`Missing --wosid for record ${args.recordCommand}`);
+    if (args.recordCommand === "relations" && !["citations", "references", "related"].includes(args.relationType)) {
+      throw new CliMessageError("Missing or invalid --type for record relations. Use citations, references, or related.");
+    }
+    if (args.recordCommand === "shared" && !args.withWosId) {
+      throw new CliMessageError("Missing --with for record shared");
+    }
+  }
+}
+
+function readQueryExprFile(filePath) {
+  if (!filePath) throw new CliMessageError("Missing --expr-file for query batch");
+  if (!fs.existsSync(filePath)) throw new CliMessageError(`Query expression file not found: ${filePath}`);
+  return fs.readFileSync(filePath, "utf8")
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+}
+
+function queryBatchItemEnvelope(args, item) {
+  return llmResult(args, {
+    ok: Boolean(item.ok),
+    code: item.ok ? "OK" : (item.code || "WOS_UUID_MISSING"),
+    taskId: args.taskId,
+    uuid: item.uuid || "",
+    count: item.count || 0,
+    message: item.ok ? "WOS UUID resolved" : (item.error || item.message || "WOS command did not return a UUID"),
+    data: {
+      index: item.index,
+      total: item.total,
+      expr: item.expr,
+      operation: item.operation || "query build",
+      rowText: item.rowText || "",
+      source: item.source || {},
+    },
+  });
+}
+
+function queryBatchJsonResult(args, summary) {
+  return llmResult(args, {
+    ok: Boolean(summary.ok),
+    code: summary.ok ? "OK" : "WOS_QUERY_FAILED",
+    taskId: summary.taskId,
+    count: summary.completed,
+    message: summary.ok
+      ? `Resolved ${summary.completed}/${summary.total} query UUIDs`
+      : `Resolved ${summary.completed}/${summary.total} query UUIDs; ${summary.failed} failed`,
+    data: {
+      total: summary.total,
+      completed: summary.completed,
+      failed: summary.failed,
+      inputExprFile: summary.inputExprFile,
+      results: summary.results,
+      files: summary.files || {},
+    },
+  });
+}
+
+async function runQueryBatch(args, dependencies = {}) {
+  assertQueryRecordArgs(args);
+  const expressions = readQueryExprFile(args.queryExprFile);
+  if (!expressions.length) throw new CliMessageError(`No query expressions found in --expr-file: ${args.queryExprFile}`);
+
+  const initialPaths = getRunPaths(args.outDir);
+  const outputHasFiles = fs.existsSync(args.outDir) &&
+    fs.readdirSync(args.outDir).some((name) => name !== ".DS_Store");
+  if (args.force && outputHasFiles) cleanRunLayout(initialPaths);
+  const paths = createRunLayout(args);
+  writeQueryRecordManifest(paths, args);
+  upsertTaskIndex(args, { status: "query-running", lastError: "" });
+  appendProgress(paths, {
+    phase: "query-batch-start",
+    inputExprFile: args.queryExprFile,
+    total: expressions.length,
+  });
+
+  const writeStdout = dependencies.writeStdout || ((line) => console.log(line));
+  const writeStderr = dependencies.writeStderr || ((line) => console.error(line));
+  const prepareSession = dependencies.prepareWosSession || prepareWosSession;
+  const runner = dependencies.runQueryBrowserCommand || runQueryBrowserCommand;
+  const results = [];
+  let session = null;
+  try {
+    session = await prepareSession(args, { report: reportForArgs(args) });
+    appendProgress(paths, { phase: "sid-validated" });
+    for (let index = 0; index < expressions.length; index += 1) {
+      const expr = expressions[index];
+      const itemArgs = {
+        ...args,
+        queryCommand: "build",
+        queryExpr: expr,
+      };
+      let item;
+      try {
+        const result = await runner(session.page, itemArgs);
+        item = {
+          index: index + 1,
+          total: expressions.length,
+          expr,
+          ok: Boolean(result.ok),
+          uuid: result.uuid || "",
+          count: Number(result.count || 0),
+          rowText: result.rowText || "",
+          source: result.source || { kind: "expr", value: expr },
+          operation: result.operation || "query build",
+          error: result.error || "",
+          code: result.ok ? "OK" : "WOS_UUID_MISSING",
+        };
+      } catch (error) {
+        const envelope = llmErrorResult(itemArgs, error);
+        item = {
+          index: index + 1,
+          total: expressions.length,
+          expr,
+          ok: false,
+          uuid: "",
+          count: 0,
+          rowText: expr,
+          source: { kind: "expr", value: expr },
+          operation: "query build",
+          error: envelope.message,
+          code: envelope.code,
+        };
+      }
+      results.push(item);
+      appendProgress(paths, {
+        phase: item.ok ? "query-batch-item-complete" : "query-batch-item-failed",
+        index: item.index,
+        total: item.total,
+        uuid: item.uuid,
+        count: item.count,
+        ok: item.ok,
+        error: item.error || "",
+      });
+      if (args.jsonl) writeStdout(JSON.stringify(queryBatchItemEnvelope(args, item)));
+      else if (!args.json) {
+        if (item.ok) writeStdout(item.uuid);
+        else writeStderr(`Query ${item.index}/${item.total} failed: ${item.error || "WOS command did not return a UUID"}`);
+      }
+    }
+
+    const completed = results.filter((item) => item.ok).length;
+    const failed = results.length - completed;
+    const summary = {
+      ok: failed === 0,
+      method: "wos-js-query-batch",
+      command: "query",
+      subcommand: "batch",
+      taskId: args.taskId,
+      taskLabel: args.taskLabel,
+      inputExprFile: args.queryExprFile,
+      total: expressions.length,
+      completed,
+      failed,
+      results,
+      files: {
+        progressLog: paths.progressLog,
+      },
+      finishedAt: new Date().toISOString(),
+    };
+    writeJson(paths.summary, summary);
+    appendProgress(paths, {
+      phase: "query-batch-complete",
+      ok: summary.ok,
+      total: summary.total,
+      completed: summary.completed,
+      failed: summary.failed,
+    });
+    const firstUuid = results.find((item) => item.ok)?.uuid || "";
+    upsertTaskIndex(args, {
+      status: summary.ok ? "completed" : "failed",
+      lastError: summary.ok ? "" : `${failed} query batch item(s) failed`,
+      uuid: firstUuid,
+      url: firstUuid ? buildSummaryUrl(args.baseUrl, firstUuid, args.sortBy) : "",
+      expectedCount: summary.total,
+      uniqueCount: summary.completed,
+    });
+    return summary;
+  } finally {
+    await session?.close?.();
+  }
+}
+
+async function runQueryRecord(args, dependencies = {}) {
+  assertQueryRecordArgs(args);
+  const initialPaths = getRunPaths(args.outDir);
+  const outputHasFiles = fs.existsSync(args.outDir) &&
+    fs.readdirSync(args.outDir).some((name) => name !== ".DS_Store");
+  if (args.force && outputHasFiles) cleanRunLayout(initialPaths);
+  const paths = createRunLayout(args);
+  writeQueryRecordManifest(paths, args);
+  upsertTaskIndex(args, { status: `${args.command}-running`, lastError: "" });
+  appendProgress(paths, { phase: `${args.command}-start`, operation: queryRecordOperation(args) });
+
+  let session = null;
+  try {
+    const prepareSession = dependencies.prepareWosSession || prepareWosSession;
+    session = await prepareSession(args, { report: reportForArgs(args) });
+    appendProgress(paths, { phase: "sid-validated" });
+    const runner = args.command === "query"
+      ? (dependencies.runQueryBrowserCommand || runQueryBrowserCommand)
+      : (dependencies.runRecordBrowserCommand || runRecordBrowserCommand);
+    const result = await runner(session.page, args);
+    const summary = writeQueryRecordSummary(paths, args, result);
+    appendProgress(paths, {
+      phase: `${args.command}-complete`,
+      uuid: summary.uuid,
+      count: summary.count,
+      ok: summary.ok,
+    });
+    upsertTaskIndex(args, {
+      status: summary.ok ? "completed" : "failed",
+      lastError: summary.ok ? "" : (summary.error || "WOS command did not return a UUID"),
+      uuid: summary.uuid,
+      url: summary.uuid ? buildSummaryUrl(args.baseUrl, summary.uuid, args.sortBy) : "",
+      expectedCount: summary.count,
+      uniqueCount: summary.count,
+    });
+    if (!summary.ok) throw new CliMessageError(summary.error || "WOS command did not return a UUID");
+    return summary;
+  } finally {
+    await session?.close?.();
+  }
+}
+
 async function run(args) {
   const initialPaths = getRunPaths(args.outDir);
   const completedSummary = !args.force ? readCompletedRunSummary(initialPaths, args) : null;
@@ -4419,24 +4785,23 @@ async function runBib(args) {
 function listTasks(args) {
   const index = readTaskIndex(args.tasksRoot);
   const rows = Array.isArray(index.tasks) ? index.tasks : [];
-  if (!rows.length) {
-    console.log(`No tasks in ${args.tasksRoot}`);
-    return;
-  }
   const columns = ["updatedAt", "status", "taskId", "uniqueCount", "expectedCount", "label", "uuid"];
-  console.log(toCsv(rows, columns).trim());
+  if (!rows.length) {
+    return { rows, columns };
+  }
+  return { rows, columns };
 }
 
 function showTask(args) {
   const task = resolveTask(args);
   const summaryPath = path.join(task.taskDir, "summary.json");
   const summary = readJson(summaryPath, null);
-  console.log(JSON.stringify({ task, summary }, null, 2));
+  return { task, summary };
 }
 
-function printTaskPath(args) {
+function taskPathResult(args) {
   const task = resolveTask(args);
-  console.log(task.taskDir);
+  return task;
 }
 
 async function promptLine(message) {
@@ -4548,12 +4913,22 @@ async function executeAuthCommand(args, dependencies = authDependencies(args), o
   await prepareAuthCredentials(args, options);
   if (args.authCommand === "monitor") {
     const result = await monitorSidPool(args, dependencies, options);
-    if (args.json) console.log(JSON.stringify(safeAuthResult(result), null, 2));
+    if (args.json) printJsonResult(llmResult(args, {
+      ok: true,
+      code: "OK",
+      message: formatAuthMonitorResult(result),
+      data: safeAuthResult(result),
+    }));
     else console.log(formatAuthMonitorResult(result));
     return 0;
   }
   const result = await runAuthLogin(args, dependencies, options);
-  if (args.json) console.log(JSON.stringify(safeAuthResult(result), null, 2));
+  if (args.json) printJsonResult(llmResult(args, {
+    ok: true,
+    code: "OK",
+    message: formatAuthLoginResult(result),
+    data: safeAuthResult(result),
+  }));
   else console.log(formatAuthLoginResult(result));
   return 0;
 }
@@ -4632,6 +5007,43 @@ function formatCheckSidResult(result = {}) {
   return `WOS SID check failed${status}`;
 }
 
+function printJsonResult(result) {
+  console.log(JSON.stringify(result, null, 2));
+}
+
+function queryRecordJsonResult(args, summary) {
+  return llmResult(args, {
+    ok: Boolean(summary.ok),
+    code: summary.ok ? "OK" : "WOS_UUID_MISSING",
+    taskId: summary.taskId,
+    uuid: summary.uuid,
+    count: summary.count,
+    message: summary.ok ? "WOS UUID resolved" : (summary.error || "WOS command did not return a UUID"),
+    data: {
+      operation: summary.operation,
+      rowText: summary.rowText,
+      source: summary.source,
+      summary: summary.files ? { progressLog: summary.files.progressLog } : {},
+    },
+  });
+}
+
+function artifactJsonResult(args, summary, artifact, message = "Artifact ready") {
+  return llmResult(args, {
+    ok: Boolean(summary?.ok !== false),
+    taskId: summary?.taskId || args.taskId,
+    artifact,
+    uuid: summary?.uuid || args.uuid || "",
+    count: summary?.expectedCount || summary?.uniqueCount || summary?.count || 0,
+    message,
+    data: {
+      method: summary?.method || "",
+      files: summary?.files || {},
+      rowText: summary?.rowText || "",
+    },
+  });
+}
+
 async function executeCommand(args) {
   if (args.help) {
     console.log(usage());
@@ -4642,7 +5054,23 @@ async function executeCommand(args) {
     return 0;
   }
   if (args.command === "list") {
-    listTasks(args);
+    const result = listTasks(args);
+    if (args.json) {
+      printJsonResult(llmResult(args, {
+        ok: true,
+        message: result.rows.length ? "Tasks listed" : "No tasks",
+        count: result.rows.length,
+        data: {
+          tasksRoot: args.tasksRoot,
+          columns: result.columns,
+          tasks: result.rows,
+        },
+      }));
+    } else if (!result.rows.length) {
+      console.log(`No tasks in ${args.tasksRoot}`);
+    } else {
+      console.log(toCsv(result.rows, result.columns).trim());
+    }
     return 0;
   }
   if (args.command === "init") {
@@ -4651,7 +5079,16 @@ async function executeCommand(args) {
   }
   if (args.command === "check") {
     const result = await checkSid(args);
-    console.log(formatCheckSidResult(result));
+    if (args.json) {
+      printJsonResult(llmResult(args, {
+        ok: Boolean(result.ok),
+        code: result.ok ? "OK" : "SID_INVALID",
+        message: result.message || formatCheckSidResult(result),
+        data: result,
+      }));
+    } else {
+      console.log(formatCheckSidResult(result));
+    }
     return 0;
   }
   if (args.command === "auth") {
@@ -4716,12 +5153,53 @@ async function executeCommand(args) {
     installPlaywrightBrowserCommand(args);
     return 0;
   }
+  if (args.command === "query" || args.command === "record") {
+    if (!args.taskId || !args.outDir) {
+      console.error(usage());
+      return 2;
+    }
+    if (args.command === "query" && args.queryCommand === "batch") {
+      const summary = await runQueryBatch(args);
+      if (args.json) printJsonResult(queryBatchJsonResult(args, summary));
+      return summary.ok ? 0 : 1;
+    }
+    const summary = await runQueryRecord(args);
+    const result = queryRecordJsonResult(args, summary);
+    console.log(args.json ? JSON.stringify(result, null, 2) : summary.uuid);
+    return summary.ok ? 0 : 1;
+  }
   if (args.command === "show") {
-    showTask(args);
+    const result = showTask(args);
+    if (args.json) {
+      printJsonResult(llmResult(args, {
+        ok: true,
+        taskId: result.task.taskId,
+        artifact: result.task.taskDir,
+        uuid: result.task.uuid || result.summary?.uuid || "",
+        count: result.task.expectedCount || result.summary?.expectedCount || 0,
+        message: "Task shown",
+        data: result,
+      }));
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+    }
     return 0;
   }
   if (args.command === "path") {
-    printTaskPath(args);
+    const task = taskPathResult(args);
+    if (args.json) {
+      printJsonResult(llmResult(args, {
+        ok: true,
+        taskId: task.taskId,
+        artifact: task.taskDir,
+        uuid: task.uuid || "",
+        count: task.expectedCount || 0,
+        message: "Task path resolved",
+        data: { task },
+      }));
+    } else {
+      console.log(task.taskDir);
+    }
     return 0;
   }
   if (args.command === "clear") {
@@ -4731,12 +5209,33 @@ async function executeCommand(args) {
   }
   if (args.command === "validate") {
     const result = validateTask(args);
-    console.log(JSON.stringify(result, null, 2));
+    if (args.json) {
+      printJsonResult(llmResult(args, {
+        ok: Boolean(result.ok),
+        code: result.ok ? "OK" : "TASK_INCOMPLETE",
+        taskId: result.taskId || args.taskId,
+        uuid: result.uuid || "",
+        count: result.expectedCount || result.uniqueCount || 0,
+        message: result.ok ? "Task validation passed" : "Task validation failed",
+        data: result,
+      }));
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+    }
     return result.ok ? 0 : 1;
   }
   if (args.command === "sid") {
     const result = await validateAndSaveSid(args);
-    console.log(JSON.stringify(result, null, 2));
+    if (args.json) {
+      printJsonResult(llmResult(args, {
+        ok: true,
+        code: "OK",
+        message: "WOS SID validated and saved",
+        data: result,
+      }));
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+    }
     return 0;
   }
   if (args.command === "import") {
@@ -4745,7 +5244,8 @@ async function executeCommand(args) {
       return 2;
     }
     const summary = importWosIds(args);
-    console.log(summary.files.wosidsCsv);
+    if (args.json) printJsonResult(artifactJsonResult(args, summary, summary.files.wosidsCsv, "WOSID CSV imported"));
+    else console.log(summary.files.wosidsCsv);
     return 0;
   }
   if (args.command === "batch-run") {
@@ -4754,7 +5254,8 @@ async function executeCommand(args) {
       return 2;
     }
     const summary = await runBatchUuidTxt(args);
-    console.log(summary.files.rawRoot);
+    if (args.json) printJsonResult(artifactJsonResult(args, summary, summary.files.rawRoot, "Batch UUID TXT export ready"));
+    else console.log(summary.files.rawRoot);
     return summary.ok ? 0 : 1;
   }
   if (args.command === "bib") {
@@ -4763,18 +5264,35 @@ async function executeCommand(args) {
       return 2;
     }
     const completed = readCompletedArtifactSummary(args);
-    if (completed) return printCompletedArtifactPath(args.command, completed);
+    if (completed) {
+      if (args.json) printJsonResult(artifactJsonResult(args, completed, completed.files.bibDir, "BibTeX raw batches already complete"));
+      else return printCompletedArtifactPath(args.command, completed);
+      return completed.ok ? 0 : 1;
+    }
     const summary = await runBib(args);
-    console.log(summary.files.bibDir);
+    if (args.json) printJsonResult(artifactJsonResult(args, summary, summary.files.bibDir, "BibTeX raw batches ready"));
+    else console.log(summary.files.bibDir);
     return summary.ok ? 0 : 1;
   }
   if (args.command === "latest") {
     const latest = readLatestTaskId(args.tasksRoot);
     if (!latest) {
+      if (args.json) printJsonResult(llmResult(args, {
+        ok: false,
+        code: "TASK_NOT_FOUND",
+        message: `No latest task in ${args.tasksRoot}`,
+        data: { tasksRoot: args.tasksRoot },
+      }));
       console.error(`No latest task in ${args.tasksRoot}`);
       return 1;
     }
-    console.log(latest);
+    if (args.json) printJsonResult(llmResult(args, {
+      ok: true,
+      taskId: latest,
+      message: "Latest task resolved",
+      data: { latestTask: latest, tasksRoot: args.tasksRoot },
+    }));
+    else console.log(latest);
     return 0;
   }
   if (args.command !== "run") {
@@ -4785,9 +5303,14 @@ async function executeCommand(args) {
     return 2;
   }
   const completed = readCompletedArtifactSummary(args);
-  if (completed) return printCompletedArtifactPath(args.command, completed);
+  if (completed) {
+    if (args.json) printJsonResult(artifactJsonResult(args, completed, completed.files.rawDir, "TXT raw batches already complete"));
+    else return printCompletedArtifactPath(args.command, completed);
+    return completed.ok ? 0 : 1;
+  }
   const summary = await run(args);
-  console.log(summary.files.rawDir);
+  if (args.json) printJsonResult(artifactJsonResult(args, summary, summary.files.rawDir, "TXT raw batches ready"));
+  else console.log(summary.files.rawDir);
   return summary.ok ? 0 : 1;
 }
 
@@ -4796,7 +5319,7 @@ function recordCommandFailure(args, error) {
     args?.taskId &&
     args?.outDir &&
     fs.existsSync(args.outDir) &&
-    ["run", "import", "bib", "batch-run"].includes(args.command)
+    ["run", "import", "bib", "batch-run", "query", "record"].includes(args.command)
   ) {
     try {
       upsertTaskIndex(args, {
@@ -4818,10 +5341,12 @@ async function runParsedCommand(args, options = {}) {
       return restartCurrentCli(error.omitSidArgs ? omitSidArgs(argv) : argv);
     }
     if (isUserQuitError(error)) {
+      if (args?.json) printJsonResult(llmErrorResult(args, error));
       console.error(error.message || "Quit by user");
       return 130;
     }
     if (isUserCancelledError(error)) {
+      if (args?.json) printJsonResult(llmErrorResult(args, error));
       console.error(error.message || "Cancelled by user");
       return 0;
     }
@@ -4831,10 +5356,12 @@ async function runParsedCommand(args, options = {}) {
     }
     if (isCliMessageError(error)) {
       recordCommandFailure(args, error);
+      if (args?.json) printJsonResult(llmErrorResult(args, error));
       console.error(error.message || String(error));
       return error.exitCode || 1;
     }
     recordCommandFailure(args, error);
+    if (args?.json) printJsonResult(llmErrorResult(args, error));
     console.error(error && error.stack ? error.stack : String(error));
     return 1;
   }
@@ -4977,6 +5504,9 @@ module.exports = {
   run,
   runBib,
   runBatchUuidTxt,
+  readQueryExprFile,
+  runQueryBatch,
+  runQueryRecord,
   importWosIds,
   initializeWorkspace,
   workspaceStatus,
