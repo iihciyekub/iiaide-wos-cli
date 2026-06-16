@@ -3,6 +3,14 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.4.97 - 2026-06-15
+
+- Rename the batch UUID TXT preflight progress to `Planning UUID downloads` and
+  remove per-UUID `checking` details from that planning line so it is not
+  confused with active TXT download progress.
+- Keep UUID remaining counts and per-UUID 500-record TXT chunk progress on the
+  actual download lines.
+
 ## 0.4.96 - 2026-06-15
 
 - Show UUID completion/remaining counts inside the active TXT download progress

@@ -158,7 +158,9 @@ a fast hint, but still validate the raw batch checklist for the recorded window
 plan before skipping a UUID; if files are missing, the UUID is resumed instead
 of being skipped.
 The two-sort large export can cover at most 200,000 records for a UUID.
-Batch UUID TXT progress counts actual UUID download windows: a normal UUID
+Before downloads start, the preflight line is labeled
+`Planning UUID downloads` and only tracks UUID planning progress. Batch UUID TXT
+download progress counts actual UUID download windows: a normal UUID
 contributes one batch, while a large UUID can contribute two batches when the
 actual WOS export plan needs both A-Z and Z-A windows. Completed UUIDs do not
 add download batches. The progress detail shows only UUID completion and

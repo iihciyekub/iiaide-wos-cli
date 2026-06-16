@@ -2246,7 +2246,9 @@ test("batch UUID TXT runs per-UUID inspect and downloads quietly", () => {
   assert.ok(batchMethod, "runBatchUuidTxt should be present");
   assert.ok(exportMethod, "exportFromWos should be present");
   assert.match(batchMethod[0], /quiet: true,/);
-  assert.match(batchMethod[0], /shortUuid\(uuid\)/);
+  assert.match(batchMethod[0], /createProgress\("Planning UUID downloads", uuids\.length\)/);
+  assert.doesNotMatch(batchMethod[0], /Batch UUID TXT prepare/);
+  assert.doesNotMatch(batchMethod[0], /checking \$\{shortUuid\(uuid\)\}/);
   assert.match(batchMethod[0], /totalDownloadBatches = jobs\.reduce/);
   assert.match(batchMethod[0], /createProgress\("Batch UUID TXT", totalDownloadBatches\)/);
   assert.match(batchMethod[0], /formatUuidRemainingDetail\(completedDownloadUuids, totalDownloadUuids\)/);

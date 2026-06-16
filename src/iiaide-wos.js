@@ -3858,7 +3858,7 @@ async function runBatchUuidTxt(args) {
   upsertTaskIndex(args, { status: "batch-running", lastError: "" });
   appendProgress(paths, { phase: "batch-uuid-discovered", searchRoot: args.searchRoot, csvFiles, totalUuids: uuids.length });
 
-  const prepareProgress = createProgress("Batch UUID TXT prepare", uuids.length);
+  const prepareProgress = createProgress("Planning UUID downloads", uuids.length);
   const results = [];
   let completed = 0;
   let skipped = 0;
@@ -3870,7 +3870,7 @@ async function runBatchUuidTxt(args) {
   try {
     for (const [index, uuid] of uuids.entries()) {
       const step = `${index + 1}/${uuids.length}`;
-      prepareProgress.update(index, `checking ${shortUuid(uuid)}`);
+      prepareProgress.update(index);
       const marker = readRawUuidCompleteMarker(paths, uuid);
       let meta = marker || {};
       let state = rawUuidDownloadState(paths, uuid, meta, { sortBy: args.sortBy });
@@ -3879,7 +3879,7 @@ async function runBatchUuidTxt(args) {
       if (marker && state.complete) {
         skipped += 1;
         completed += 1;
-        prepareProgress.update(index + 1, `skipped ${shortUuid(uuid)}`);
+        prepareProgress.update(index + 1);
         appendProgress(paths, { phase: "batch-uuid-skip-complete", uuid, index: index + 1, total: uuids.length });
         results.push({ uuid, status: "skipped" });
         continue;
@@ -3901,7 +3901,7 @@ async function runBatchUuidTxt(args) {
           await confirmLargeWosExport(args, meta.expectedCount, windows, { skipInsteadOfThrow: true, quiet: true });
           skipped += 1;
           completed += 1;
-          prepareProgress.update(index + 1, `skipped-large ${shortUuid(uuid)}`);
+          prepareProgress.update(index + 1);
           appendProgress(paths, {
             phase: "batch-uuid-skip-large-export",
             uuid,
@@ -3919,7 +3919,7 @@ async function runBatchUuidTxt(args) {
           writeRawUuidCompleteMarker(paths, { ...meta, uuid });
           skipped += 1;
           completed += 1;
-          prepareProgress.update(index + 1, `verified ${shortUuid(uuid)}`);
+          prepareProgress.update(index + 1);
           appendProgress(paths, { phase: "batch-uuid-verified-complete", uuid, index: index + 1, total: uuids.length });
           results.push({ uuid, status: "skipped" });
           continue;
@@ -3929,9 +3929,9 @@ async function runBatchUuidTxt(args) {
       const hadRaw = rawBatchFiles(paths, uuid).length > 0;
       const downloadWindowCount = downloadWindowCountForState(state);
       jobs.push({ uuid, meta, hadRaw, downloadWindowCount, index });
-      prepareProgress.update(index + 1, `${downloadWindowCount} batch ${shortUuid(uuid)}`);
+      prepareProgress.update(index + 1);
     }
-    prepareProgress.stop("Batch UUID TXT prepare complete");
+    prepareProgress.stop("Planning UUID downloads complete");
 
     totalDownloadBatches = jobs.reduce((total, job) => total + job.downloadWindowCount, 0);
     appendProgress(paths, { phase: "batch-uuid-download-plan", totalDownloadBatches, jobs: jobs.length });
@@ -3976,7 +3976,7 @@ async function runBatchUuidTxt(args) {
     }
     progress?.stop("Batch UUID TXT complete");
   } catch (error) {
-    prepareProgress.stop("Batch UUID TXT prepare stopped");
+    prepareProgress.stop("Planning UUID downloads stopped");
     progress?.stop("Batch UUID TXT stopped");
     appendProgress(paths, { phase: "batch-uuid-failed", message: error?.message || String(error), completed, skipped, resumed });
     upsertTaskIndex(args, { status: "batch-failed", lastError: error?.message || String(error) });
