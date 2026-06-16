@@ -5,6 +5,13 @@ const readline = require("node:readline/promises");
 const { spawn } = require("node:child_process");
 const { chromium } = require("playwright");
 const { readJson, writeFileAtomic, writeJson } = require("./lib/io");
+const {
+  DEFAULT_AUDIT_HTML_HOST,
+  DEFAULT_AUDIT_HTML_LIMIT,
+  DEFAULT_AUDIT_HTML_PORT,
+  createAuditHtmlServer,
+  exportAuditSnapshot,
+} = require("./lib/audit-html");
 const { askSidFromBrowserOrManual, interactiveArgs, isBackResult, isQuitResult, isUserAbortError, promptConfirmationText, promptSid } = require("./lib/interactive");
 const { llmErrorResult, llmResult } = require("./lib/llm-output");
 const {
@@ -24,9 +31,32 @@ const { exportBibBatchesViaWosJs, exportTxtBatchesViaWosJs } = require("./lib/wo
 const { normalizeWosId } = require("./lib/wos-ids");
 const { DEFAULT_MUST_LOGIN_URL, loginAndExtractMustSid } = require("./lib/wos-must-auth");
 const {
+  canonicalWosId,
+  findExistingRecordIngest,
+  getArtifactEvents,
+  getAuditRuns,
+  getAuditTimeline,
+  getLatestRelationMetadata,
+  getLatestSuccessfulQueryBuild,
+  getRecordByWosId,
+  getRelationMetadataForWosId,
+  getResultsetContext,
+  getResultsetItems,
+  getResultsetMetadata,
+  getSearchQueries,
+  insertWosIngest,
+  normalizeRelationType,
+  openWosDatabase,
+  writeAuditRecords,
+} = require("./lib/wos-sqlite");
+const {
+  RECORD_RELATION_TYPES,
+  callBrowserApi,
+  queryTextForIds,
   runQueryBrowserCommand,
   runRecordBrowserCommand,
 } = require("./lib/wos-query-record");
+const { toStandardJson } = require("../import/wos-import");
 const { version: VERSION } = require("../package.json");
 
 const DEFAULT_BATCH_SIZE = 500;
@@ -67,6 +97,7 @@ const DEFAULT_TASK_ID_CONFIG = {
   prefix: "TID",
   pattern: "yyyyMMddHHmmss",
 };
+const DEFAULT_PROJECT_DIRNAME = ".iiaide-wos-cli";
 const CLI_STARTED_AT = Date.now();
 let sharedWosSession = null;
 
@@ -133,32 +164,48 @@ Command groups:
     iiaide-wos
 
   Query UUID discovery:
-    iiaide-wos query build --expr <query> [--task <task-id>] [--json]
-    iiaide-wos query parse --text <text> [--task <task-id>] [--json]
-    iiaide-wos query ids [--wosid <id>...] [--doi <doi>...] [--csv <file>] [--task <task-id>] [--json]
-    iiaide-wos query batch --expr-file <file> [--task <task-id>] [--jsonl|--json]
+    iiaide-wos query build --expr <query> [--json]
+    iiaide-wos query parse --text <text> [--json]
+    iiaide-wos query ids [--wosid <id>...] [--doi <doi>...] [--csv <file>] [--json]
+    iiaide-wos query batch (--expr <query>... | --expr-file <file>) [--jsonl|--json]
+    iiaide-wos query ingest (--expr <query> | --text <text> | --wosid <id>... | --doi <doi>... | --csv <file>) [--description <text>] [--json]
 
   Record relation UUID discovery:
-    iiaide-wos record relations --wosid <id> --type <citations|references|related> [--task <task-id>] [--json]
-    iiaide-wos record shared --wosid <id> --with <id> [--task <task-id>] [--json]
+    iiaide-wos record relations --wosid <id> --type <citations|references|related> [--json]
+    iiaide-wos record shared --wosid <id> --with <id> [--json]
+    iiaide-wos record collect --wosid <id> [--types citations,references,related] [--pages 20] [--json]
+    iiaide-wos record ingest --wosid <id> --type <citations|references|related> [--description <text>] [--json]
 
   Raw export:
     iiaide-wos run (--url <summary-url> | --uuid <uuid>) [--sid <SID>] [options]
     iiaide-wos bib (--url <summary-url> | --uuid <uuid>) [--sid <SID>] [options]
-    iiaide-wos batch-run [--task <task-id>] [--search-root <dir>] [options]
+    iiaide-wos batch-run [--search-root <dir>] [options]
 
   Import:
-    iiaide-wos import --csv <wosids.csv> [--task <task-id>] [options]
+    iiaide-wos import --csv <wosids.csv> [options]
 
-  Workspace and task management:
+  SQLite lookup:
+    iiaide-wos db uuid --uuid <uuid> [--json]
+    iiaide-wos db wosid --wosid <id> [--json]
+    iiaide-wos db list (--uuid <uuid> | --wosid <id> --type <self|citations|references|related>) [--context] [--json]
+    iiaide-wos db context --wosid <id> --type <self|citations|references|related> [--json]
+    iiaide-wos db searches [--limit <n>] [--uuid <uuid>] [--wosid <id>] [--json]
+    iiaide-wos db artifacts [--limit <n>] [--uuid <uuid>] [--json]
+    iiaide-wos db runs [--limit <n>] [--uuid <uuid>] [--json]
+    iiaide-wos db timeline [--limit <n>] [--uuid <uuid>] [--wosid <id>] [--json]
+    iiaide-wos db audit-html [--port <n>] [--limit <n>] [--uuid <uuid>] [--wosid <id>]
+    iiaide-wos db audit-export [--format <html|json|both>] [--report-dir <dir>] [--limit <n>] [--uuid <uuid>] [--wosid <id>]
+
+  Project workspace:
     iiaide-wos init [--tasks-root <dir>]
     iiaide-wos workspace [--tasks-root <dir>]
+    iiaide-wos tasks [--tasks-root <dir>] [--json]
     iiaide-wos list [--tasks-root <dir>]
     iiaide-wos latest [--tasks-root <dir>]
-    iiaide-wos show (--task <task-id> | --latest) [--tasks-root <dir>]
-    iiaide-wos path (--task <task-id> | --latest) [--tasks-root <dir>]
-    iiaide-wos validate (--task <task-id> | --latest) [--tasks-root <dir>]
-    iiaide-wos clear (--task <task-id> | --latest) [--tasks-root <dir>]
+    iiaide-wos show [--tasks-root <dir>]
+    iiaide-wos path [--tasks-root <dir>]
+    iiaide-wos validate [--tasks-root <dir>]
+    iiaide-wos clear [--tasks-root <dir>]
 
   Authentication and settings:
     iiaide-wos check [--sid <SID> | --from-browser] [--tasks-root <dir>] [--headed]
@@ -176,11 +223,12 @@ Command groups:
 
 Output conventions:
   --json             Prints { ok, code, command, taskId, artifact, uuid, count, message, data } where supported.
+  --debug            Print WOS navigation/session debug steps to stderr.
   query/record       Prints UUID by default.
   run                Prints raw TXT batch directory on success.
   bib                Prints raw BibTeX batch directory on success.
   import             Prints managed WOSID CSV path on success.
-  task/status cmds   Print JSON or the requested task id/path.
+  project/status cmds Print JSON or the requested project id/path.
 
 Common inputs:
   --sid <SID>             Web of Science SID. Interactive commands prompt when missing or expired
@@ -190,26 +238,33 @@ Common inputs:
   --csv <file>            Existing CSV containing a wosid/UT column or WOS IDs in its first column
   --expr <query>          WOS advanced-search query expression for query build
   --expr-file <file>      Text file with one WOS advanced-search query per line
+                          For query batch, may be replaced or supplemented by repeated --expr
   --text <text>           Search text for query parse
+  --description <text>    Semantic description for SQLite ingest result sets
   --wosid <id>            WOS record id; repeat for query ids
   --doi <doi>             DOI; repeat for query ids
   --type <name>           Record relation type: citations, references, or related
+                          For db context, also supports self
+  --types <list>          Record relation types for record collect. Default: citations,references,related
+  --pages <n>             Result pages to collect for record collect. Max: 20
   --with <id>             Second WOS ID for shared-reference queries
   --search-root <dir>     Batch UUID search root. Default: current working directory
   --json                  Machine-readable output where supported
   --jsonl                 Machine-readable JSON Lines output for batch commands
+  --context               For db list, include title/abstract/keywords/authors
   --quiet                 Suppress progress lines where supported
 
 Output management:
-  --task <task-id>        Stable task id. If omitted, creates a timestamp-based task id
-  --task-label <label>    Human label stored in task metadata
-  --tasks-root <dir>      Parent directory for tasks. Default: ./tasks
-  --out-dir <dir>         Exact task directory override
+  --task <task-id>        Legacy multi-task mode only. Default project mode uses the current directory name
+  --task-label <label>    Human label stored in project metadata
+  --tasks-root <dir>      Legacy multi-task root override. Default: ./.iiaide-wos-cli
+  --out-dir <dir>         Exact output directory override; also enables legacy mode
   --force                 Allow managed task replacement
   --reuse-raw             Rebuild CSV from existing raw batches when present
 
 Export options:
   --sort-by <sort>        Summary sort key. Default: relevance
+  --ref-query             Export a references/citations/related result-set UUID with WOS ref-query request mode
   --batch-size <n>        WOS export API batch size. Default: 500, max: 500
   --allow-large-export    For UUID result sets over 100,000 records, use author ascending/descending windows up to 200,000 records
   --timeout-ms <n>        Navigation/API timeout. Default: 120000
@@ -245,14 +300,22 @@ Auth producer options:
 Range options:
   --from-index <n>        Start from 1-based WOS record/WOSID index
   --limit <n>             Process only n records/WOS IDs
+                          query/record ingest always stores at most 500 records
 
 Task directory layout:
-  raw/<uuid>/full-record/ WOS fullRecord text batches as <uuid>_<start>_<end>.txt
-  raw/<uuid>/bib/         BibTeX batches as <uuid>_<start>_<end>.bib
-  raw/<task-id>/full-record/<task-id>_wosid.csv (import only)
-  logs/progress.jsonl
-  manifest.json
-  summary.json
+  project.json                         Project identity and layout metadata.
+  state.json                           Latest task state.
+  audit/activity.jsonl                 User-facing audit timeline.
+  audit/searches.jsonl                 Search/query outcomes.
+  audit/resultsets.jsonl               UUID/result-set registry.
+  audit/artifacts.jsonl                File artifact registry.
+  runs/<run-id>/command.json           Per-command sanitized inputs.
+  runs/<run-id>/runtime.jsonl          CLI runtime/debug/progress events.
+  runs/<run-id>/summary.json           Per-command result summary.
+  wosData.sqlite                       Task-level SQLite database for query/record ingest.
+  resultsets/<uuid>/raw/full-record/   TXT batches as <uuid>_<start>_<end>.txt
+  resultsets/<uuid>/raw/bib/           BibTeX batches as <uuid>_<start>_<end>.bib
+  resultsets/<uuid>/<uuid>_wosid.csv   Normalized WOS ID CSV.
 
 Detailed command reference:
   docs/commands.md
@@ -264,14 +327,16 @@ function parseArgs(argv) {
   const authCommand = command === "auth" && argv[3] && !argv[3].startsWith("--") ? argv[3] : "login";
   const queryCommand = command === "query" && argv[3] && !argv[3].startsWith("--") ? argv[3] : "";
   const recordCommand = command === "record" && argv[3] && !argv[3].startsWith("--") ? argv[3] : "";
+  const dbCommand = command === "db" && argv[3] && !argv[3].startsWith("--") ? argv[3] : "";
   const startIndex = command === "run"
     ? (argv[2] === "run" ? 3 : 2)
-    : (command === "auth" && argv[3] === authCommand ? 4 : ((command === "query" && queryCommand) || (command === "record" && recordCommand) ? 4 : 3));
+    : (command === "auth" && argv[3] === authCommand ? 4 : ((command === "query" && queryCommand) || (command === "record" && recordCommand) || (command === "db" && dbCommand) ? 4 : 3));
   const args = {
     command,
     authCommand,
     queryCommand,
     recordCommand,
+    dbCommand,
     sid: "",
     sidSource: "",
     sidPoolIndex: -1,
@@ -283,11 +348,15 @@ function parseArgs(argv) {
     uuid: "",
     csvPath: "",
     queryExpr: "",
+    queryExprs: [],
     queryExprFile: "",
     queryText: "",
+    semanticDescription: "",
     wosIds: [],
     dois: [],
     relationType: "",
+    relationTypes: [],
+    pages: 20,
     withWosId: "",
     searchRoot: path.resolve(process.cwd()),
     taskId: "",
@@ -295,6 +364,7 @@ function parseArgs(argv) {
     outDir: "",
     tasksRoot: path.resolve(process.cwd(), "tasks"),
     sortBy: "relevance",
+    refQuery: null,
     batchSize: DEFAULT_BATCH_SIZE,
     allowLargeExport: false,
     timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -315,6 +385,9 @@ function parseArgs(argv) {
     concurrency: 1,
     concurrencySource: "",
     limit: 0,
+    port: DEFAULT_AUDIT_HTML_PORT,
+    outputFormat: "",
+    reportDir: "",
     fromIndex: 1,
     fromIndexSource: "",
     checkOnly: false,
@@ -333,13 +406,18 @@ function parseArgs(argv) {
     authMaxChecks: 0,
     authQuiet: false,
     quiet: false,
+    debug: false,
     json: false,
     jsonl: false,
+    context: false,
     help: false,
     version: false,
   };
   let sawAuthAccountArg = false;
   let sawAuthPasswordArg = false;
+  let explicitTasksRoot = false;
+  let explicitOutDir = false;
+  let explicitTaskId = false;
 
   const readValue = (flag, index) => {
     const value = argv[index + 1];
@@ -382,28 +460,48 @@ function parseArgs(argv) {
       args.authQuiet = true;
       args.quiet = true;
     }
+    else if (arg === "--debug") args.debug = true;
     else if (arg === "--json") args.json = true;
     else if (arg === "--jsonl") args.jsonl = true;
+    else if (arg === "--context") args.context = true;
     else if (arg === "--url") {
       args.url = readValue(arg, i++);
       args.urlHadProtocol = /^https?:\/\//i.test(args.url);
     }
     else if (arg === "--uuid") args.uuid = readValue(arg, i++);
     else if (arg === "--csv") args.csvPath = readValue(arg, i++);
-    else if (arg === "--expr" || arg === "--query") args.queryExpr = readValue(arg, i++);
+    else if (arg === "--expr" || arg === "--query") {
+      const value = readValue(arg, i++);
+      args.queryExpr = value;
+      args.queryExprs.push(value);
+    }
     else if (arg === "--expr-file" || arg === "--query-file") args.queryExprFile = readValue(arg, i++);
     else if (arg === "--text") args.queryText = readValue(arg, i++);
+    else if (arg === "--description" || arg === "--semantic-description") args.semanticDescription = readValue(arg, i++);
     else if (arg === "--wosid" || arg === "--wos-id") args.wosIds.push(readValue(arg, i++));
     else if (arg === "--doi") args.dois.push(readValue(arg, i++));
     else if (arg === "--type") args.relationType = readValue(arg, i++);
+    else if (arg === "--types") args.relationTypes = readValue(arg, i++).split(",").map((value) => value.trim()).filter(Boolean);
+    else if (arg === "--pages") args.pages = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--with") args.withWosId = readValue(arg, i++);
     else if (arg === "--search-root") args.searchRoot = path.resolve(readValue(arg, i++));
-    else if (arg === "--task") args.taskId = normalizeTaskId(readValue(arg, i++));
+    else if (arg === "--task") {
+      args.taskId = normalizeTaskId(readValue(arg, i++));
+      explicitTaskId = true;
+    }
     else if (arg === "--latest") args.latest = true;
     else if (arg === "--task-label" || arg === "--label") args.taskLabel = readValue(arg, i++);
-    else if (arg === "--out-dir" || arg === "--download-dir") args.outDir = readValue(arg, i++);
-    else if (arg === "--tasks-root" || arg === "--output-root") args.tasksRoot = readValue(arg, i++);
+    else if (arg === "--out-dir" || arg === "--download-dir") {
+      args.outDir = readValue(arg, i++);
+      explicitOutDir = true;
+    }
+    else if (arg === "--tasks-root" || arg === "--output-root") {
+      args.tasksRoot = readValue(arg, i++);
+      explicitTasksRoot = true;
+    }
     else if (arg === "--sort-by") args.sortBy = readValue(arg, i++);
+    else if (arg === "--ref-query") args.refQuery = true;
+    else if (arg === "--no-ref-query") args.refQuery = false;
     else if (arg === "--batch-size") args.batchSize = parseIntegerFlag(arg, readValue(arg, i++));
     else if (arg === "--allow-large-export") args.allowLargeExport = true;
     else if (arg === "--timeout-ms" || arg === "--timeout") args.timeoutMs = parseIntegerFlag(arg, readValue(arg, i++));
@@ -438,6 +536,9 @@ function parseArgs(argv) {
       args.concurrencySource = "cli";
     }
     else if (arg === "--limit") args.limit = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--port") args.port = parseIntegerFlag(arg, readValue(arg, i++));
+    else if (arg === "--format") args.outputFormat = readValue(arg, i++);
+    else if (arg === "--report-dir") args.reportDir = path.resolve(readValue(arg, i++));
     else if (arg === "--from-index") {
       args.fromIndex = parseIntegerFlag(arg, readValue(arg, i++));
       args.fromIndexSource = "cli";
@@ -465,17 +566,32 @@ function parseArgs(argv) {
   assertIntegerRange("--concurrency", args.concurrency, 1, 10);
   assertIntegerRange("--limit", args.limit, 0);
   assertIntegerRange("--from-index", args.fromIndex, 1);
-  args.tasksRoot = path.resolve(args.tasksRoot);
+  args.projectMode = !explicitTasksRoot && !explicitOutDir;
+  args.tasksRoot = path.resolve(
+    args.projectMode
+      ? path.join(process.cwd(), DEFAULT_PROJECT_DIRNAME)
+      : args.tasksRoot
+  );
   applySavedRuntimeSettings(args);
   assertIntegerRange("--concurrency", args.concurrency, 1, 10);
   if (args.csvPath) args.csvPath = path.resolve(args.csvPath);
   if (args.queryExprFile) args.queryExprFile = path.resolve(args.queryExprFile);
-  if (!args.taskId && args.uuid) args.taskId = makeTaskId();
-  if (!args.taskId && command === "import" && args.csvPath) args.taskId = makeTaskId();
-  if (!args.taskId && command === "batch-run") args.taskId = makeTaskId();
-  if (!args.taskId && (command === "query" || command === "record")) args.taskId = makeTaskId();
+  if (args.projectMode) {
+    const defaultProjectId = normalizeTaskId(path.basename(process.cwd()) || "project");
+    if (explicitTaskId && args.taskId !== defaultProjectId && !args.taskLabel) {
+      args.taskLabel = args.taskId;
+    }
+    args.taskId = defaultProjectId;
+  } else {
+    if (!args.taskId && args.uuid) args.taskId = makeTaskId();
+    if (!args.taskId && command === "import" && args.csvPath) args.taskId = makeTaskId();
+    if (!args.taskId && command === "batch-run") args.taskId = makeTaskId();
+    if (!args.taskId && (command === "query" || command === "record")) args.taskId = makeTaskId();
+  }
   if (args.outDir) {
     args.outDir = path.resolve(args.outDir);
+  } else if (args.projectMode) {
+    args.outDir = args.tasksRoot;
   } else if (args.taskId) {
     args.outDir = taskDirectory(args.tasksRoot, args.taskId);
   }
@@ -630,8 +746,28 @@ function announceResolvedWosUuid(args, write = (message) => console.error(messag
   return true;
 }
 
+function assertUuidDirectExportable(args) {
+  const uuid = String(args?.uuid || "").trim();
+  if (!uuid) return;
+  const paths = getRunPaths(args.outDir);
+  if (!fs.existsSync(paths.sqlitePath)) return;
+  const db = openWosDatabase(paths.sqlitePath);
+  try {
+    const resultset = getResultsetMetadata(db, uuid);
+    if (!resultset || resultset.uuidDirectExport !== false) return;
+    const kind = resultset.kind || "relation";
+    throw new CliMessageError(
+      `UUID ${uuid} is marked as front-end WOSID collection only (${resultset.exportMode}). ` +
+      `Use: iiaide-wos record ingest --wosid "${resultset.sourceWosId || "<source-wosid>"}" --type ${kind}`
+    );
+  } finally {
+    db.close();
+  }
+}
+
 async function prepareWosExport(args) {
   announceResolvedWosUuid(args);
+  assertUuidDirectExportable(args);
   loadSavedSid(args);
   return args.sid;
 }
@@ -641,6 +777,21 @@ function reportForArgs(args, write = console.error) {
     const text = String(message || "");
     if (args?.quiet && /^WOS UUID changed from /.test(text)) return;
     write(text);
+  };
+}
+
+function debugForArgs(args, write = console.error) {
+  return (message, details = {}) => {
+    if (!args?.debug) return false;
+    const parts = [];
+    for (const [key, value] of Object.entries(details || {})) {
+      if (value === undefined || value === null || value === "") continue;
+      const safeValue = /^(sid|observedSid)$/i.test(key) ? maskSid(value) : redactSidInUrl(String(value));
+      parts.push(`${key}=${safeValue}`);
+    }
+    const suffix = parts.length ? ` ${parts.join(" ")}` : "";
+    write(`[debug] ${message}${suffix}`);
+    return true;
   };
 }
 
@@ -704,6 +855,32 @@ function makeTaskId(date = new Date()) {
   return normalizeTaskId(formatTaskIdDate(date));
 }
 
+function formatRunIdDate(date = new Date()) {
+  const pad = (value, width = 2) => String(value).padStart(width, "0");
+  return [
+    date.getUTCFullYear(),
+    pad(date.getUTCMonth() + 1),
+    pad(date.getUTCDate()),
+    "T",
+    pad(date.getUTCHours()),
+    pad(date.getUTCMinutes()),
+    pad(date.getUTCSeconds()),
+    pad(date.getUTCMilliseconds(), 3),
+    "Z",
+  ].join("");
+}
+
+function operationSlug(args = {}) {
+  if (args.command === "query") return `query-${args.queryCommand || "run"}`;
+  if (args.command === "record") return `record-${args.recordCommand || "run"}`;
+  if (args.command === "auth") return `auth-${args.authCommand || "login"}`;
+  return args.command || "run";
+}
+
+function makeRunId(args = {}, date = new Date()) {
+  return safeFilePart(`RUN${formatRunIdDate(date)}-${operationSlug(args)}`);
+}
+
 function normalizeTaskId(value) {
   const raw = String(value || "").trim();
   if (!raw) throw new Error("Task id must not be empty");
@@ -752,6 +929,14 @@ function taskDirectory(tasksRoot, taskId) {
     throw new Error(`Task directory must be inside tasks root: ${taskId}`);
   }
   return target;
+}
+
+function isSingleProjectMode(args) {
+  return Boolean(args?.projectMode);
+}
+
+function projectStorageDir(args) {
+  return path.resolve(args.tasksRoot);
 }
 
 function storedTaskDirectory(tasksRoot, taskDir) {
@@ -1704,11 +1889,78 @@ function writeCurrentTaskId(tasksRoot, taskId) {
   writeFileAtomic(latestTaskPath(tasksRoot), taskId + "\n");
 }
 
+function managedProjectEntryFromDir(tasksRoot, taskDir) {
+  try {
+    const projectPath = path.join(taskDir, "project.json");
+    if (!fs.existsSync(projectPath)) return null;
+    const project = readJson(projectPath, null);
+    if (!project || project.command !== "iiaide-wos" || project.kind !== "wos-project") return null;
+    const taskId = normalizeTaskId(project.task?.taskId || path.basename(taskDir));
+    const statePath = path.join(taskDir, "state.json");
+    const state = readJson(statePath, null) || {};
+    const projectStat = fs.statSync(projectPath);
+    const stateStat = fs.existsSync(statePath) ? fs.statSync(statePath) : null;
+    const updatedMs = Math.max(projectStat.mtimeMs, stateStat?.mtimeMs || 0);
+    return {
+      taskId,
+      label: state.taskLabel || project.task?.label || "",
+      uuid: state.uuid || project.source?.uuid || "",
+      url: state.inputUrl || project.source?.url || "",
+      sortBy: state.sortBy || "",
+      taskDir: storedTaskDirectory(tasksRoot, taskDir),
+      status: state.status || state.method || "created",
+      expectedCount: state.expectedCount || state.count || 0,
+      uniqueCount: state.uniqueCount || 0,
+      createdAt: project.createdAt || new Date(projectStat.birthtimeMs || projectStat.ctimeMs).toISOString(),
+      updatedAt: new Date(updatedMs || projectStat.mtimeMs).toISOString(),
+      lastError: state.lastError || "",
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function discoverManagedTaskEntries(tasksRoot) {
+  if (!fs.existsSync(tasksRoot)) return [];
+  return fs.readdirSync(tasksRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => managedProjectEntryFromDir(tasksRoot, path.join(tasksRoot, entry.name)))
+    .filter(Boolean)
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+}
+
+function restoreDiscoveredTasks(args, existingTasks = []) {
+  const discovered = discoverManagedTaskEntries(args.tasksRoot);
+  if (!discovered.length) return [];
+  const byId = new Map();
+  for (const task of existingTasks) byId.set(task.taskId, task);
+  for (const task of discovered) byId.set(task.taskId, { ...byId.get(task.taskId), ...task });
+  const tasks = Array.from(byId.values())
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  writeTaskIndex(args.tasksRoot, { version: 1, tasks });
+  return tasks;
+}
+
 function initializeWorkspace(args) {
   const indexPath = taskIndexPath(args.tasksRoot);
   const initialized = !fs.existsSync(indexPath);
   fs.mkdirSync(args.tasksRoot, { recursive: true });
   if (!fs.existsSync(indexPath)) writeJson(indexPath, { version: 1, tasks: [] });
+  if (isSingleProjectMode(args)) {
+    const projectPath = path.join(projectStorageDir(args), "project.json");
+    if (!fs.existsSync(projectPath)) {
+      writeJson(projectPath, {
+        command: "iiaide-wos",
+        kind: "wos-project",
+        task: {
+          taskId: args.taskId,
+          taskDir: projectStorageDir(args),
+          tasksRoot: args.tasksRoot,
+        },
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }
   return {
     ok: true,
     initialized,
@@ -1719,14 +1971,18 @@ function initializeWorkspace(args) {
 }
 
 function createTaskPlaceholder(args, taskId = makeTaskId()) {
-  const normalizedTaskId = normalizeTaskId(taskId);
-  const taskDir = taskDirectory(args.tasksRoot, normalizedTaskId);
+  const normalizedTaskId = isSingleProjectMode(args)
+    ? args.taskId
+    : normalizeTaskId(taskId);
+  const taskDir = isSingleProjectMode(args)
+    ? projectStorageDir(args)
+    : taskDirectory(args.tasksRoot, normalizedTaskId);
   fs.mkdirSync(taskDir, { recursive: true });
-  const manifest = path.join(taskDir, "manifest.json");
-  if (!fs.existsSync(manifest)) {
-    writeJson(manifest, {
+  const project = path.join(taskDir, "project.json");
+  if (!fs.existsSync(project)) {
+    writeJson(project, {
       command: "iiaide-wos",
-      operation: "current-task",
+      kind: "wos-project",
       task: {
         taskId: normalizedTaskId,
         taskDir,
@@ -1744,8 +2000,11 @@ function createTaskPlaceholder(args, taskId = makeTaskId()) {
 
 function ensureCurrentTask(args) {
   initializeWorkspace(args);
+  if (isSingleProjectMode(args)) {
+    return createTaskPlaceholder(args, args.taskId);
+  }
   const index = readTaskIndex(args.tasksRoot);
-  const tasks = Array.isArray(index.tasks) ? index.tasks : [];
+  let tasks = Array.isArray(index.tasks) ? index.tasks : [];
   const latest = readLatestTaskId(args.tasksRoot);
   const latestTask = latest ? tasks.find((task) => task.taskId === latest) : null;
   if (latestTask) return latestTask;
@@ -1753,10 +2012,20 @@ function ensureCurrentTask(args) {
     writeCurrentTaskId(args.tasksRoot, tasks[0].taskId);
     return tasks[0];
   }
+  tasks = restoreDiscoveredTasks(args, tasks);
+  if (tasks.length) {
+    const restoredLatestTask = latest ? tasks.find((task) => task.taskId === latest) : null;
+    const task = restoredLatestTask || tasks[0];
+    writeCurrentTaskId(args.tasksRoot, task.taskId);
+    return task;
+  }
   return createTaskPlaceholder(args);
 }
 
 function setCurrentTaskId(args, taskId) {
+  if (isSingleProjectMode(args)) {
+    return createTaskPlaceholder(args, args.taskId);
+  }
   initializeWorkspace(args);
   const normalizedTaskId = normalizeTaskId(taskId);
   const index = readTaskIndex(args.tasksRoot);
@@ -1771,8 +2040,12 @@ function setCurrentTaskId(args, taskId) {
 function workspaceStatus(args, sidCheck = null) {
   applySavedRuntimeSettings(args);
   const index = readTaskIndex(args.tasksRoot);
-  const tasks = Array.isArray(index.tasks) ? index.tasks : [];
-  const currentTask = readLatestTaskId(args.tasksRoot) || "";
+  const tasks = isSingleProjectMode(args)
+    ? [createTaskPlaceholder(args, args.taskId)]
+    : (Array.isArray(index.tasks) ? index.tasks : []);
+  const currentTask = isSingleProjectMode(args)
+    ? args.taskId
+    : (readLatestTaskId(args.tasksRoot) || "");
   const config = readConfig(args.tasksRoot);
   const sidConfig = readSidConfig(args);
   const pool = sidPoolFromConfig(sidConfig);
@@ -1806,6 +2079,7 @@ function workspaceStatus(args, sidCheck = null) {
     taskCount: tasks.length,
     currentTask,
     latestTask: currentTask,
+    projectMode: isSingleProjectMode(args),
     hasSavedSid: Boolean(sid),
     sid: maskedSid,
     sidMasked: maskedSid,
@@ -1831,14 +2105,15 @@ function upsertTaskIndex(args, patch = {}) {
   const index = readTaskIndex(args.tasksRoot);
   if (!Array.isArray(index.tasks)) index.tasks = [];
   const now = new Date().toISOString();
-  const existing = index.tasks.find((task) => task.taskId === args.taskId);
+  const entryId = isSingleProjectMode(args) ? args.taskId : args.taskId;
+  const existing = index.tasks.find((task) => task.taskId === entryId);
   const entry = {
-    taskId: args.taskId,
+    taskId: entryId,
     label: args.taskLabel || existing?.label || "",
     uuid: patch.uuid !== undefined ? patch.uuid : (args.uuid || existing?.uuid || ""),
     url: patch.url !== undefined ? patch.url : (args.url || existing?.url || ""),
     sortBy: args.sortBy,
-    taskDir: storedTaskDirectory(args.tasksRoot, args.outDir),
+    taskDir: isSingleProjectMode(args) ? projectStorageDir(args) : storedTaskDirectory(args.tasksRoot, args.outDir),
     status: patch.status || existing?.status || "created",
     expectedCount: patch.expectedCount ?? existing?.expectedCount ?? 0,
     uniqueCount: patch.uniqueCount ?? existing?.uniqueCount ?? 0,
@@ -1846,16 +2121,22 @@ function upsertTaskIndex(args, patch = {}) {
     updatedAt: now,
     lastError: patch.lastError ?? existing?.lastError ?? "",
   };
-  const nextTasks = index.tasks.filter((task) => task.taskId !== args.taskId);
+  const nextTasks = isSingleProjectMode(args)
+    ? index.tasks.filter((task) => task.taskId !== entryId)
+    : index.tasks.filter((task) => task.taskId !== args.taskId);
   nextTasks.push(entry);
   nextTasks.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   index.tasks = nextTasks;
   writeTaskIndex(args.tasksRoot, index);
-  writeFileAtomic(latestTaskPath(args.tasksRoot), args.taskId + "\n");
+  writeFileAtomic(latestTaskPath(args.tasksRoot), entryId + "\n");
   return entry;
 }
 
 function resolveTask(args) {
+  if (isSingleProjectMode(args)) {
+    const task = createTaskPlaceholder(args, args.taskId);
+    return { ...task, taskDir: projectStorageDir(args) };
+  }
   const index = readTaskIndex(args.tasksRoot);
   const taskId = args.taskId || (args.latest ? readLatestTaskId(args.tasksRoot) : "");
   if (!taskId) throw new Error("Missing --task or --latest");
@@ -1866,8 +2147,8 @@ function resolveTask(args) {
 
 function assertManagedTaskDirectory(taskDir) {
   if (!fs.existsSync(taskDir)) return;
-  const manifest = readJson(path.join(taskDir, "manifest.json"), null);
-  if (manifest?.command !== "iiaide-wos") {
+  const project = readJson(path.join(taskDir, "project.json"), null);
+  if (project?.command !== "iiaide-wos" || project?.kind !== "wos-project") {
     throw new Error(`Refusing to clear unmanaged task directory: ${taskDir}`);
   }
 }
@@ -1886,6 +2167,17 @@ function rewriteLatestAfterTaskRemoval(tasksRoot, removedTaskId, remainingTasks)
 }
 
 function clearTask(args) {
+  if (isSingleProjectMode(args)) {
+    const taskDir = projectStorageDir(args);
+    assertManagedTaskDirectory(taskDir);
+    fs.rmSync(taskDir, { recursive: true, force: true });
+    return {
+      ok: true,
+      taskId: args.taskId,
+      taskDir,
+      latestTask: "",
+    };
+  }
   const task = resolveTask(args);
   assertManagedTaskDirectory(task.taskDir);
 
@@ -1925,60 +2217,332 @@ function readLatestTaskId(tasksRoot) {
 }
 
 function getRunPaths(outDir) {
-  const rawRoot = path.join(outDir, "raw");
-  const exportRoot = path.join(outDir, "export");
+  const taskDir = outDir;
+  const runId = "";
+  const auditDir = path.join(taskDir, "audit");
+  const runsRoot = path.join(taskDir, "runs");
+  const resultsetsRoot = path.join(taskDir, "resultsets");
   return {
-    taskDir: outDir,
-    runDir: outDir,
-    rawRoot,
-    exportRoot,
-    rawDir: rawRoot,
-    bibDir: rawRoot,
-    dataDir: exportRoot,
-    logsDir: path.join(outDir, "logs"),
-    manifest: path.join(outDir, "manifest.json"),
-    summary: path.join(outDir, "summary.json"),
-    progressLog: path.join(outDir, "logs", "progress.jsonl"),
+    taskDir,
+    runId,
+    runDir: "",
+    auditDir,
+    runsRoot,
+    resultsetsRoot,
+    rawRoot: resultsetsRoot,
+    exportRoot: resultsetsRoot,
+    pdfRoot: path.join(taskDir, "pdf"),
+    sqlitePath: path.join(taskDir, "wosData.sqlite"),
+    rawDir: resultsetsRoot,
+    bibDir: resultsetsRoot,
+    dataDir: resultsetsRoot,
+    logsDir: "",
+    project: path.join(taskDir, "project.json"),
+    state: path.join(taskDir, "state.json"),
+    manifest: path.join(taskDir, "project.json"),
+    summary: path.join(taskDir, "state.json"),
+    activityLog: path.join(auditDir, "activity.jsonl"),
+    artifactsLog: path.join(auditDir, "artifacts.jsonl"),
+    searchesLog: path.join(auditDir, "searches.jsonl"),
+    resultsetsLog: path.join(auditDir, "resultsets.jsonl"),
+    progressLog: path.join(taskDir, "runs", "unassigned", "runtime.jsonl"),
+    commandJson: path.join(taskDir, "runs", "unassigned", "command.json"),
+    runSummary: path.join(taskDir, "runs", "unassigned", "summary.json"),
   };
 }
 
 function withRawSource(paths, sourceId) {
   const source = safeFilePart(sourceId || "task");
-  const rawSourceDir = path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), source);
-  const exportSourceDir = path.join(paths.exportRoot || path.join(paths.taskDir, "export"), source);
-  const fullRecordDir = path.join(rawSourceDir, "full-record");
+  const rawSourceDir = path.join(paths.resultsetsRoot || paths.rawRoot || path.join(paths.taskDir, "resultsets"), source);
+  const exportSourceDir = path.join(rawSourceDir, "exports");
+  const fullRecordDir = path.join(rawSourceDir, "raw", "full-record");
   const bibExportDir = path.join(exportSourceDir, "bib");
   return {
     ...paths,
     rawSourceId: source,
     rawSourceDir,
     exportSourceDir,
-    wosIdsDir: fullRecordDir,
+    wosIdsDir: rawSourceDir,
     bibExportDir,
     rawDir: fullRecordDir,
-    bibDir: path.join(rawSourceDir, "bib"),
-    dataDir: fullRecordDir,
+    bibDir: path.join(rawSourceDir, "raw", "bib"),
+    dataDir: rawSourceDir,
     parseFailures: path.join(fullRecordDir, `${source}_parse_failures.json`),
   };
+}
+
+function writeProjectFile(paths, args) {
+  if (fs.existsSync(paths.project)) return readJson(paths.project, {});
+  const project = {
+    command: "iiaide-wos",
+    kind: "wos-project",
+    version: 2,
+    task: {
+      taskId: args.taskId,
+      label: args.taskLabel,
+      taskDir: paths.taskDir,
+      tasksRoot: args.tasksRoot,
+    },
+    layout: {
+      audit: "audit/",
+      runs: "runs/",
+      resultsets: "resultsets/",
+      pdf: "pdf/",
+      state: "state.json",
+    },
+    createdAt: new Date().toISOString(),
+  };
+  writeJson(paths.project, project);
+  return project;
+}
+
+function appendJsonl(filePath, row) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.appendFileSync(filePath, JSON.stringify({ at: new Date().toISOString(), ...row }) + "\n", "utf8");
+}
+
+function appendAudit(paths, stream, event) {
+  const targets = {
+    activity: paths.activityLog,
+    artifacts: paths.artifactsLog,
+    searches: paths.searchesLog,
+    resultsets: paths.resultsetsLog,
+  };
+  const filePath = targets[stream];
+  if (!filePath) throw new Error(`Unknown audit stream: ${stream}`);
+  appendJsonl(filePath, { runId: paths.runId || "", ...event });
+}
+
+function operationSummaryEvent(summary = {}) {
+  if (summary.command === "query") return summary.ok ? "search.completed" : "search.failed";
+  if (summary.command === "record") return summary.ok ? "record-query.completed" : "record-query.failed";
+  if (summary.method === "wos-js-export-fetchTxtBatches") return summary.ok ? "export.txt.completed" : "export.txt.failed";
+  if (summary.method === "wos-js-export-fetchBibBatches") return summary.ok ? "export.bib.completed" : "export.bib.failed";
+  if (summary.method === "batch-uuid-csv-txt") return summary.ok ? "batch-export.completed" : "batch-export.failed";
+  if (summary.method === "imported-wosid-csv") return summary.ok ? "import.completed" : "import.failed";
+  return summary.ok === false ? "operation.failed" : "operation.completed";
+}
+
+function auditFileEntries(files = {}) {
+  const entries = [];
+  const add = (role, value) => {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      for (const item of value) add(role, item);
+      return;
+    }
+    if (value && typeof value === "object") {
+      add(role, value.path || value.file || value.dir || value.marker || "");
+      return;
+    }
+    entries.push({ role, path: String(value) });
+  };
+  for (const [key, value] of Object.entries(files || {})) add(key, value);
+  return entries;
+}
+
+function writeOperationSummary(paths, summary) {
+  const enriched = {
+    ...summary,
+    runId: summary.runId || paths.runId || "",
+  };
+  writeJson(paths.state, enriched);
+  writeJson(paths.runSummary, enriched);
+  appendAudit(paths, "activity", {
+    event: operationSummaryEvent(enriched),
+    taskId: enriched.taskId || "",
+    operation: enriched.operation || enriched.method || enriched.command || "",
+    uuid: enriched.uuid || "",
+    count: enriched.expectedCount || enriched.count || enriched.uniqueCount || 0,
+    ok: Boolean(enriched.ok !== false),
+  });
+  if (enriched.command === "query" || enriched.command === "record") {
+    appendAudit(paths, "searches", {
+      event: enriched.ok ? "search.resultset" : "search.failed",
+      taskId: enriched.taskId || "",
+      operation: enriched.operation || "",
+      query: enriched.rowText || "",
+      source: enriched.source || {},
+      uuid: enriched.uuid || "",
+      count: enriched.count || enriched.expectedCount || 0,
+      ok: Boolean(enriched.ok),
+    });
+  }
+  if (enriched.uuid) {
+    appendAudit(paths, "resultsets", {
+      event: "resultset.observed",
+      taskId: enriched.taskId || "",
+      uuid: enriched.uuid,
+      count: enriched.expectedCount || enriched.count || 0,
+      url: enriched.summaryHref || enriched.inputUrl || "",
+      rowText: enriched.rowText || "",
+    });
+  }
+  for (const file of auditFileEntries(enriched.files)) {
+    appendAudit(paths, "artifacts", {
+      event: "artifact.recorded",
+      taskId: enriched.taskId || "",
+      uuid: enriched.uuid || "",
+      ...file,
+    });
+  }
+  writeSqliteAuditSummary(paths, enriched);
+  return enriched;
+}
+
+function inferResultsetKind(summary = {}, item = {}) {
+  if (item.kind) return item.kind;
+  if (summary.kind) return summary.kind;
+  if (summary.command === "query") return "normal";
+  if (summary.command === "record") {
+    const type = normalizeRelationType(item.relationType || summary.source?.type || summary.subcommand || "");
+    if (["citations", "references", "related"].includes(type)) return type;
+  }
+  return "";
+}
+
+function sqliteAuditSearches(summary = {}) {
+  if (summary.command === "query" && summary.subcommand === "batch" && Array.isArray(summary.results)) {
+    return summary.results.map((item) => ({
+      operation: item.operation || "query build",
+      queryText: item.rowText || item.expr || "",
+      sourceKind: item.source?.kind || "expr",
+      source: item.source || {},
+      uuid: item.uuid || "",
+      count: Number(item.count || 0),
+      ok: Boolean(item.ok),
+      error: item.error || "",
+      semanticDescription: "",
+      relationType: "",
+      sourceWosId: "",
+    }));
+  }
+  if (summary.command === "record" && summary.subcommand === "collect" && Array.isArray(summary.relations)) {
+    return summary.relations.map((relation) => ({
+      operation: `record ${relation.type || ""}`.trim(),
+      queryText: relation.rowText || "",
+      sourceKind: "record-relation",
+      source: { kind: "record-relation", wosid: summary.source?.wosid || "", type: relation.type || "" },
+      uuid: relation.uuid || "",
+      count: Number(relation.count || 0),
+      ok: Boolean(relation.ok),
+      error: relation.error || "",
+      semanticDescription: "",
+      relationType: relation.type || "",
+      sourceWosId: summary.source?.wosid || "",
+    }));
+  }
+  if (!["query", "record"].includes(summary.command || "")) return [];
+  return [{
+    operation: summary.operation || "",
+    queryText: summary.rowText || "",
+    sourceKind: summary.source?.kind || "",
+    source: summary.source || {},
+    uuid: summary.uuid || "",
+    count: Number(summary.count || summary.expectedCount || 0),
+    ok: Boolean(summary.ok),
+    error: summary.error || "",
+    semanticDescription: summary.semanticDescription || "",
+    relationType: normalizeRelationType(summary.source?.type || summary.kind || ""),
+    sourceWosId: summary.sourceWosId || summary.source?.wosid || "",
+  }];
+}
+
+function sqliteAuditResultsets(summary = {}) {
+  const searches = sqliteAuditSearches(summary);
+  const resultsets = searches
+    .filter((item) => item.uuid)
+    .map((item) => ({
+      uuid: item.uuid,
+      kind: inferResultsetKind(summary, item),
+      sourceWosId: item.sourceWosId || "",
+      queryText: item.queryText || "",
+      semanticDescription: item.semanticDescription || summary.semanticDescription || "",
+      isRefQuery: Boolean(summary.isRefQuery),
+      sortBy: summary.sortBy || "relevance",
+      exportMode: summary.exportMode || "uuid-export",
+      uuidDirectExport: summary.uuidDirectExport !== false,
+      availableCount: Number(item.count || 0),
+      lastIngestedCount: Number(summary.ingestedCount || 0),
+    }));
+  if (!resultsets.length && summary.uuid) {
+    resultsets.push({
+      uuid: summary.uuid,
+      kind: inferResultsetKind(summary),
+      sourceWosId: summary.sourceWosId || summary.source?.wosid || "",
+      queryText: summary.rowText || "",
+      semanticDescription: summary.semanticDescription || "",
+      isRefQuery: Boolean(summary.isRefQuery),
+      sortBy: summary.sortBy || "relevance",
+      exportMode: summary.exportMode || "uuid-export",
+      uuidDirectExport: summary.uuidDirectExport !== false,
+      availableCount: Number(summary.count || summary.expectedCount || 0),
+      lastIngestedCount: Number(summary.ingestedCount || 0),
+    });
+  }
+  return resultsets;
+}
+
+function sqliteAuditArtifacts(summary = {}) {
+  return auditFileEntries(summary.files).map((file) => ({
+    role: file.role,
+    path: file.path,
+    uuid: summary.uuid || "",
+  }));
+}
+
+function writeSqliteAuditSummary(paths, summary) {
+  const db = openWosDatabase(paths.sqlitePath);
+  try {
+    writeAuditRecords(db, {
+      runId: summary.runId || paths.runId || "",
+      taskId: summary.taskId || "",
+      command: summary.command || "",
+      subcommand: summary.subcommand || "",
+      operation: summary.operation || summary.method || summary.command || "",
+      ok: Boolean(summary.ok !== false),
+      uuid: summary.uuid || "",
+      count: Number(summary.expectedCount || summary.count || summary.uniqueCount || 0),
+      createdAt: summary.startedAt || summary.finishedAt || new Date().toISOString(),
+      finishedAt: summary.finishedAt || new Date().toISOString(),
+      summary,
+      searches: sqliteAuditSearches(summary),
+      resultsets: sqliteAuditResultsets(summary),
+      artifacts: sqliteAuditArtifacts(summary),
+    });
+  } finally {
+    db.close();
+  }
 }
 
 function createRunLayout(args) {
   if (fs.existsSync(args.outDir) && !args.force) {
     const entries = fs.readdirSync(args.outDir).filter((name) => name !== ".DS_Store");
     if (entries.length) {
-      const manifest = readJson(path.join(args.outDir, "manifest.json"), null);
-      if (manifest?.command !== "iiaide-wos") {
+      const project = readJson(path.join(args.outDir, "project.json"), null);
+      if (project?.command !== "iiaide-wos" || project?.kind !== "wos-project") {
         throw new Error(`Output directory is not empty: ${args.outDir}. Use --force or choose another --out-dir.`);
       }
     }
   }
 
   const paths = getRunPaths(args.outDir);
+  args.runId = args.runId || makeRunId(args);
+  paths.runId = args.runId;
+  paths.runDir = path.join(paths.runsRoot, args.runId);
+  paths.logsDir = paths.runDir;
+  paths.progressLog = path.join(paths.runDir, "runtime.jsonl");
+  paths.commandJson = path.join(paths.runDir, "command.json");
+  paths.runSummary = path.join(paths.runDir, "summary.json");
+  paths.manifest = paths.commandJson;
   for (const dir of [
-    paths.rawRoot,
-    paths.exportRoot,
-    paths.logsDir,
+    paths.auditDir,
+    paths.runsRoot,
+    paths.resultsetsRoot,
+    paths.pdfRoot,
+    paths.runDir,
   ]) fs.mkdirSync(dir, { recursive: true });
+  writeProjectFile(paths, args);
   return paths;
 }
 
@@ -2054,18 +2618,19 @@ function printCompletedArtifactPath(command, summary) {
 }
 
 function cleanRunLayout(paths) {
-  const manifest = readJson(paths.manifest, null);
-  if (manifest?.command !== "iiaide-wos") {
+  const project = readJson(paths.project, null);
+  if (project?.command !== "iiaide-wos" || project?.kind !== "wos-project") {
     throw new Error(`Refusing to clean unmanaged output directory: ${paths.taskDir}`);
   }
   for (const directory of [
-    paths.rawRoot || path.join(paths.taskDir, "raw"),
-    paths.exportRoot || path.join(paths.taskDir, "export"),
-    paths.logsDir,
+    paths.resultsetsRoot || path.join(paths.taskDir, "resultsets"),
+    paths.runsRoot || path.join(paths.taskDir, "runs"),
+    paths.auditDir || path.join(paths.taskDir, "audit"),
+    paths.pdfRoot || path.join(paths.taskDir, "pdf"),
   ].filter(Boolean)) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
-  for (const filePath of [paths.manifest, paths.summary]) {
+  for (const filePath of [paths.state]) {
     fs.rmSync(filePath, { force: true });
   }
 }
@@ -2093,7 +2658,7 @@ function bibFilePath(paths, uuid) {
 }
 
 function appendProgress(paths, event) {
-  fs.appendFileSync(paths.progressLog, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n", "utf8");
+  appendJsonl(paths.progressLog, event);
 }
 
 function csvEscape(value) {
@@ -2450,6 +3015,46 @@ function formatRuntime(ms) {
   return `${seconds}s`;
 }
 
+const DISPLAY_TIME_KEYS = new Set([
+  "createdAt",
+  "finishedAt",
+  "timestamp",
+  "startedAt",
+  "generatedAt",
+  "observedAt",
+  "firstSeenAt",
+  "lastSeenAt",
+  "updatedAt",
+  "completedAt",
+]);
+
+function formatLocalDateTime(value) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const pad = (n) => String(n).padStart(2, "0");
+  const tzName = Intl.DateTimeFormat(undefined, { timeZoneName: "short" })
+    .formatToParts(date)
+    .find((part) => part.type === "timeZoneName")?.value || "";
+  const localDate = [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join("-");
+  return `${localDate} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${tzName ? ` ${tzName}` : ""}`;
+}
+
+function localizeDisplayTimes(value, key = "") {
+  if (typeof value === "string" && DISPLAY_TIME_KEYS.has(key)) return formatLocalDateTime(value);
+  if (Array.isArray(value)) return value.map((item) => localizeDisplayTimes(item));
+  if (!value || typeof value !== "object") return value;
+  const copy = {};
+  for (const [entryKey, entryValue] of Object.entries(value)) {
+    copy[entryKey] = localizeDisplayTimes(entryValue, entryKey);
+  }
+  return copy;
+}
+
 function batchFileName(uuid, markFrom, markTo, extension = "txt") {
   return `${safeFilePart(uuid)}_${markFrom}_${markTo}.${extension}`;
 }
@@ -2465,7 +3070,7 @@ function isLargeExportSort(sortBy) {
 function rawBatchDir(paths, uuid, options = {}) {
   if (!uuid) throw new Error("Missing raw batch UUID");
   const safeUuid = safeFilePart(uuid);
-  const baseDir = path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), safeUuid, "full-record");
+  const baseDir = path.join(paths.resultsetsRoot || path.join(paths.taskDir, "resultsets"), safeUuid, "raw", "full-record");
   return isLargeExportSort(options.sortBy) ? path.join(baseDir, safeFilePart(options.sortBy)) : baseDir;
 }
 
@@ -2509,7 +3114,7 @@ function writeRawWindowMarkers(paths, uuid, exportWindows = []) {
 function bibBatchDir(paths, uuid) {
   if (!uuid) throw new Error("Missing BibTeX batch UUID");
   const safeUuid = safeFilePart(uuid);
-  return path.join(paths.rawRoot || path.join(paths.taskDir, "raw"), safeUuid, "bib");
+  return path.join(paths.resultsetsRoot || path.join(paths.taskDir, "resultsets"), safeUuid, "raw", "bib");
 }
 
 function bibBatchPath(paths, uuid, markFrom, markTo) {
@@ -2796,7 +3401,7 @@ function writeRunSummary(paths, meta) {
     },
     finishedAt: new Date().toISOString(),
   };
-  writeJson(paths.summary, summary);
+  writeOperationSummary(paths, summary);
   return summary;
 }
 
@@ -2818,6 +3423,7 @@ function writeRawUuidCompleteMarker(paths, meta = {}) {
     largeExport: Boolean(meta.largeExport),
     limitedByWosWindow: Boolean(meta.limitedByWosWindow),
     incompleteBeyondWosLimit: Boolean(meta.incompleteBeyondWosLimit),
+    exportIsRefQuery: Boolean(meta.exportIsRefQuery),
     exportWindows,
     completedAt: new Date().toISOString(),
   });
@@ -2858,26 +3464,52 @@ function writeOutputs(paths, rows, meta) {
     },
     finishedAt: new Date().toISOString(),
   };
-  writeJson(paths.summary, summary);
+  writeOperationSummary(paths, summary);
   return summary;
 }
 
-async function validateSid(page, args) {
-  const initUrl = buildSidInitUrl(args.sid);
-  await page.goto(initUrl, { waitUntil: "domcontentloaded", timeout: args.timeoutMs });
-  await dismissWosPopups(page);
-  await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
-  await page.waitForFunction(
-    () => window.sessionData?.BasicProperties?.SID || "",
+async function waitForWosSidSessionSignal(page, args) {
+  const timeout = Math.min(Math.max(args.timeoutMs || 0, 15000), 60000);
+  return page.waitForFunction(
+    () => {
+      const sid = window.sessionData?.BasicProperties?.SID || "";
+      const href = location.href;
+      if (sid) return { type: "sid", sid, href };
+      if (/\/login|signin|shibboleth|sso|auth/i.test(href)) return { type: "login", sid: "", href };
+      return false;
+    },
     null,
-    { timeout: Math.min(Math.max(args.timeoutMs || 0, 15000), 60000) }
-  ).catch(() => {});
+    { timeout }
+  ).then((handle) => handle.jsonValue()).catch(() => ({
+    type: "timeout",
+    sid: "",
+    href: page.url?.() || "",
+  }));
+}
+
+async function validateSid(page, args) {
+  const debug = debugForArgs(args);
+  const loginStartedAt = Date.now();
+  const initUrl = buildSidInitUrl(args.sid);
+  debug("wos sid: opening initialization URL", { url: initUrl, sidSource: args.sidSource });
+  await page.goto(initUrl, { waitUntil: "domcontentloaded", timeout: args.timeoutMs });
+  debug("wos sid: domcontentloaded", { url: page.url?.() || "" });
+  await dismissWosPopups(page);
+  debug("wos sid: popup guard complete");
+  const signal = await waitForWosSidSessionSignal(page, args);
+  debug("wos sid: session signal wait complete", {
+    signal: signal.type,
+    href: signal.href,
+    observedSid: signal.sid,
+  });
   await ensureWosJsOnPage(page, args);
+  debug("wos sid: wos.js injected", { wosjs: args.wosJsPath });
   const status = await page.evaluate(() => ({
     href: location.href,
     origin: location.origin,
     sid: window.sessionData?.BasicProperties?.SID || "",
   }));
+  debug("wos sid: evaluated browser session", { href: status.href, origin: status.origin, observedSid: status.sid });
   if (!status.sid || status.sid !== args.sid) {
     const observedSid = maskSid(status.sid);
     const safeHref = redactSidInUrl(status.href);
@@ -2890,6 +3522,11 @@ async function validateSid(page, args) {
   }
   if (status.origin) args.baseUrl = stripTrailingSlash(status.origin);
   saveSidConfig(args, status.sid);
+  debug("wos sid: validation accepted", {
+    origin: status.origin,
+    sidSource: args.sidSource,
+    loginElapsedMs: Date.now() - loginStartedAt,
+  });
   return status;
 }
 
@@ -2993,11 +3630,19 @@ async function acquireFreshSid(args, report = console.error, options = {}) {
 
 async function prepareWosSession(args, options = {}) {
   loadSavedSid(args);
+  const debug = debugForArgs(args);
   const keepAlive = Boolean(options.keepAlive || args.keepWosSession);
   const report = options.report || console.error;
   const visible = Boolean(options.visible || args.headed);
   const recoverSid = options.recoverSid !== false;
   const requestedUuid = String(args.uuid || "").trim();
+  debug("wos session: preparing", {
+    visible,
+    keepAlive,
+    recoverSid,
+    sidSource: args.sidSource,
+    sidPool: args.sidPoolCount ? `${Number(args.sidPoolIndex) + 1}/${args.sidPoolCount}` : "",
+  });
   if (
     keepAlive
     && sharedWosSession?.context
@@ -3013,6 +3658,7 @@ async function prepareWosSession(args, options = {}) {
     }
   }
   if (keepAlive && sharedWosSession?.context) {
+    debug("wos session: reusing shared browser context");
     const page = sharedWosSession.page || sharedWosSession.context.pages()[0] || await sharedWosSession.context.newPage();
     sharedWosSession.page = page;
     page.setDefaultTimeout(args.timeoutMs);
@@ -3026,11 +3672,13 @@ async function prepareWosSession(args, options = {}) {
   }
 
   for (;;) {
+    debug("wos session: launching persistent browser context", { visible });
     let context = await launchWosPersistentContext(args, visible);
     let page = context.pages()[0] || await context.newPage();
     page.setDefaultTimeout(args.timeoutMs);
     let status = null;
     if (!args.sid) {
+      debug("wos session: no SID available, entering SID acquisition");
       await releaseWosContext(context);
       if (!recoverSid) throw new Error("No saved SID is available for WOS session preparation.");
       report("No saved SID found. Choose manual SID input, wait for SID pool, or browser login to continue.");
@@ -3040,8 +3688,10 @@ async function prepareWosSession(args, options = {}) {
       page.setDefaultTimeout(args.timeoutMs);
     }
     try {
+      debug("wos session: validating SID");
       status = await validateSid(page, args);
     } catch (error) {
+      debug("wos session: SID validation failed", { error: error.message || error });
       await releaseWosContext(context);
       if (args.sidSource === "config") {
         const discarded = discardActiveConfigSid(args, error.message || "SID validation failed");
@@ -3068,6 +3718,7 @@ async function prepareWosSession(args, options = {}) {
 
     applyValidatedWosOrigin(args, status);
     if (!visible) await hideWosWindow(page);
+    debug("wos session: ready", { origin: status?.origin, visible });
     if (keepAlive) {
       sharedWosSession = { context, page, lastUuid: requestedUuid };
       return { context, page, status, close: async () => {} };
@@ -3187,6 +3838,7 @@ async function readSummaryInfo(page, args) {
       countText: info?.ref_count || info?.countText || "",
       rowText: info?.rowText || "",
       href: location.href,
+      sortBy: info?.sortBy || "",
       status: info?.status || "",
     });
     if (!window.asy_uuid?.fetchCurrentPageInfo) {
@@ -3194,6 +3846,33 @@ async function readSummaryInfo(page, args) {
     }
     return window.asy_uuid.fetchCurrentPageInfo("iiaide-wos summary").then(normalizeInfo);
   });
+}
+
+async function openSummaryPageForExport(page, args, options = {}) {
+  const uuid = String(options.uuid || "").trim();
+  const sortBy = String(options.sortBy || "relevance").trim() || "relevance";
+  if (!uuid) throw new Error("Missing UUID for WOS summary page");
+  const currentOrigin = urlOrigin(page.url?.() || "") || DEFAULT_BASE_URL;
+  const targetUrl = buildSummaryUrl(currentOrigin, uuid, sortBy);
+  const debug = debugForArgs(args);
+  debug("wos ingest: opening export summary page", { url: targetUrl, uuid, sortBy });
+  await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: args.timeoutMs });
+  await dismissWosPopups(page);
+  await ensureWosJsOnPage(page, args);
+  const info = await readSummaryInfo(page, args);
+  debug("wos ingest: export summary page ready", {
+    uuid: info.uuid,
+    expectedCount: info.expectedCount,
+    sortBy: info.sortBy,
+    href: info.href,
+  });
+  if (info.uuid && info.uuid !== uuid) {
+    throw new Error(`WOS summary page opened the wrong UUID: expected ${uuid}, got ${info.uuid}`);
+  }
+  if (!info.uuid) {
+    throw new Error(`WOS summary page did not expose UUID after opening ${targetUrl}`);
+  }
+  return info;
 }
 
 function randomUppercaseLetters(length = 4) {
@@ -3206,10 +3885,12 @@ function randomUppercaseLetters(length = 4) {
 }
 
 async function prepareWosRequestContext(page, args) {
+  const debug = debugForArgs(args);
+  debug("wos request context: opening summary URL", { url: args.url });
   await page.goto(args.url, { waitUntil: "domcontentloaded", timeout: args.timeoutMs });
   await dismissWosPopups(page);
-  await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
   await ensureWosJsOnPage(page, args);
+  debug("wos request context: reading summary API", { url: page.url?.() || "" });
   const context = await page.evaluate(() => {
     const normalizeInfo = (info) => ({
       href: location.href,
@@ -3232,6 +3913,14 @@ function pageContextUuid(context, fallbackUuid) {
   return context?.uuid || fallbackUuid || "";
 }
 
+function initialExportRefQuery(args = {}, context = {}, info = {}) {
+  if (typeof args.refQuery === "boolean") return args.refQuery;
+  const text = [context.rowText, info.rowText, context.href, info.href, args.url]
+    .filter(Boolean)
+    .join(" ");
+  return /cited[-\s]?references|references|related[-\s]?records|citing[-\s]?articles|shared[-\s]?references/i.test(text);
+}
+
 async function exportFromWos(args, paths) {
   const quiet = Boolean(args.quiet);
   const progressQuiet = quiet && !args.showDownloadProgress;
@@ -3239,6 +3928,7 @@ async function exportFromWos(args, paths) {
   let session = null;
   let page = null;
   let info = null;
+  let exportRefQuery = Boolean(args.refQuery);
   let batchProgress = null;
   let summarySpinner = null;
   try {
@@ -3261,7 +3951,14 @@ async function exportFromWos(args, paths) {
       throw new Error(`Could not read summary uuid/count: ${JSON.stringify(info)}`);
     }
     summarySpinner.succeed(`Found ${info.expectedCount} records`);
+    exportRefQuery = initialExportRefQuery(args, context, info);
     appendProgress(paths, { phase: "summary-info", ...info });
+    appendProgress(paths, {
+      phase: "txt-export-context",
+      uuid: info.uuid,
+      isRefQuery: exportRefQuery,
+      refQuerySource: typeof args.refQuery === "boolean" ? "cli" : "auto",
+    });
     const batchSize = DEFAULT_BATCH_SIZE;
     const firstRawRange = firstRawBatchRange(paths, info.uuid);
     if (!quiet && args.reuseRaw && !firstRawRange && shouldInferTxtRangeStartFromRaw(args)) {
@@ -3540,6 +4237,7 @@ async function exportFromWos(args, paths) {
                 markTo: missingBatch.markTo,
                 batchSize,
                 sortBy: window.sortBy,
+                isRefQuery: exportRefQuery,
                 onProgress(event) {
                   const { text, ...progressEvent } = event || {};
                   if (progressEvent.phase === "batch" && typeof text === "string") {
@@ -3555,11 +4253,23 @@ async function exportFromWos(args, paths) {
                     progressEvent.parsed = result.parsed;
                     updateMissingProgress(result, markFrom, markTo);
                   }
-                  appendProgress(paths, { phase: "wosjs-export-progress", sidSwitchCount, sortBy: window.sortBy, ...progressEvent });
+                  appendProgress(paths, { phase: "wosjs-export-progress", sidSwitchCount, sortBy: window.sortBy, isRefQuery: exportRefQuery, ...progressEvent });
                 },
               });
               break;
             } catch (error) {
+              if (args.refQuery === null && !exportRefQuery) {
+                exportRefQuery = true;
+                appendProgress(paths, {
+                  phase: "txt-export-ref-query-retry",
+                  uuid: info.uuid,
+                  markFrom: missingBatch.markFrom,
+                  markTo: missingBatch.markTo,
+                  sortBy: window.sortBy,
+                  message: error?.message || String(error),
+                });
+                continue;
+              }
               await switchSidAfterTxtExportFailure(missingBatch, error);
             }
           }
@@ -3608,6 +4318,7 @@ async function exportFromWos(args, paths) {
       limitedByWosWindow: largeWindowPlan,
       incompleteBeyondWosLimit: largeWindowPlan && range.selectedCount > MAX_WOS_DUAL_SORT_RECORDS,
       exportWindows: exportWindowsForSummary,
+      exportIsRefQuery: exportRefQuery,
     };
   } finally {
     authSpinner.stop();
@@ -3635,6 +4346,7 @@ async function exportBibFromWos(args, paths) {
   let downloadedEntries = 0;
   let completedBatches = 0;
   let resumedCount = 0;
+  let exportRefQuery = Boolean(args.refQuery);
   try {
     session = await prepareWosSession(args);
     const page = session.page;
@@ -3650,6 +4362,7 @@ async function exportBibFromWos(args, paths) {
     if (!expectedCount) {
       throw new Error(`Could not read WOS summary record count for BibTeX export: ${JSON.stringify(context)}`);
     }
+    exportRefQuery = initialExportRefQuery(args, context);
     const lastAvailableIndex = expectedCount;
     finalIndex = requestedCount
       ? Math.min(startIndex + requestedCount - 1, lastAvailableIndex)
@@ -3673,6 +4386,8 @@ async function exportBibFromWos(args, paths) {
       markFrom: startIndex,
       markTo: finalIndex || "",
       batchSize: DEFAULT_BATCH_SIZE,
+      isRefQuery: exportRefQuery,
+      refQuerySource: typeof args.refQuery === "boolean" ? "cli" : "auto",
     });
     const batchSize = DEFAULT_BATCH_SIZE;
     const resumePlan = bibBatchPlanForRange(paths, uuid, startIndex, finalIndex, batchSize);
@@ -3783,8 +4498,9 @@ async function exportBibFromWos(args, paths) {
           batchSize,
           sortBy: args.sortBy,
           filters: "authorTitleSource",
+          isRefQuery: exportRefQuery,
           onProgress(event) {
-            appendProgress(paths, { phase: "wosjs-bib-progress", ...event });
+            appendProgress(paths, { phase: "wosjs-bib-progress", isRefQuery: exportRefQuery, ...event });
             if (event.phase === "batch") {
               progress.update(completedBatches + (event.completedBatches || 0), `${event.current}-${event.batchEnd}`);
             }
@@ -3826,6 +4542,7 @@ async function exportBibFromWos(args, paths) {
       resumedCount,
       requestMode: true,
       completedBatches,
+      exportIsRefQuery: exportRefQuery,
     },
     files,
   };
@@ -4080,7 +4797,7 @@ async function runBatchUuidTxt(args) {
     finishedAt: new Date().toISOString(),
   };
   writeJson(paths.manifest, batchManifest);
-  writeJson(paths.summary, summary);
+  writeOperationSummary(paths, summary);
   upsertTaskIndex(args, { status: "batch-completed", lastError: "" });
   return summary;
 }
@@ -4099,6 +4816,14 @@ function combineBibFiles(paths, uuid, files) {
 
 function validateTask(args) {
   const task = resolveTask(args);
+  if (isSingleProjectMode(args) && !fs.existsSync(task.taskDir)) {
+    return {
+      ok: false,
+      taskId: task.taskId,
+      taskDir: task.taskDir,
+      issues: ["missing managed project directory"],
+    };
+  }
   const basePaths = getRunPaths(task.taskDir);
   const initialSummary = readJson(basePaths.summary, {});
   const rawSource = initialSummary.uuid || task.uuid || task.taskId;
@@ -4107,6 +4832,7 @@ function validateTask(args) {
   const isBibTask = summary.method === "wos-js-export-fetchBibBatches";
   const isImportedCsvTask = summary.method === "imported-wosid-csv";
   const isBatchTxtTask = summary.method === "batch-uuid-csv-txt";
+  const isSqliteIngestTask = summary.method === "wos-sqlite-ingest";
   const wosidsCsv = wosIdsCsvPath(paths, summary.uuid || task.uuid || task.taskId);
   const wosids = isImportedCsvTask && fs.existsSync(wosidsCsv) ? readWosIdsCsv(wosidsCsv) : [];
   const batchResults = isBatchTxtTask && Array.isArray(summary.results) ? summary.results : [];
@@ -4123,9 +4849,10 @@ function validateTask(args) {
   const bibRangeEnd = Math.max(0, Number(summary.rangeEnd) || 0) ||
     (summary.expectedCount ? bibRangeStart + Math.max(0, Number(summary.expectedCount) || 0) - 1 : 0);
   const issues = [];
-  if (!fs.existsSync(paths.manifest)) issues.push("missing manifest.json");
-  if (!fs.existsSync(paths.summary)) issues.push("missing summary.json");
+  if (!fs.existsSync(paths.project)) issues.push("missing project.json");
+  if (!fs.existsSync(paths.state)) issues.push("missing state.json");
   if (isBatchTxtTask && !batchResults.length) issues.push("missing batch UUID results");
+  if (isSqliteIngestTask && !fs.existsSync(basePaths.sqlitePath)) issues.push("missing wosData.sqlite");
   if (isBatchTxtTask) {
     for (const item of batchResults) {
       const marker = readRawUuidCompleteMarker(basePaths, item.uuid);
@@ -4140,7 +4867,7 @@ function validateTask(args) {
       }
     }
   }
-  if (isBibTask && !bibFiles.length) issues.push("missing raw/<uuid>/bib batches");
+  if (isBibTask && !bibFiles.length) issues.push("missing resultsets/<uuid>/raw/bib batches");
   if (isBibTask && bibRangeEnd) {
     const plan = bibBatchPlanForRange(paths, bibUuid, bibRangeStart, bibRangeEnd, DEFAULT_BATCH_SIZE);
     if (plan.missingBatches.length) {
@@ -4155,8 +4882,8 @@ function validateTask(args) {
   if (isImportedCsvTask && summary.uniqueCount && wosids.length !== summary.uniqueCount) {
     issues.push(`WOSID CSV rows mismatch: csv=${wosids.length} summary.uniqueCount=${summary.uniqueCount}`);
   }
-  if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && !rawFiles.length) issues.push("missing raw/<uuid>/full-record batches");
-  if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && Array.isArray(summary.exportWindows) && summary.exportWindows.length) {
+  if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && !isSqliteIngestTask && !rawFiles.length) issues.push("missing resultsets/<uuid>/raw/full-record batches");
+  if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && !isSqliteIngestTask && Array.isArray(summary.exportWindows) && summary.exportWindows.length) {
     for (const window of summary.exportWindows) {
       const sortOptions = isLargeExportSort(window.sortBy) ? { sortBy: window.sortBy } : {};
       const plan = rawBatchPlanForRange(paths, rawUuid, window.startIndex || 1, window.endIndex || 0, DEFAULT_BATCH_SIZE, sortOptions);
@@ -4165,7 +4892,7 @@ function validateTask(args) {
         issues.push(`missing raw TXT batch: ${window.sortBy} ${firstMissing.markFrom}-${firstMissing.markTo}`);
       }
     }
-  } else if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && txtRangeEnd) {
+  } else if (!isBibTask && !isImportedCsvTask && !isBatchTxtTask && !isSqliteIngestTask && txtRangeEnd) {
     const plan = rawBatchPlanForRange(paths, rawUuid, txtRangeStart, txtRangeEnd, DEFAULT_BATCH_SIZE);
     if (plan.missingBatches.length) {
       const firstMissing = plan.missingBatches[0];
@@ -4179,6 +4906,7 @@ function validateTask(args) {
     wosids: wosids.length,
     rawBatches: rawFiles.length,
     bibBatches: bibFiles.length,
+    sqlite: isSqliteIngestTask ? basePaths.sqlitePath : "",
     rawDir: !isBibTask && !isImportedCsvTask && rawUuid ? rawBatchDir(paths, rawUuid) : "",
     bibDir: isBibTask && bibUuid ? bibBatchDir(paths, bibUuid) : "",
     issues,
@@ -4259,38 +4987,133 @@ function writeQueryRecordManifest(paths, args) {
   });
 }
 
+function writeRecordCollectArtifacts(paths, args, result) {
+  if (args.command !== "record" || args.recordCommand !== "collect" || !Array.isArray(result.relations)) {
+    return { relations: result.relations || null, files: {} };
+  }
+  const sourceId = safeFilePart(args.wosId || "record");
+  const relationDir = path.join(paths.taskDir, "record-relations", sourceId);
+  const relations = [];
+  const relationJsons = [];
+  const relationCsvs = [];
+  fs.mkdirSync(relationDir, { recursive: true });
+  for (const relation of result.relations) {
+    const rows = Array.isArray(relation.wosids) ? relation.wosids : [];
+    let csvPath = "";
+    if (relation.uuid) {
+      const outputPaths = withRawSource(paths, relation.uuid);
+      csvPath = wosIdsCsvPath(outputPaths, relation.uuid);
+      writeFileAtomic(csvPath, toCsv(rows.map((row) => ({ wosid: row.wosid })), ["wosid"]));
+      relationCsvs.push(csvPath);
+    }
+    const jsonPath = path.join(relationDir, `${safeFilePart(relation.type)}.json`);
+    const payload = {
+      ok: Boolean(relation.ok),
+      sourceWosId: args.wosId,
+      type: relation.type,
+      uuid: relation.uuid || "",
+      count: Number(relation.count || 0),
+      pagesRequested: Number(relation.pagesRequested || args.pages || 0),
+      uniqueCount: Number(relation.uniqueCount || rows.length),
+      rowText: relation.rowText || "",
+      error: relation.error || "",
+      files: {
+        wosidsCsv: csvPath,
+      },
+      wosids: rows.map((row, index) => ({ index: index + 1, ...row })),
+      finishedAt: new Date().toISOString(),
+    };
+    writeJson(jsonPath, payload);
+    relationJsons.push(jsonPath);
+    relations.push({ ...payload, wosids: undefined });
+  }
+  return {
+    relations,
+    files: {
+      relationsDir: relationDir,
+      relationJsons,
+      relationCsvs,
+    },
+  };
+}
+
 function writeQueryRecordSummary(paths, args, result) {
+  const collectArtifacts = writeRecordCollectArtifacts(paths, args, result);
+  const sortBy = result.sortBy || args.sortBy || "relevance";
+  const summaryUrl = result.href || (result.uuid ? buildSummaryUrl(args.baseUrl, result.uuid, sortBy) : "");
   const summary = {
     ok: Boolean(result.ok),
-    method: "wos-js-browser-api",
+    method: result.method || "wos-js-browser-api",
     command: args.command,
     subcommand: args.command === "query" ? args.queryCommand : args.recordCommand,
     taskId: args.taskId,
     taskLabel: args.taskLabel,
     operation: result.operation || queryRecordOperation(args),
     uuid: result.uuid || "",
+    sortBy,
+    summaryUrl,
+    summaryHref: summaryUrl,
+    cached: Boolean(result.cached),
+    cachedAt: result.cachedAt || "",
     expectedCount: Number(result.count || 0),
     count: Number(result.count || 0),
     rowText: result.rowText || "",
     source: result.source || {},
     files: {
+      ...collectArtifacts.files,
       progressLog: paths.progressLog,
     },
     finishedAt: new Date().toISOString(),
   };
+  if (collectArtifacts.relations) summary.relations = collectArtifacts.relations;
   if (result.error) summary.error = result.error;
-  writeJson(paths.summary, summary);
+  writeOperationSummary(paths, summary);
   return summary;
+}
+
+function readCachedQueryBuildResult(paths, args) {
+  if (args.force || args.command !== "query" || args.queryCommand !== "build" || !args.queryExpr) return null;
+  const db = openWosDatabase(paths.sqlitePath);
+  try {
+    const cached = getLatestSuccessfulQueryBuild(db, {
+      taskId: args.taskId,
+      queryText: args.queryExpr,
+    });
+    if (!cached?.uuid) return null;
+    const sortBy = cached.sortBy || args.sortBy || "relevance";
+    return {
+      ok: true,
+      method: "wos-sqlite-cache",
+      operation: "query build",
+      uuid: cached.uuid,
+      count: cached.count,
+      rowText: cached.rowText || args.queryExpr,
+      source: cached.source && Object.keys(cached.source).length
+        ? cached.source
+        : { kind: "expr", value: args.queryExpr },
+      sortBy,
+      href: buildSummaryUrl(args.baseUrl, cached.uuid, sortBy),
+      cached: true,
+      cachedAt: cached.createdAt || "",
+    };
+  } finally {
+    db.close();
+  }
 }
 
 function assertQueryRecordArgs(args) {
   if (args.command === "query") {
-    if (!["build", "parse", "ids", "batch"].includes(args.queryCommand)) {
+    if (!["build", "parse", "ids", "batch", "ingest"].includes(args.queryCommand)) {
       throw new CliMessageError(`Unknown query command: ${args.queryCommand || "(missing)"}`);
     }
     if (args.queryCommand === "build" && !args.queryExpr) throw new CliMessageError("Missing --expr for query build");
     if (args.queryCommand === "parse" && !args.queryText) throw new CliMessageError("Missing --text for query parse");
-    if (args.queryCommand === "batch" && !args.queryExprFile) throw new CliMessageError("Missing --expr-file for query batch");
+    if (args.queryCommand === "batch" && !args.queryExprFile && !args.queryExprs.length) {
+      throw new CliMessageError("Missing query expressions for query batch. Use repeated --expr or --expr-file.");
+    }
+    if (args.queryCommand === "ingest" && !args.queryExpr && !args.queryText && !args.csvPath && !args.wosIds.length && !args.dois.length) {
+      throw new CliMessageError("Missing query ingest input. Use --expr, --text, --wosid, --doi, or --csv.");
+    }
     if (args.queryCommand === "ids" && !args.csvPath && !args.wosIds.length && !args.dois.length) {
       throw new CliMessageError("Missing query ids input. Use --wosid, --doi, or --csv.");
     }
@@ -4298,12 +5121,19 @@ function assertQueryRecordArgs(args) {
   }
   if (args.command === "record") {
     args.wosId = args.wosIds[0] || "";
-    if (!["relations", "shared"].includes(args.recordCommand)) {
+    if (!["relations", "shared", "collect", "ingest"].includes(args.recordCommand)) {
       throw new CliMessageError(`Unknown record command: ${args.recordCommand || "(missing)"}`);
     }
     if (!args.wosId) throw new CliMessageError(`Missing --wosid for record ${args.recordCommand}`);
-    if (args.recordCommand === "relations" && !["citations", "references", "related"].includes(args.relationType)) {
-      throw new CliMessageError("Missing or invalid --type for record relations. Use citations, references, or related.");
+    if ((args.recordCommand === "relations" || args.recordCommand === "ingest") && !["citations", "references", "related"].includes(args.relationType)) {
+      throw new CliMessageError(`Missing or invalid --type for record ${args.recordCommand}. Use citations, references, or related.`);
+    }
+    if (args.recordCommand === "collect") {
+      const badType = (args.relationTypes || []).find((type) => !RECORD_RELATION_TYPES.includes(type));
+      if (badType) throw new CliMessageError(`Invalid --types value for record collect: ${badType}`);
+      if (!Number.isInteger(args.pages) || args.pages < 1 || args.pages > 20) {
+        throw new CliMessageError("Missing or invalid --pages for record collect. Use 1-20.");
+      }
     }
     if (args.recordCommand === "shared" && !args.withWosId) {
       throw new CliMessageError("Missing --with for record shared");
@@ -4321,21 +5151,40 @@ function readQueryExprFile(filePath) {
     .filter((line) => line && !line.startsWith("#"));
 }
 
+function readQueryBatchExpressions(args) {
+  const expressions = [];
+  if (args.queryExprFile) expressions.push(...readQueryExprFile(args.queryExprFile));
+  for (const expr of args.queryExprs || []) {
+    const text = String(expr || "").trim();
+    if (text) expressions.push(text);
+  }
+  return expressions;
+}
+
 function queryBatchItemEnvelope(args, item) {
   return llmResult(args, {
     ok: Boolean(item.ok),
     code: item.ok ? "OK" : (item.code || "WOS_UUID_MISSING"),
     taskId: args.taskId,
+    artifact: item.url || "",
     uuid: item.uuid || "",
     count: item.count || 0,
-    message: item.ok ? "WOS UUID resolved" : (item.error || item.message || "WOS command did not return a UUID"),
+    message: item.ok
+      ? (item.cached ? "WOS UUID resolved from SQLite cache" : "WOS UUID resolved")
+      : (item.error || item.message || "WOS command did not return a UUID"),
     data: {
       index: item.index,
       total: item.total,
       expr: item.expr,
+      queryText: item.queryText || item.rowText || item.expr || "",
+      url: item.url || "",
+      sortBy: item.sortBy || args.sortBy || "relevance",
+      cached: Boolean(item.cached),
+      cachedAt: item.cachedAt || undefined,
       operation: item.operation || "query build",
       rowText: item.rowText || "",
       source: item.source || {},
+      error: item.error || undefined,
     },
   });
 }
@@ -4354,16 +5203,1072 @@ function queryBatchJsonResult(args, summary) {
       completed: summary.completed,
       failed: summary.failed,
       inputExprFile: summary.inputExprFile,
+      inputExprs: summary.inputExprs || [],
+      output: "jsonl",
       results: summary.results,
       files: summary.files || {},
     },
   });
 }
 
+const INGEST_RECORD_LIMIT = 500;
+const RECORD_RELATION_INGEST_PAGES = 6;
+const RECORD_RELATION_EXPORT_MODE = "front-scroll-wosid";
+
+function ingestQueryCommandFromArgs(args) {
+  if (args.queryExpr) return "build";
+  if (args.queryText) return "parse";
+  return "ids";
+}
+
+function ingestQueryText(args, result = {}) {
+  if (args.queryExpr) return args.queryExpr;
+  if (args.queryText) return result.rowText || args.queryText;
+  return result.rowText || queryTextForIds(args.wosIds || [], args.dois || []);
+}
+
+function semanticDescriptionForIngest(args, result = {}, kind = "normal") {
+  if (args.semanticDescription) return args.semanticDescription;
+  if (kind === "normal") return `WOS query ingest: ${ingestQueryText(args, result)}`.trim();
+  return `${kind} of ${args.wosId || args.wosIds?.[0] || ""}`.trim();
+}
+
+async function exportIngestRecordsFromUuid(page, args, options = {}) {
+  const availableCount = Math.max(0, Number(options.count) || 0);
+  const requestedLimit = INGEST_RECORD_LIMIT;
+  const markTo = Math.min(availableCount || requestedLimit, requestedLimit);
+  const sortBy = options.sortBy || "relevance";
+  if (!options.uuid) throw new Error("Missing UUID for WOS ingest export");
+  if (!markTo) {
+    return { records: [], requestedLimit, exportedCount: 0, textBytes: 0 };
+  }
+  appendProgress(options.paths, {
+    phase: "wos-ingest-open-summary",
+    kind: options.kind,
+    uuid: options.uuid,
+    sortBy,
+    isRefQuery: Boolean(options.isRefQuery),
+  });
+  const pageInfo = await openSummaryPageForExport(page, args, { uuid: options.uuid, sortBy });
+  appendProgress(options.paths, {
+    phase: "wos-ingest-summary-ready",
+    kind: options.kind,
+    uuid: pageInfo.uuid,
+    count: pageInfo.expectedCount,
+    sortBy: pageInfo.sortBy || sortBy,
+    href: pageInfo.href,
+    isRefQuery: Boolean(options.isRefQuery),
+  });
+  const exportResult = await exportTxtBatchesViaWosJs(page, {
+    uuid: options.uuid,
+    markFrom: 1,
+    markTo,
+    batchSize: Math.min(DEFAULT_BATCH_SIZE, markTo),
+    sortBy,
+    isRefQuery: Boolean(options.isRefQuery),
+    onProgress(event) {
+      appendProgress(options.paths, {
+        phase: "wos-ingest-export-progress",
+        kind: options.kind,
+        uuid: options.uuid,
+        sortBy,
+        isRefQuery: Boolean(options.isRefQuery),
+        ...(event || {}),
+        text: undefined,
+      });
+    },
+  });
+  const text = (exportResult.batches || []).map((batch) => batch.text || "").join("\n");
+  return {
+    records: toStandardJson(text),
+    requestedLimit,
+    exportedCount: markTo,
+    textBytes: Buffer.byteLength(text, "utf8"),
+  };
+}
+
+function recordWosId(record = {}) {
+  return canonicalWosId(record?.wos_id || record?.wosid || record?.UT || "");
+}
+
+function orderedRecordsForWosIds(records = [], wosIds = []) {
+  const byId = new Map();
+  for (const record of Array.isArray(records) ? records : []) {
+    const id = recordWosId(record);
+    if (id && !byId.has(id)) byId.set(id, record);
+  }
+  return (Array.isArray(wosIds) ? wosIds : [])
+    .map((wosid) => byId.get(canonicalWosId(wosid)))
+    .filter(Boolean);
+}
+
+async function collectRelationWosIdsForIngest(page, args, options = {}) {
+  const uuid = String(options.uuid || "").trim();
+  if (!uuid) throw new Error("Missing relation UUID for WOSID collection");
+  const pages = Array.from({ length: RECORD_RELATION_INGEST_PAGES }, (_, index) => index + 1);
+  const sortBy = "relevance";
+  appendProgress(options.paths, {
+    phase: "record-ingest-front-scroll-start",
+    type: options.kind,
+    sourceWosId: options.sourceWosId || "",
+    uuid,
+    pages,
+    sortBy,
+  });
+  const rows = await callBrowserApi(args, page, "results.collectWosIdsByUuidPages", [uuid, pages, sortBy]);
+  const seen = new Set();
+  const collected = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const wosid = canonicalWosId(row?.wosid || row);
+    if (!wosid || seen.has(wosid)) continue;
+    seen.add(wosid);
+    collected.push({ ...row, wosid });
+    if (collected.length >= INGEST_RECORD_LIMIT) break;
+  }
+  appendProgress(options.paths, {
+    phase: "record-ingest-front-scroll-complete",
+    type: options.kind,
+    sourceWosId: options.sourceWosId || "",
+    uuid,
+    pagesRequested: pages.length,
+    collectedCount: collected.length,
+    sortBy,
+  });
+  return {
+    rows: collected,
+    wosIds: collected.map((row) => row.wosid),
+    pagesRequested: pages.length,
+    sortBy,
+  };
+}
+
+async function exportIngestRecordsByWosIds(page, args, options = {}) {
+  const wosIds = (Array.isArray(options.wosIds) ? options.wosIds : [])
+    .map((wosid) => canonicalWosId(wosid))
+    .filter(Boolean)
+    .slice(0, INGEST_RECORD_LIMIT);
+  if (!wosIds.length) {
+    return {
+      records: [],
+      requestedLimit: INGEST_RECORD_LIMIT,
+      exportedCount: 0,
+      textBytes: 0,
+      queryUuid: "",
+      queryCount: 0,
+    };
+  }
+  appendProgress(options.paths, {
+    phase: "record-ingest-wosid-query-start",
+    type: options.kind,
+    sourceWosId: options.sourceWosId || "",
+    relationUuid: options.relationUuid || "",
+    wosidCount: wosIds.length,
+  });
+  await callBrowserApi(args, page, "query.openQueryByWosIdsOrDois", [wosIds, []]);
+  const rawInfo = await callBrowserApi(args, page, "results.fetchCurrentPageInfo", [`${options.kind || "records"} WOSID query`]);
+  const queryUuid = rawInfo?.uuid || rawInfo?.QueryID || "";
+  if (!queryUuid) {
+    throw new Error("WOSID query did not expose a UUID for relation ingest");
+  }
+  const queryCount = parseWosCount(rawInfo?.ref_count || rawInfo?.countText || rawInfo?.count || "");
+  appendProgress(options.paths, {
+    phase: "record-ingest-wosid-query-ready",
+    type: options.kind,
+    sourceWosId: options.sourceWosId || "",
+    relationUuid: options.relationUuid || "",
+    queryUuid,
+    queryCount,
+  });
+  const exported = await exportIngestRecordsFromUuid(page, args, {
+    paths: options.paths,
+    kind: options.kind,
+    uuid: queryUuid,
+    count: queryCount || wosIds.length,
+    sortBy: "relevance",
+    isRefQuery: false,
+  });
+  return {
+    ...exported,
+    records: orderedRecordsForWosIds(exported.records, wosIds),
+    queryUuid,
+    queryCount,
+  };
+}
+
+function writeWosIngestSummary(paths, args, meta = {}) {
+  const startedAt = meta.startedAt || new Date().toISOString();
+  const finishedAt = meta.finishedAt || new Date().toISOString();
+  const sortBy = meta.sortBy || "relevance";
+  const db = openWosDatabase(paths.sqlitePath);
+  try {
+    insertWosIngest(db, {
+      runId: paths.runId,
+      taskId: args.taskId,
+      kind: meta.kind,
+      sourceWosId: meta.sourceWosId || "",
+      queryText: meta.queryText || "",
+      semanticDescription: meta.semanticDescription || "",
+      uuid: meta.uuid,
+      isRefQuery: Boolean(meta.isRefQuery),
+      sortBy,
+      exportMode: meta.exportMode || "uuid-export",
+      uuidDirectExport: meta.uuidDirectExport !== false,
+      requestedLimit: INGEST_RECORD_LIMIT,
+      availableCount: Number(meta.availableCount) || 0,
+      records: meta.records || [],
+      startedAt,
+      finishedAt,
+    });
+  } finally {
+    db.close();
+  }
+  const summary = {
+    ok: true,
+    method: "wos-sqlite-ingest",
+    command: args.command,
+    subcommand: args.command === "query" ? args.queryCommand : args.recordCommand,
+    taskId: args.taskId,
+    taskLabel: args.taskLabel,
+    operation: meta.operation || queryRecordOperation(args),
+    uuid: meta.uuid,
+    kind: meta.kind,
+    sourceWosId: meta.sourceWosId || "",
+    queryText: meta.queryText || "",
+    rowText: meta.queryText || "",
+    semanticDescription: meta.semanticDescription || "",
+    isRefQuery: Boolean(meta.isRefQuery),
+    sortBy,
+    exportMode: meta.exportMode || "uuid-export",
+    uuidDirectExport: meta.uuidDirectExport !== false,
+    sourceQueryUuid: meta.sourceQueryUuid || "",
+    collectedPages: Number(meta.collectedPages) || 0,
+    requestedLimit: INGEST_RECORD_LIMIT,
+    expectedCount: Number(meta.availableCount) || 0,
+    count: Number(meta.availableCount) || 0,
+    ingestedCount: Array.isArray(meta.records) ? meta.records.length : 0,
+    emptyResult: Boolean(meta.emptyResult),
+    startedAt,
+    finishedAt,
+    files: {
+      sqlite: paths.sqlitePath,
+      progressLog: paths.progressLog,
+    },
+  };
+  writeOperationSummary(paths, summary);
+  return summary;
+}
+
+function readExistingRecordIngest(paths, args) {
+  if (args.force || !fs.existsSync(paths.sqlitePath)) return null;
+  const db = openWosDatabase(paths.sqlitePath);
+  try {
+    return findExistingRecordIngest(db, {
+      taskId: args.taskId,
+      kind: args.relationType,
+      sourceWosId: args.wosId,
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function writeReusedRecordIngestSummary(paths, args, existing = {}) {
+  const now = new Date().toISOString();
+  const summary = {
+    ok: true,
+    method: "wos-sqlite-ingest",
+    command: "record",
+    subcommand: "ingest",
+    taskId: args.taskId,
+    taskLabel: args.taskLabel,
+    operation: `record ingest ${args.relationType}`,
+    uuid: existing.uuid || "",
+    kind: existing.kind || args.relationType,
+    sourceWosId: existing.sourceWosId || canonicalWosId(args.wosId),
+    queryText: existing.queryText || "",
+    rowText: existing.queryText || "",
+    semanticDescription: existing.semanticDescription || semanticDescriptionForIngest(args, existing, args.relationType),
+    isRefQuery: true,
+    sortBy: existing.sortBy || "relevance",
+    exportMode: existing.exportMode || RECORD_RELATION_EXPORT_MODE,
+    uuidDirectExport: existing.uuidDirectExport !== false,
+    requestedLimit: INGEST_RECORD_LIMIT,
+    expectedCount: Number(existing.availableCount) || 0,
+    count: Number(existing.availableCount) || 0,
+    ingestedCount: Number(existing.ingestedCount) || Number(existing.itemCount) || 0,
+    emptyResult: (Number(existing.availableCount) || 0) === 0 && (Number(existing.ingestedCount) || Number(existing.itemCount) || 0) === 0,
+    reused: true,
+    reusedFromRunId: existing.sourceRunId || "",
+    startedAt: now,
+    finishedAt: now,
+    files: {
+      sqlite: paths.sqlitePath,
+      progressLog: paths.progressLog,
+    },
+  };
+  writeOperationSummary(paths, summary);
+  return summary;
+}
+
+function openTaskWosDatabaseForLookup(args) {
+  const task = resolveTask(args);
+  const paths = getRunPaths(task.taskDir);
+  if (!fs.existsSync(paths.sqlitePath)) {
+    throw new CliMessageError(`Task SQLite database not found: ${paths.sqlitePath}`);
+  }
+  return {
+    task,
+    paths,
+    db: openWosDatabase(paths.sqlitePath),
+  };
+}
+
+function assertDbArgs(args) {
+  if (!["uuid", "wosid", "list", "context", "searches", "artifacts", "runs", "timeline", "audit-html", "audit-export"].includes(args.dbCommand)) {
+    throw new CliMessageError(`Unknown db command: ${args.dbCommand || "(missing)"}`);
+  }
+  if (args.dbCommand === "uuid" && !args.uuid) throw new CliMessageError("Missing --uuid for db uuid");
+  if ((args.dbCommand === "wosid" || args.dbCommand === "context") && !args.wosIds.length) {
+    throw new CliMessageError(`Missing --wosid for db ${args.dbCommand}`);
+  }
+  if (args.dbCommand === "list" && !args.uuid && !args.wosIds.length) {
+    throw new CliMessageError("Missing input for db list. Use --uuid <uuid> or --wosid <id> --type <self|citations|references|related>.");
+  }
+  if (args.dbCommand === "list" && args.wosIds.length && !args.relationType) {
+    throw new CliMessageError("Missing --type for db list --wosid. Use self, citations, references, or related.");
+  }
+  if (args.dbCommand === "context" || args.dbCommand === "list") {
+    const type = normalizeRelationType(args.relationType);
+    if (args.dbCommand === "context" || args.wosIds.length || type) {
+      if (!["self", "citations", "references", "related"].includes(type)) {
+        throw new CliMessageError(`Missing or invalid --type for db ${args.dbCommand}. Use self, citations, references, or related.`);
+      }
+      args.relationType = type;
+    }
+  }
+  if (args.dbCommand === "audit-export" && args.outputFormat && !["html", "json", "both"].includes(String(args.outputFormat).toLowerCase())) {
+    throw new CliMessageError("Invalid --format for db audit-export. Use html, json, or both.");
+  }
+}
+
+function compactTimestamp(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  const part = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}${part(date.getMonth() + 1)}${part(date.getDate())}-${part(date.getHours())}${part(date.getMinutes())}${part(date.getSeconds())}`;
+}
+
+function defaultAuditReportDir(taskDir) {
+  return path.join(taskDir, "audit", "reports", compactTimestamp());
+}
+
+async function runAuditHtml(args) {
+  const task = resolveTask(args);
+  const paths = getRunPaths(task.taskDir);
+  if (!fs.existsSync(paths.sqlitePath)) {
+    throw new CliMessageError(`Task SQLite database not found: ${paths.sqlitePath}`);
+  }
+  const filters = {
+    uuid: args.uuid || "",
+    wosid: args.wosIds[0] || "",
+    limit: args.limit || DEFAULT_AUDIT_HTML_LIMIT,
+  };
+  try {
+    return await createAuditHtmlServer({
+      taskId: task.taskId,
+      projectDir: task.taskDir,
+      sqlitePath: paths.sqlitePath,
+      host: DEFAULT_AUDIT_HTML_HOST,
+      port: Number(args.port || DEFAULT_AUDIT_HTML_PORT),
+      defaultFilters: filters,
+    });
+  } catch (error) {
+    if (error?.code === "EADDRINUSE" && Number(args.port || DEFAULT_AUDIT_HTML_PORT) === DEFAULT_AUDIT_HTML_PORT) {
+      return createAuditHtmlServer({
+        taskId: task.taskId,
+        projectDir: task.taskDir,
+        sqlitePath: paths.sqlitePath,
+        host: DEFAULT_AUDIT_HTML_HOST,
+        port: 0,
+        defaultFilters: filters,
+      });
+    }
+    throw error;
+  }
+}
+
+function runAuditExport(args) {
+  const task = resolveTask(args);
+  const paths = getRunPaths(task.taskDir);
+  if (!fs.existsSync(paths.sqlitePath)) {
+    throw new CliMessageError(`Task SQLite database not found: ${paths.sqlitePath}`);
+  }
+  const format = String(args.outputFormat || "both").toLowerCase();
+  const outputDir = args.reportDir || defaultAuditReportDir(task.taskDir);
+  const exported = exportAuditSnapshot({
+    taskId: task.taskId,
+    projectDir: task.taskDir,
+    sqlitePath: paths.sqlitePath,
+    outputDir,
+    format,
+    filters: {
+      uuid: args.uuid || "",
+      wosid: args.wosIds[0] || "",
+      limit: args.limit || DEFAULT_AUDIT_HTML_LIMIT,
+    },
+  });
+  return {
+    ok: true,
+    command: "db audit-export",
+    taskId: task.taskId,
+    sqlite: paths.sqlitePath,
+    outputDir,
+    format: exported.format,
+    files: exported.files,
+    stats: exported.snapshot.stats || {},
+    filters: exported.snapshot.filters || {},
+  };
+}
+
+function dbLookupUuid(args) {
+  const { task, paths, db } = openTaskWosDatabaseForLookup(args);
+  try {
+    const resultset = getResultsetMetadata(db, args.uuid);
+    const records = resultset ? getResultsetContext(db, args.uuid, { limit: args.limit }) : [];
+    return {
+      ok: Boolean(resultset),
+      command: "db uuid",
+      taskId: task.taskId,
+      sqlite: paths.sqlitePath,
+      uuid: args.uuid,
+      resultset,
+      count: resultset?.itemCount || 0,
+      records,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function dbLookupSearches(args) {
+  const { task, paths, db } = openTaskWosDatabaseForLookup(args);
+  try {
+    const searches = getSearchQueries(db, {
+      limit: args.limit,
+      uuid: args.uuid,
+      wosid: args.wosIds[0] || "",
+    });
+    return {
+      ok: true,
+      command: "db searches",
+      taskId: task.taskId,
+      sqlite: paths.sqlitePath,
+      count: searches.length,
+      filters: {
+        uuid: args.uuid || "",
+        wosid: canonicalWosId(args.wosIds[0] || ""),
+        limit: Number(args.limit || 0),
+      },
+      searches,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function dbLookupArtifacts(args) {
+  const { task, paths, db } = openTaskWosDatabaseForLookup(args);
+  try {
+    const artifacts = getArtifactEvents(db, {
+      limit: args.limit,
+      uuid: args.uuid,
+    });
+    return {
+      ok: true,
+      command: "db artifacts",
+      taskId: task.taskId,
+      sqlite: paths.sqlitePath,
+      count: artifacts.length,
+      filters: {
+        uuid: args.uuid || "",
+        limit: Number(args.limit || 0),
+      },
+      artifacts,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function dbLookupRuns(args) {
+  const { task, paths, db } = openTaskWosDatabaseForLookup(args);
+  try {
+    const runs = getAuditRuns(db, {
+      limit: args.limit,
+      uuid: args.uuid,
+    });
+    return {
+      ok: true,
+      command: "db runs",
+      taskId: task.taskId,
+      sqlite: paths.sqlitePath,
+      count: runs.length,
+      filters: {
+        uuid: args.uuid || "",
+        limit: Number(args.limit || 0),
+      },
+      runs,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function dbLookupTimeline(args) {
+  const { task, paths, db } = openTaskWosDatabaseForLookup(args);
+  try {
+    const items = getAuditTimeline(db, {
+      limit: args.limit,
+      uuid: args.uuid,
+      wosid: args.wosIds[0] || "",
+    });
+    return {
+      ok: true,
+      command: "db timeline",
+      taskId: task.taskId,
+      sqlite: paths.sqlitePath,
+      count: items.length,
+      filters: {
+        uuid: args.uuid || "",
+        wosid: canonicalWosId(args.wosIds[0] || ""),
+        limit: Number(args.limit || 0),
+      },
+      items,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function dbLookupWosId(args) {
+  const { task, paths, db } = openTaskWosDatabaseForLookup(args);
+  const wosid = canonicalWosId(args.wosIds[0]);
+  try {
+    const record = getRecordByWosId(db, wosid);
+    const relations = getRelationMetadataForWosId(db, wosid);
+    return {
+      ok: Boolean(record || relations.length),
+      command: "db wosid",
+      taskId: task.taskId,
+      sqlite: paths.sqlitePath,
+      wosid,
+      record,
+      relations: {
+        citations: relations.filter((item) => item.kind === "citations"),
+        references: relations.filter((item) => item.kind === "references"),
+        related: relations.filter((item) => item.kind === "related"),
+      },
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function recordSummaryForList(record = null) {
+  if (!record) return null;
+  return {
+    wosid: record.wosid,
+    doi: record.doi,
+    title: record.title,
+    year: record.year,
+    sourceTitle: record.sourceTitle,
+    authors: record.authors,
+    abstract: record.abstract,
+    keywords: record.keywords,
+  };
+}
+
+function listPayloadFromItems(items = [], includeContext = false) {
+  return items.map((item) => {
+    const base = {
+      position: Number(item.position) || 0,
+      wosid: canonicalWosId(item.wosid || ""),
+    };
+    if (item.runId) base.runId = item.runId;
+    if (item.observedAt) base.observedAt = item.observedAt;
+    if (includeContext) base.record = recordSummaryForList(item.record);
+    return base;
+  });
+}
+
+function dbLookupListByUuid(args, db, task, paths) {
+  const resultset = getResultsetMetadata(db, args.uuid);
+  const items = resultset ? getResultsetItems(db, args.uuid, { limit: args.limit }) : [];
+  return {
+    ok: Boolean(resultset),
+    command: "db list",
+    taskId: task.taskId,
+    sqlite: paths.sqlitePath,
+    input: { kind: "uuid", uuid: args.uuid },
+    uuid: args.uuid,
+    type: resultset?.kind || "",
+    resultset,
+    totalCount: resultset?.itemCount || 0,
+    count: items.length,
+    wosids: items.map((item) => canonicalWosId(item.wosid || "")),
+    items: listPayloadFromItems(items, Boolean(args.context)),
+    nextAction: resultset ? "" : `Run an ingest first, for example: iiaide-wos query ingest --expr '<query>'`,
+  };
+}
+
+function dbLookupListByWosId(args, db, task, paths) {
+  const wosid = canonicalWosId(args.wosIds[0]);
+  const type = normalizeRelationType(args.relationType);
+  if (type === "self") {
+    const record = getRecordByWosId(db, wosid);
+    return {
+      ok: Boolean(record),
+      command: "db list",
+      taskId: task.taskId,
+      sqlite: paths.sqlitePath,
+      input: { kind: "wosid", wosid, type },
+      wosid,
+      type,
+      totalCount: record ? 1 : 0,
+      count: record ? 1 : 0,
+      wosids: record ? [wosid] : [],
+      items: record ? [{
+        position: 1,
+        wosid,
+        ...(args.context ? { record: recordSummaryForList(record) } : {}),
+      }] : [],
+      nextAction: record ? "" : `Run: iiaide-wos query ingest --wosid "${wosid}"`,
+    };
+  }
+  const relation = getLatestRelationMetadata(db, { sourceWosId: wosid, kind: type });
+  const items = relation ? getResultsetItems(db, relation.uuid, { limit: args.limit }) : [];
+  return {
+    ok: Boolean(relation),
+    command: "db list",
+    taskId: task.taskId,
+    sqlite: paths.sqlitePath,
+    input: { kind: "wosid", wosid, type },
+    wosid,
+    type,
+    uuid: relation?.uuid || "",
+    resultset: relation,
+    totalCount: relation?.itemCount || 0,
+    count: items.length,
+    wosids: items.map((item) => canonicalWosId(item.wosid || "")),
+    items: listPayloadFromItems(items, Boolean(args.context)),
+    nextAction: relation ? "" : `Run: iiaide-wos record ingest --wosid "${wosid}" --type ${type}`,
+  };
+}
+
+function dbLookupList(args) {
+  const { task, paths, db } = openTaskWosDatabaseForLookup(args);
+  try {
+    if (args.uuid) return dbLookupListByUuid(args, db, task, paths);
+    return dbLookupListByWosId(args, db, task, paths);
+  } finally {
+    db.close();
+  }
+}
+
+function dbLookupContext(args) {
+  const { task, paths, db } = openTaskWosDatabaseForLookup(args);
+  const wosid = canonicalWosId(args.wosIds[0]);
+  const type = normalizeRelationType(args.relationType);
+  try {
+    if (type === "self") {
+      const record = getRecordByWosId(db, wosid);
+      return {
+        ok: Boolean(record),
+        command: "db context",
+        taskId: task.taskId,
+        sqlite: paths.sqlitePath,
+        wosid,
+        type,
+        count: record ? 1 : 0,
+        records: record ? [{ position: 1, ...record }] : [],
+        nextAction: record
+          ? ""
+          : (isSingleProjectMode(args)
+            ? `Run: iiaide-wos query ingest --wosid "${wosid}"`
+            : `Run: iiaide-wos query ingest --wosid "${wosid}" --task "${task.taskId}"`),
+      };
+    }
+    const relation = getLatestRelationMetadata(db, { sourceWosId: wosid, kind: type });
+    if (!relation) {
+      return {
+        ok: false,
+        command: "db context",
+        taskId: task.taskId,
+        sqlite: paths.sqlitePath,
+        wosid,
+        type,
+        count: 0,
+        resultset: null,
+        records: [],
+        nextAction: isSingleProjectMode(args)
+          ? `Run: iiaide-wos record ingest --wosid "${wosid}" --type ${type}`
+          : `Run: iiaide-wos record ingest --wosid "${wosid}" --type ${type} --task "${task.taskId}"`,
+      };
+    }
+    const records = getResultsetContext(db, relation.uuid, { limit: args.limit });
+    return {
+      ok: true,
+      command: "db context",
+      taskId: task.taskId,
+      sqlite: paths.sqlitePath,
+      wosid,
+      type,
+      uuid: relation.uuid,
+      count: records.length,
+      resultset: relation,
+      records,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runDbLookup(args) {
+  assertDbArgs(args);
+  if (args.dbCommand === "uuid") return dbLookupUuid(args);
+  if (args.dbCommand === "wosid") return dbLookupWosId(args);
+  if (args.dbCommand === "list") return dbLookupList(args);
+  if (args.dbCommand === "searches") return dbLookupSearches(args);
+  if (args.dbCommand === "artifacts") return dbLookupArtifacts(args);
+  if (args.dbCommand === "runs") return dbLookupRuns(args);
+  if (args.dbCommand === "timeline") return dbLookupTimeline(args);
+  return dbLookupContext(args);
+}
+
+function formatDbLookup(result = {}) {
+  if (result.command === "db uuid") {
+    if (!result.resultset) return `UUID not found: ${result.uuid}`;
+    return JSON.stringify({
+      resultset: result.resultset,
+      records: result.records || [],
+    }, null, 2);
+  }
+  if (result.command === "db wosid") {
+    return JSON.stringify({
+      wosid: result.wosid,
+      record: result.record,
+      relations: result.relations,
+    }, null, 2);
+  }
+  if (result.command === "db list") {
+    return JSON.stringify({
+      input: result.input || {},
+      uuid: result.uuid || "",
+      wosid: result.wosid || "",
+      type: result.type || "",
+      count: result.count || 0,
+      totalCount: result.totalCount || 0,
+      resultset: result.resultset || null,
+      nextAction: result.nextAction || "",
+      wosids: result.wosids || [],
+      items: result.items || [],
+    }, null, 2);
+  }
+  if (result.command === "db searches") {
+    return JSON.stringify({
+      count: result.count || 0,
+      filters: result.filters || {},
+      searches: localizeDisplayTimes(result.searches || []),
+    }, null, 2);
+  }
+  if (result.command === "db artifacts") {
+    return JSON.stringify({
+      count: result.count || 0,
+      filters: result.filters || {},
+      artifacts: localizeDisplayTimes(result.artifacts || []),
+    }, null, 2);
+  }
+  if (result.command === "db runs") {
+    return JSON.stringify({
+      count: result.count || 0,
+      filters: result.filters || {},
+      runs: localizeDisplayTimes(result.runs || []),
+    }, null, 2);
+  }
+  if (result.command === "db timeline") {
+    return JSON.stringify({
+      count: result.count || 0,
+      filters: result.filters || {},
+      items: localizeDisplayTimes(result.items || []),
+    }, null, 2);
+  }
+  return JSON.stringify({
+    wosid: result.wosid,
+    type: result.type,
+    uuid: result.uuid || "",
+    count: result.count || 0,
+    resultset: result.resultset || null,
+    nextAction: result.nextAction || "",
+    records: result.records || [],
+  }, null, 2);
+}
+
+async function runQueryIngest(args, dependencies = {}) {
+  assertQueryRecordArgs(args);
+  const startedAt = new Date().toISOString();
+  const paths = createRunLayout(args);
+  writeQueryRecordManifest(paths, args);
+  upsertTaskIndex(args, { status: "query-ingesting", lastError: "" });
+  appendProgress(paths, { phase: "query-ingest-start", limit: INGEST_RECORD_LIMIT, sortBy: "relevance" });
+  const prepareSession = dependencies.prepareWosSession || prepareWosSession;
+  const runner = dependencies.runQueryBrowserCommand || runQueryBrowserCommand;
+  let session = null;
+  try {
+    session = await prepareSession(args, { report: reportForArgs(args) });
+    appendProgress(paths, { phase: "sid-validated" });
+    const queryCommand = ingestQueryCommandFromArgs(args);
+    const itemArgs = { ...args, queryCommand, sortBy: "relevance" };
+    const uuidResult = await runner(session.page, itemArgs);
+    if (!uuidResult.ok || !uuidResult.uuid) {
+      throw new CliMessageError(uuidResult.error || "WOS query ingest did not return a UUID");
+    }
+    appendProgress(paths, {
+      phase: "query-ingest-uuid",
+      uuid: uuidResult.uuid,
+      count: uuidResult.count,
+      queryCommand,
+    });
+    const exported = await exportIngestRecordsFromUuid(session.page, args, {
+      paths,
+      kind: "normal",
+      uuid: uuidResult.uuid,
+      count: uuidResult.count,
+      sortBy: uuidResult.sortBy || "relevance",
+      isRefQuery: false,
+    });
+    const queryText = ingestQueryText(args, uuidResult);
+    const summary = writeWosIngestSummary(paths, args, {
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      operation: `query ingest ${queryCommand}`,
+      kind: "normal",
+      sourceWosId: "",
+      queryText,
+      semanticDescription: semanticDescriptionForIngest(args, uuidResult, "normal"),
+      uuid: uuidResult.uuid,
+      isRefQuery: false,
+      sortBy: uuidResult.sortBy || "relevance",
+      availableCount: uuidResult.count,
+      records: exported.records,
+    });
+    appendProgress(paths, {
+      phase: "query-ingest-complete",
+      uuid: summary.uuid,
+      availableCount: summary.expectedCount,
+      ingestedCount: summary.ingestedCount,
+      sqlite: paths.sqlitePath,
+    });
+    upsertTaskIndex(args, {
+      status: "completed",
+      lastError: "",
+      uuid: summary.uuid,
+      url: buildSummaryUrl(args.baseUrl, summary.uuid, summary.sortBy || "relevance"),
+      expectedCount: summary.expectedCount,
+      uniqueCount: summary.ingestedCount,
+    });
+    return summary;
+  } finally {
+    await session?.close?.();
+  }
+}
+
+async function runRecordIngest(args, dependencies = {}) {
+  assertQueryRecordArgs(args);
+  const startedAt = new Date().toISOString();
+  const paths = createRunLayout(args);
+  writeQueryRecordManifest(paths, args);
+  upsertTaskIndex(args, { status: "record-ingesting", lastError: "" });
+  appendProgress(paths, { phase: "record-ingest-start", type: args.relationType, limit: INGEST_RECORD_LIMIT, sortBy: "relevance" });
+  const existing = readExistingRecordIngest(paths, args);
+  if (existing) {
+    appendProgress(paths, {
+      phase: "record-ingest-reuse-sqlite",
+      type: args.relationType,
+      sourceWosId: canonicalWosId(args.wosId),
+      uuid: existing.uuid,
+      sourceRunId: existing.sourceRunId,
+      ingestedCount: existing.ingestedCount,
+    });
+    const summary = writeReusedRecordIngestSummary(paths, args, existing);
+    upsertTaskIndex(args, {
+      status: "completed",
+      lastError: "",
+      uuid: summary.uuid,
+      url: buildSummaryUrl(args.baseUrl, summary.uuid, summary.sortBy || "relevance"),
+      expectedCount: summary.expectedCount,
+      uniqueCount: summary.ingestedCount,
+    });
+    return summary;
+  }
+  const prepareSession = dependencies.prepareWosSession || prepareWosSession;
+  const runner = dependencies.runRecordBrowserCommand || runRecordBrowserCommand;
+  let session = null;
+  try {
+    session = await prepareSession(args, { report: reportForArgs(args) });
+    appendProgress(paths, { phase: "sid-validated" });
+    const relationArgs = { ...args, recordCommand: "relations", sortBy: "relevance" };
+    const uuidResult = await runner(session.page, relationArgs);
+    if (!uuidResult.ok || !uuidResult.uuid) {
+      throw new CliMessageError(uuidResult.error || "WOS record ingest did not return a relation UUID");
+    }
+    appendProgress(paths, {
+      phase: "record-ingest-uuid",
+      type: args.relationType,
+      sourceWosId: args.wosId,
+      uuid: uuidResult.uuid,
+      count: uuidResult.count,
+    });
+    const relationCount = Number(uuidResult.count);
+    if (Number.isFinite(relationCount) && relationCount === 0) {
+      const summary = writeWosIngestSummary(paths, args, {
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        operation: `record ingest ${args.relationType}`,
+        kind: args.relationType,
+        sourceWosId: args.wosId,
+        queryText: uuidResult.rowText || "",
+        semanticDescription: semanticDescriptionForIngest(args, uuidResult, args.relationType),
+        uuid: uuidResult.uuid,
+        isRefQuery: true,
+        sortBy: "relevance",
+        exportMode: RECORD_RELATION_EXPORT_MODE,
+        uuidDirectExport: false,
+        collectedPages: 0,
+        availableCount: 0,
+        records: [],
+        emptyResult: true,
+      });
+      appendProgress(paths, {
+        phase: "record-ingest-empty-result",
+        type: args.relationType,
+        sourceWosId: args.wosId,
+        uuid: summary.uuid,
+        availableCount: 0,
+        ingestedCount: 0,
+        sqlite: paths.sqlitePath,
+      });
+      upsertTaskIndex(args, {
+        status: "completed",
+        lastError: "",
+        uuid: summary.uuid,
+        url: buildSummaryUrl(args.baseUrl, summary.uuid, summary.sortBy || "relevance"),
+        expectedCount: 0,
+        uniqueCount: 0,
+      });
+      return summary;
+    }
+    const collectWosIds = dependencies.collectRelationWosIdsForIngest || collectRelationWosIdsForIngest;
+    const exportByWosIds = dependencies.exportIngestRecordsByWosIds || exportIngestRecordsByWosIds;
+    const collected = await collectWosIds(session.page, args, {
+      paths,
+      kind: args.relationType,
+      sourceWosId: args.wosId,
+      uuid: uuidResult.uuid,
+    });
+    if (!collected.wosIds.length) {
+      const summary = writeWosIngestSummary(paths, args, {
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        operation: `record ingest ${args.relationType}`,
+        kind: args.relationType,
+        sourceWosId: args.wosId,
+        queryText: uuidResult.rowText || "",
+        semanticDescription: semanticDescriptionForIngest(args, uuidResult, args.relationType),
+        uuid: uuidResult.uuid,
+        isRefQuery: true,
+        sortBy: "relevance",
+        exportMode: RECORD_RELATION_EXPORT_MODE,
+        uuidDirectExport: false,
+        collectedPages: collected.pagesRequested,
+        availableCount: 0,
+        records: [],
+        emptyResult: true,
+      });
+      appendProgress(paths, {
+        phase: "record-ingest-empty-result",
+        type: args.relationType,
+        sourceWosId: args.wosId,
+        uuid: summary.uuid,
+        availableCount: 0,
+        collectedPages: collected.pagesRequested,
+        ingestedCount: 0,
+        sqlite: paths.sqlitePath,
+      });
+      upsertTaskIndex(args, {
+        status: "completed",
+        lastError: "",
+        uuid: summary.uuid,
+        url: buildSummaryUrl(args.baseUrl, summary.uuid, summary.sortBy || "relevance"),
+        expectedCount: 0,
+        uniqueCount: 0,
+      });
+      return summary;
+    }
+    const exported = await exportByWosIds(session.page, args, {
+      paths,
+      kind: args.relationType,
+      sourceWosId: args.wosId,
+      relationUuid: uuidResult.uuid,
+      wosIds: collected.wosIds,
+    });
+    const summary = writeWosIngestSummary(paths, args, {
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      operation: `record ingest ${args.relationType}`,
+      kind: args.relationType,
+      sourceWosId: args.wosId,
+      queryText: uuidResult.rowText || "",
+      semanticDescription: semanticDescriptionForIngest(args, uuidResult, args.relationType),
+      uuid: uuidResult.uuid,
+      isRefQuery: true,
+      sortBy: "relevance",
+      exportMode: RECORD_RELATION_EXPORT_MODE,
+      uuidDirectExport: false,
+      sourceQueryUuid: exported.queryUuid || "",
+      collectedPages: collected.pagesRequested,
+      availableCount: uuidResult.count,
+      records: exported.records,
+    });
+    appendProgress(paths, {
+      phase: "record-ingest-complete",
+      type: args.relationType,
+      sourceWosId: args.wosId,
+      uuid: summary.uuid,
+      availableCount: summary.expectedCount,
+      ingestedCount: summary.ingestedCount,
+      sqlite: paths.sqlitePath,
+    });
+    upsertTaskIndex(args, {
+      status: "completed",
+      lastError: "",
+      uuid: summary.uuid,
+      url: buildSummaryUrl(args.baseUrl, summary.uuid, summary.sortBy || "relevance"),
+      expectedCount: summary.expectedCount,
+      uniqueCount: summary.ingestedCount,
+    });
+    return summary;
+  } finally {
+    await session?.close?.();
+  }
+}
+
 async function runQueryBatch(args, dependencies = {}) {
   assertQueryRecordArgs(args);
-  const expressions = readQueryExprFile(args.queryExprFile);
-  if (!expressions.length) throw new CliMessageError(`No query expressions found in --expr-file: ${args.queryExprFile}`);
+  const debug = debugForArgs(args);
+  const expressions = readQueryBatchExpressions(args);
+  if (!expressions.length) {
+    const source = args.queryExprFile ? `--expr-file: ${args.queryExprFile}` : "repeated --expr";
+    throw new CliMessageError(`No query expressions found in ${source}`);
+  }
 
   const initialPaths = getRunPaths(args.outDir);
   const outputHasFiles = fs.existsSync(args.outDir) &&
@@ -4375,6 +6280,7 @@ async function runQueryBatch(args, dependencies = {}) {
   appendProgress(paths, {
     phase: "query-batch-start",
     inputExprFile: args.queryExprFile,
+    inputExprs: args.queryExprs || [],
     total: expressions.length,
   });
 
@@ -4385,8 +6291,6 @@ async function runQueryBatch(args, dependencies = {}) {
   const results = [];
   let session = null;
   try {
-    session = await prepareSession(args, { report: reportForArgs(args) });
-    appendProgress(paths, { phase: "sid-validated" });
     for (let index = 0; index < expressions.length; index += 1) {
       const expr = expressions[index];
       const itemArgs = {
@@ -4396,20 +6300,61 @@ async function runQueryBatch(args, dependencies = {}) {
       };
       let item;
       try {
-        const result = await runner(session.page, itemArgs);
-        item = {
-          index: index + 1,
-          total: expressions.length,
-          expr,
-          ok: Boolean(result.ok),
-          uuid: result.uuid || "",
-          count: Number(result.count || 0),
-          rowText: result.rowText || "",
-          source: result.source || { kind: "expr", value: expr },
-          operation: result.operation || "query build",
-          error: result.error || "",
-          code: result.ok ? "OK" : "WOS_UUID_MISSING",
-        };
+        const cachedResult = readCachedQueryBuildResult(paths, itemArgs);
+        if (cachedResult) {
+          debug("query batch: using cached SQLite result", {
+            index: index + 1,
+            total: expressions.length,
+            uuid: cachedResult.uuid,
+            count: cachedResult.count,
+            cachedAt: cachedResult.cachedAt,
+          });
+          item = {
+            index: index + 1,
+            total: expressions.length,
+            expr,
+            ok: true,
+            uuid: cachedResult.uuid || "",
+            url: cachedResult.href || "",
+            count: Number(cachedResult.count || 0),
+            queryText: cachedResult.rowText || expr,
+            rowText: cachedResult.rowText || expr,
+            source: cachedResult.source || { kind: "expr", value: expr },
+            sortBy: cachedResult.sortBy || args.sortBy || "relevance",
+            cached: true,
+            cachedAt: cachedResult.cachedAt || "",
+            operation: cachedResult.operation || "query build",
+            error: "",
+            code: "OK",
+          };
+        } else {
+          if (!session) {
+            debug("query batch: preparing WOS session", { total: expressions.length });
+            session = await prepareSession(args, { report: reportForArgs(args) });
+            debug("query batch: WOS session ready");
+            appendProgress(paths, { phase: "sid-validated" });
+          }
+          debug("query batch: running item", { index: index + 1, total: expressions.length, expr });
+          const result = await runner(session.page, itemArgs);
+          const sortBy = result.sortBy || args.sortBy || "relevance";
+          item = {
+            index: index + 1,
+            total: expressions.length,
+            expr,
+            ok: Boolean(result.ok),
+            uuid: result.uuid || "",
+            url: result.href || (result.uuid ? buildSummaryUrl(args.baseUrl, result.uuid, sortBy) : ""),
+            count: Number(result.count || 0),
+            queryText: result.rowText || expr,
+            rowText: result.rowText || "",
+            source: result.source || { kind: "expr", value: expr },
+            sortBy,
+            cached: false,
+            operation: result.operation || "query build",
+            error: result.error || "",
+            code: result.ok ? "OK" : "WOS_UUID_MISSING",
+          };
+        }
       } catch (error) {
         const envelope = llmErrorResult(itemArgs, error);
         item = {
@@ -4418,9 +6363,13 @@ async function runQueryBatch(args, dependencies = {}) {
           expr,
           ok: false,
           uuid: "",
+          url: "",
           count: 0,
+          queryText: expr,
           rowText: expr,
           source: { kind: "expr", value: expr },
+          sortBy: args.sortBy || "relevance",
+          cached: false,
           operation: "query build",
           error: envelope.message,
           code: envelope.code,
@@ -4432,15 +6381,14 @@ async function runQueryBatch(args, dependencies = {}) {
         index: item.index,
         total: item.total,
         uuid: item.uuid,
+        url: item.url,
         count: item.count,
+        cached: Boolean(item.cached),
         ok: item.ok,
         error: item.error || "",
       });
-      if (args.jsonl) writeStdout(JSON.stringify(queryBatchItemEnvelope(args, item)));
-      else if (!args.json) {
-        if (item.ok) writeStdout(item.uuid);
-        else writeStderr(`Query ${item.index}/${item.total} failed: ${item.error || "WOS command did not return a UUID"}`);
-      }
+      if (!args.json) writeStdout(JSON.stringify(queryBatchItemEnvelope(args, item)));
+      if (!item.ok) writeStderr(`Query ${item.index}/${item.total} failed: ${item.error || "WOS command did not return a UUID"}`);
     }
 
     const completed = results.filter((item) => item.ok).length;
@@ -4453,6 +6401,7 @@ async function runQueryBatch(args, dependencies = {}) {
       taskId: args.taskId,
       taskLabel: args.taskLabel,
       inputExprFile: args.queryExprFile,
+      inputExprs: args.queryExprs || [],
       total: expressions.length,
       completed,
       failed,
@@ -4462,7 +6411,7 @@ async function runQueryBatch(args, dependencies = {}) {
       },
       finishedAt: new Date().toISOString(),
     };
-    writeJson(paths.summary, summary);
+    writeOperationSummary(paths, summary);
     appendProgress(paths, {
       phase: "query-batch-complete",
       ok: summary.ok,
@@ -4487,6 +6436,7 @@ async function runQueryBatch(args, dependencies = {}) {
 
 async function runQueryRecord(args, dependencies = {}) {
   assertQueryRecordArgs(args);
+  const debug = debugForArgs(args);
   const initialPaths = getRunPaths(args.outDir);
   const outputHasFiles = fs.existsSync(args.outDir) &&
     fs.readdirSync(args.outDir).some((name) => name !== ".DS_Store");
@@ -4496,15 +6446,51 @@ async function runQueryRecord(args, dependencies = {}) {
   upsertTaskIndex(args, { status: `${args.command}-running`, lastError: "" });
   appendProgress(paths, { phase: `${args.command}-start`, operation: queryRecordOperation(args) });
 
+  const cachedResult = readCachedQueryBuildResult(paths, args);
+  if (cachedResult) {
+    debug("query build: using cached SQLite result", {
+      uuid: cachedResult.uuid,
+      count: cachedResult.count,
+      cachedAt: cachedResult.cachedAt,
+    });
+    appendProgress(paths, {
+      phase: "query-cache-hit",
+      uuid: cachedResult.uuid,
+      count: cachedResult.count,
+      cachedAt: cachedResult.cachedAt,
+    });
+    const summary = writeQueryRecordSummary(paths, args, cachedResult);
+    appendProgress(paths, {
+      phase: `${args.command}-complete`,
+      uuid: summary.uuid,
+      count: summary.count,
+      ok: summary.ok,
+      cached: true,
+    });
+    upsertTaskIndex(args, {
+      status: "completed",
+      lastError: "",
+      uuid: summary.uuid,
+      url: summary.summaryUrl || buildSummaryUrl(args.baseUrl, summary.uuid, summary.sortBy || args.sortBy),
+      expectedCount: summary.count,
+      uniqueCount: summary.count,
+    });
+    return summary;
+  }
+
   let session = null;
   try {
     const prepareSession = dependencies.prepareWosSession || prepareWosSession;
+    debug(`${args.command}: preparing WOS session`, { operation: queryRecordOperation(args) });
     session = await prepareSession(args, { report: reportForArgs(args) });
+    debug(`${args.command}: WOS session ready`);
     appendProgress(paths, { phase: "sid-validated" });
     const runner = args.command === "query"
       ? (dependencies.runQueryBrowserCommand || runQueryBrowserCommand)
       : (dependencies.runRecordBrowserCommand || runRecordBrowserCommand);
+    debug(`${args.command}: running browser command`, { operation: queryRecordOperation(args) });
     const result = await runner(session.page, args);
+    debug(`${args.command}: browser command complete`, { ok: result.ok, uuid: result.uuid, count: result.count });
     const summary = writeQueryRecordSummary(paths, args, result);
     appendProgress(paths, {
       phase: `${args.command}-complete`,
@@ -4574,6 +6560,7 @@ async function run(args) {
     largeExport: Boolean(priorSummary.largeExport),
     limitedByWosWindow: Boolean(priorSummary.limitedByWosWindow),
     incompleteBeyondWosLimit: Boolean(priorSummary.incompleteBeyondWosLimit),
+    exportIsRefQuery: Boolean(priorSummary.exportIsRefQuery),
     exportWindows: Array.isArray(priorSummary.exportWindows) ? priorSummary.exportWindows : [],
     href: priorSummary.summaryHref || args.url,
     rowText: priorSummary.rowText || "",
@@ -4648,6 +6635,7 @@ async function run(args) {
     largeExport: Boolean(info.largeExport),
     limitedByWosWindow: Boolean(info.limitedByWosWindow),
     incompleteBeyondWosLimit: Boolean(info.incompleteBeyondWosLimit),
+    exportIsRefQuery: Boolean(info.exportIsRefQuery),
     exportWindows: Array.isArray(info.exportWindows) ? info.exportWindows : [],
     rowText: info.rowText || "",
     summaryHref: info.href || args.url,
@@ -4730,7 +6718,7 @@ async function runBib(args) {
       finishedAt: new Date().toISOString(),
     };
     appendProgress(paths, { phase: "repair-bib-from-raw", uuid: rawUuid, bibDir: bibBatchDir(paths, rawUuid), batches: rawBibFiles.length });
-    writeJson(paths.summary, summary);
+    writeOperationSummary(paths, summary);
     upsertTaskIndex(args, {
       status: "bib-completed",
       lastError: "",
@@ -4770,7 +6758,7 @@ async function runBib(args) {
     },
     finishedAt: new Date().toISOString(),
   };
-  writeJson(paths.summary, summary);
+  writeOperationSummary(paths, summary);
   upsertTaskIndex(args, {
     status: "bib-completed",
     lastError: "",
@@ -4783,6 +6771,13 @@ async function runBib(args) {
 }
 
 function listTasks(args) {
+  if (isSingleProjectMode(args)) {
+    const task = createTaskPlaceholder(args, args.taskId);
+    return {
+      rows: [task],
+      columns: ["updatedAt", "status", "taskId", "uniqueCount", "expectedCount", "label", "uuid"],
+    };
+  }
   const index = readTaskIndex(args.tasksRoot);
   const rows = Array.isArray(index.tasks) ? index.tasks : [];
   const columns = ["updatedAt", "status", "taskId", "uniqueCount", "expectedCount", "label", "uuid"];
@@ -4792,9 +6787,50 @@ function listTasks(args) {
   return { rows, columns };
 }
 
+function taskNameRows(args) {
+  if (isSingleProjectMode(args)) {
+    const task = createTaskPlaceholder(args, args.taskId);
+    return [{
+      taskId: task.taskId,
+      status: task.status || "",
+      updatedAt: task.updatedAt || "",
+      label: task.label || "",
+      uuid: task.uuid || "",
+    }];
+  }
+  const index = readTaskIndex(args.tasksRoot);
+  const byId = new Map();
+  for (const task of Array.isArray(index.tasks) ? index.tasks : []) {
+    if (task?.taskId) byId.set(task.taskId, task);
+  }
+  for (const task of discoverManagedTaskEntries(args.tasksRoot)) {
+    if (task?.taskId) byId.set(task.taskId, { ...byId.get(task.taskId), ...task });
+  }
+  return Array.from(byId.values())
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+    .map((task) => ({
+      taskId: task.taskId,
+      status: task.status || "",
+      updatedAt: task.updatedAt || "",
+      label: task.label || "",
+      uuid: task.uuid || "",
+    }));
+}
+
+function listTaskNames(args) {
+  const rows = taskNameRows(args);
+  return {
+    ok: true,
+    tasksRoot: args.tasksRoot,
+    count: rows.length,
+    taskIds: rows.map((task) => task.taskId),
+    tasks: rows,
+  };
+}
+
 function showTask(args) {
   const task = resolveTask(args);
-  const summaryPath = path.join(task.taskDir, "summary.json");
+  const summaryPath = path.join(task.taskDir, "state.json");
   const summary = readJson(summaryPath, null);
   return { task, summary };
 }
@@ -5017,15 +7053,52 @@ function queryRecordJsonResult(args, summary) {
     code: summary.ok ? "OK" : "WOS_UUID_MISSING",
     taskId: summary.taskId,
     uuid: summary.uuid,
-    count: summary.count,
-    message: summary.ok ? "WOS UUID resolved" : (summary.error || "WOS command did not return a UUID"),
+    count: summary.ingestedCount ?? summary.count,
+    message: summary.method === "wos-sqlite-ingest"
+      ? `Ingested ${summary.ingestedCount || 0} WOS records into SQLite`
+      : summary.method === "wos-sqlite-cache"
+        ? "WOS UUID resolved from SQLite cache"
+      : (summary.ok ? "WOS UUID resolved" : (summary.error || "WOS command did not return a UUID")),
     data: {
       operation: summary.operation,
       rowText: summary.rowText,
+      summaryUrl: summary.summaryUrl,
+      sortBy: summary.sortBy,
+      cached: Boolean(summary.cached),
+      cachedAt: summary.cachedAt || undefined,
       source: summary.source,
-      summary: summary.files ? { progressLog: summary.files.progressLog } : {},
+      kind: summary.kind || undefined,
+      isRefQuery: summary.isRefQuery,
+      requestedLimit: summary.requestedLimit,
+      ingestedCount: summary.ingestedCount,
+      emptyResult: Boolean(summary.emptyResult),
+      relations: summary.relations || undefined,
+      summary: summary.files || {},
     },
   });
+}
+
+function formatQueryBuildOutput(args, summary) {
+  const sortBy = summary.sortBy || args.sortBy || "relevance";
+  const summaryUrl = summary.summaryUrl || (summary.uuid ? buildSummaryUrl(args.baseUrl, summary.uuid, sortBy) : "");
+  const count = Number.isFinite(Number(summary.count)) ? Number(summary.count) : Number(summary.expectedCount || 0);
+  return JSON.stringify({
+    uuid: summary.uuid || "",
+    url: summaryUrl,
+    count,
+    queryText: summary.rowText || args.queryExpr || "",
+    cached: Boolean(summary.cached),
+  });
+}
+
+function formatQueryRecordOutput(args, summary) {
+  if (args.command === "query" && args.queryCommand === "build") {
+    return formatQueryBuildOutput(args, summary);
+  }
+  if (args.command === "record" && args.recordCommand === "collect") {
+    return summary.files?.relationsDir || summary.uuid;
+  }
+  return summary.uuid;
 }
 
 function artifactJsonResult(args, summary, artifact, message = "Artifact ready") {
@@ -5058,7 +7131,7 @@ async function executeCommand(args) {
     if (args.json) {
       printJsonResult(llmResult(args, {
         ok: true,
-        message: result.rows.length ? "Tasks listed" : "No tasks",
+        message: result.rows.length ? (isSingleProjectMode(args) ? "Project listed" : "Tasks listed") : (isSingleProjectMode(args) ? "No project" : "No tasks"),
         count: result.rows.length,
         data: {
           tasksRoot: args.tasksRoot,
@@ -5067,9 +7140,23 @@ async function executeCommand(args) {
         },
       }));
     } else if (!result.rows.length) {
-      console.log(`No tasks in ${args.tasksRoot}`);
+      console.log(isSingleProjectMode(args) ? `No project in ${args.tasksRoot}` : `No tasks in ${args.tasksRoot}`);
     } else {
       console.log(toCsv(result.rows, result.columns).trim());
+    }
+    return 0;
+  }
+  if (args.command === "tasks") {
+    const result = listTaskNames(args);
+    if (args.json) {
+      printJsonResult(llmResult(args, {
+        ok: true,
+        message: result.count ? (isSingleProjectMode(args) ? "Project listed" : "Task names listed") : (isSingleProjectMode(args) ? "No project" : "No tasks"),
+        count: result.count,
+        data: result,
+      }));
+    } else {
+      console.log(result.taskIds.join("\n"));
     }
     return 0;
   }
@@ -5093,6 +7180,72 @@ async function executeCommand(args) {
   }
   if (args.command === "auth") {
     return executeAuthCommand(args);
+  }
+  if (args.command === "db") {
+    if (args.dbCommand === "audit-html") {
+      const auditServer = await runAuditHtml(args);
+      const payload = {
+        ok: true,
+        command: "db audit-html",
+        taskId: args.taskId,
+        artifact: path.join(args.outDir, "wosData.sqlite"),
+        count: 0,
+        message: "Audit HTML server started",
+        data: {
+          host: auditServer.host,
+          port: auditServer.port,
+          url: auditServer.url,
+          sqlite: path.join(args.outDir, "wosData.sqlite"),
+          filters: {
+            uuid: args.uuid || "",
+            wosid: canonicalWosId(args.wosIds[0] || ""),
+            limit: args.limit || DEFAULT_AUDIT_HTML_LIMIT,
+          },
+        },
+      };
+      if (args.json) printJsonResult(payload);
+      else console.log(auditServer.url);
+      return await new Promise((resolve) => {
+        const stop = () => {
+          auditServer.server.close(() => resolve(0));
+        };
+        process.once("SIGINT", stop);
+        process.once("SIGTERM", stop);
+      });
+    }
+    if (args.dbCommand === "audit-export") {
+      const result = runAuditExport(args);
+      if (args.json) {
+        printJsonResult(llmResult(args, {
+          ok: true,
+          code: "OK",
+          command: "db audit-export",
+          taskId: result.taskId,
+          artifact: result.outputDir,
+          message: "Audit snapshot exported",
+          data: result,
+        }));
+      } else {
+        console.log(result.outputDir);
+      }
+      return 0;
+    }
+    const result = runDbLookup(args);
+    if (args.json) {
+      printJsonResult(llmResult(args, {
+        ok: Boolean(result.ok),
+        code: result.ok ? "OK" : "SQLITE_LOOKUP_EMPTY",
+        taskId: result.taskId,
+        artifact: result.sqlite,
+        uuid: result.uuid || result.resultset?.uuid || "",
+        count: result.count || result.resultset?.itemCount || 0,
+        message: result.ok ? "SQLite lookup complete" : (result.nextAction || "SQLite lookup found no rows"),
+        data: result,
+      }));
+    } else {
+      console.log(formatDbLookup(result));
+    }
+    return result.ok ? 0 : 1;
   }
   if (args.command === "sid-pool") {
     console.log(JSON.stringify(currentSidPoolStatus(args), null, 2));
@@ -5158,6 +7311,18 @@ async function executeCommand(args) {
       console.error(usage());
       return 2;
     }
+    if (args.command === "query" && args.queryCommand === "ingest") {
+      const summary = await runQueryIngest(args);
+      const result = queryRecordJsonResult(args, summary);
+      console.log(args.json ? JSON.stringify(result, null, 2) : summary.files?.sqlite);
+      return summary.ok ? 0 : 1;
+    }
+    if (args.command === "record" && args.recordCommand === "ingest") {
+      const summary = await runRecordIngest(args);
+      const result = queryRecordJsonResult(args, summary);
+      console.log(args.json ? JSON.stringify(result, null, 2) : summary.files?.sqlite);
+      return summary.ok ? 0 : 1;
+    }
     if (args.command === "query" && args.queryCommand === "batch") {
       const summary = await runQueryBatch(args);
       if (args.json) printJsonResult(queryBatchJsonResult(args, summary));
@@ -5165,7 +7330,8 @@ async function executeCommand(args) {
     }
     const summary = await runQueryRecord(args);
     const result = queryRecordJsonResult(args, summary);
-    console.log(args.json ? JSON.stringify(result, null, 2) : summary.uuid);
+    const output = formatQueryRecordOutput(args, summary);
+    console.log(args.json ? JSON.stringify(result, null, 2) : output);
     return summary.ok ? 0 : 1;
   }
   if (args.command === "show") {
@@ -5177,7 +7343,7 @@ async function executeCommand(args) {
         artifact: result.task.taskDir,
         uuid: result.task.uuid || result.summary?.uuid || "",
         count: result.task.expectedCount || result.summary?.expectedCount || 0,
-        message: "Task shown",
+        message: isSingleProjectMode(args) ? "Project shown" : "Task shown",
         data: result,
       }));
     } else {
@@ -5275,6 +7441,10 @@ async function executeCommand(args) {
     return summary.ok ? 0 : 1;
   }
   if (args.command === "latest") {
+    if (isSingleProjectMode(args)) {
+      console.log(args.taskId);
+      return 0;
+    }
     const latest = readLatestTaskId(args.tasksRoot);
     if (!latest) {
       if (args.json) printJsonResult(llmResult(args, {
@@ -5514,6 +7684,8 @@ module.exports = {
   setCurrentTaskId,
   checkSid,
   formatCheckSidResult,
+  formatQueryBuildOutput,
+  formatQueryRecordOutput,
   executeAuthCommand,
   prepareAuthCredentials,
   authDependencies,
@@ -5571,6 +7743,7 @@ module.exports = {
   omitSidArgs,
   makeTaskId,
   parseExportText,
+  readQueryBatchExpressions,
   isFailedTxtRunSummary,
   isUnverifiedPartialTxtSummary,
   parseBibEntryCount,
@@ -5600,7 +7773,17 @@ module.exports = {
   runPool,
   chunkItemsByCount,
   formatRuntime,
+  formatLocalDateTime,
+  formatDbLookup,
   prepareWosRequestContext,
+  exportIngestRecordsFromUuid,
+  collectRelationWosIdsForIngest,
+  exportIngestRecordsByWosIds,
+  orderedRecordsForWosIds,
+  writeWosIngestSummary,
+  runDbLookup,
+  runQueryIngest,
+  runRecordIngest,
   randomUppercaseLetters,
   pageContextUuid,
   readWosIdsCsv,
@@ -5613,11 +7796,13 @@ module.exports = {
   announceResolvedWosUuid,
   prepareWosExport,
   readTaskIndex,
+  listTaskNames,
   normalizeTaskId,
   getRunPaths,
   withRawSource,
   cleanRunLayout,
   rawBatchDir,
+  bibBatchDir,
   rawWindowDirs,
   rawBatchFiles,
   rawUuidCompleteMarkerPath,
@@ -5633,4 +7818,7 @@ module.exports = {
   parseExistingRawBatches,
   readJson,
   writeJson,
+  runAuditHtml,
+  runAuditExport,
+  defaultAuditReportDir,
 };

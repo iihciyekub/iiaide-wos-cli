@@ -1,60 +1,34 @@
 # WOS Curl Reference
 
-This document records the request-level WOS methods that the CLI mirrors through
-the browser-injected `import/wos.js` helper. It is for debugging request shape
-and implementation parity; normal users should start with `README.md` and
-`docs/usage.md`.
+This file tracks the request-level WOS behavior mirrored by the injected
+`import/wos.js` helper.
 
 ## SID Initialization
 
-Every Playwright-backed WOS operation starts from the canonical SID entry URL:
+Every browser-backed WOS session starts from:
 
 ```text
 https://www.webofscience.com/wos/?Init=Yes&SrcApp=CR&SID=<SID>
 ```
 
-Domain settings may shape generated summary URLs, but SID login and validation
-start from that canonical entry URL.
+The CLI validates session readiness from WOS session signals such as
+`window.sessionData.BasicProperties.SID`, not from a blind `networkidle` wait.
 
-The CLI also uses a lightweight HTTP probe before opening Playwright. It treats
-the SID as quickly invalid when the final response lands off the configured WOS
-domain or when the returned WOS shell contains `window.sessionData = undefined`
-instead of a populated `BasicProperties.SID`.
+## Query And Record UUID Discovery
 
-## Summary Page Information
-
-CLI methods:
+Browser bridge:
 
 ```text
-readSummaryInfo()
-prepareWosRequestContext()
+window.wos.query.*
+window.wos.record.*
+window.wos.results.fetchCurrentPageInfo()
 ```
 
 Used by:
 
 ```bash
-iiaide-wos run --uuid "${WOS_UUID}"
-iiaide-wos bib --uuid "${WOS_UUID}"
-```
-
-The CLI opens the WOS summary page, injects `import/wos.js`, reads page-exposed
-metadata such as the final UUID and record count, and then uses the browser-side
-export helper for the actual batch requests.
-
-## Query And Record UUID Discovery
-
-CLI bridge:
-
-```text
-callWosBrowserApi() -> window.wos.query.*
-callWosBrowserApi() -> window.wos.record.*
-callWosBrowserApi() -> window.wos.results.fetchCurrentPageInfo()
-```
-
-User commands:
-
-```bash
 iiaide-wos query build --expr "${WOS_QUERY}"
+iiaide-wos query batch --expr "${WOS_QUERY_A}" --expr "${WOS_QUERY_B}"
 iiaide-wos query batch --expr-file "./queries.txt" --jsonl
 iiaide-wos query parse --text "${SEARCH_TEXT}"
 iiaide-wos query ids --wosid "${WOS_ID}" --doi "${DOI}"
@@ -62,41 +36,27 @@ iiaide-wos record relations --wosid "${WOS_ID}" --type citations
 iiaide-wos record shared --wosid "${WOS_ID_A}" --with "${WOS_ID_B}"
 ```
 
-These commands use WOS browser-side route/query helpers, then read the current
-summary page UUID/count through `window.wos.results.fetchCurrentPageInfo()`.
-They write task metadata only and leave raw TXT/BibTeX downloading to `run` and
-`bib`.
+These commands discover UUID/count metadata only. They do not download raw TXT
+or BibTeX.
+`query build` prints compact single-line JSON by default and reuses the same
+successful task/query text from SQLite unless `--force` is passed. Add `--json`
+for the full structured result envelope.
+`query batch` prints JSONL by default, accepts repeated `--expr`, and runs
+uncached expressions sequentially in the same WOS browser session.
 
-`query batch` does not introduce a separate WOS request shape. It prepares one
-WOS session, then calls the same browser-side advanced-query build path once
-per non-empty line in `--expr-file`.
+## TXT Export
 
-Summary URL shape:
-
-```bash
-curl -L \
-  "${WOS_BASE_URL}/wos/woscc/summary/${WOS_UUID}/${WOS_SORT_BY}/1" \
-  -o /tmp/wos-summary.html
-```
-
-## Full-Record TXT Export
-
-CLI bridge:
+Browser bridge:
 
 ```text
-exportTxtBatchesViaWosJs() -> window.wos.export.fetchTxtBatches(options)
+window.wos.export.fetchTxtBatches(options)
 ```
 
-User command:
+Used by:
 
 ```bash
-iiaide-wos run --uuid "${WOS_UUID}" --batch-size 500
-```
-
-Batch UUID TXT command:
-
-```bash
-iiaide-wos batch-run --task "batch-demo" --search-root "."
+iiaide-wos run --uuid "${WOS_UUID}"
+iiaide-wos batch-run --search-root "."
 ```
 
 WOS endpoint:
@@ -105,77 +65,104 @@ WOS endpoint:
 POST /api/wosnx/indic/export/saveToFile
 ```
 
-The browser-side helper owns WOS request details such as `saveToFieldTagged`.
-CLI code owns progress display, task logging, deterministic batch filenames,
-and raw batch resume planning.
+The browser helper owns request fields such as `saveToFieldTagged`. The CLI
+owns progress, retry, batch filenames, and audit records.
 
-Raw batch naming:
+For relation result sets, WOS export may require:
 
-```text
-raw/<uuid>/full-record/<uuid>_<start>_<end>.txt
-raw/<uuid>/full-record/author-ascending/<uuid>_<start>_<end>.txt
-raw/<uuid>/full-record/author-descending/<uuid>_<start>_<end>.txt
+```json
+{
+  "isRefQuery": "true"
+}
 ```
 
-The per-sort layout is used only for large UUID exports that exceed the
-100,000-record single-sort WOS window. The CLI passes `sortBy` to the
-browser-side export helper for each window and writes `_wos_export_window.json`
-inside each sort directory so resume planning can distinguish A-Z and Z-A
-batches with the same numeric range.
+`run` auto-retries relation-like failures in ref-query mode, and `--ref-query`
+forces it from the start.
 
 ## BibTeX Export
 
-CLI bridge:
+Browser bridge:
 
 ```text
-exportBibBatchesViaWosJs() -> window.wos.export.fetchBibBatches(options)
+window.wos.export.fetchBibBatches(options)
 ```
 
-User command:
+Used by:
 
 ```bash
-iiaide-wos bib --uuid "${WOS_UUID}" --batch-size 500
+iiaide-wos bib --uuid "${WOS_UUID}"
 ```
 
-WOS endpoint:
+This uses the same WOS export endpoint with a BibTeX action owned by
+`import/wos.js`.
+
+## SQLite Ingest
+
+Used by:
+
+```bash
+iiaide-wos query ingest --expr "${WOS_QUERY}"
+iiaide-wos record ingest --wosid "${WOS_ID}" --type references
+iiaide-wos db list --wosid "${WOS_ID}" --type references --context --json
+```
+
+Rules:
+
+- export window is records `1-500`
+- normal query ingest uses `sortBy=relevance`
+- normal query ingest uses `isRefQuery=false`
+- citations/references/related ingest uses `isRefQuery=true`
+- citations/references/related UUIDs are not treated as directly exportable
+  SQLite ingest UUIDs
+- relation ingest opens the relation summary in `relevance` order, scrolls and
+  collects WOSIDs from at most the first 6 pages, then builds a WOSID/UT query
+  and exports that query's full records
+- relation UUID metadata is stored with `exportMode=front-scroll-wosid` and
+  `uuidDirectExport=false`
+- confirmed zero-count relation results are still inserted into
+  `wosData.sqlite` with `emptyResult=true` and reused on later runs
+- TXT is parsed in memory with `import/WosFieldTags.json`
+- structured rows are stored in `.iiaide-wos-cli/wosData.sqlite`
+- the same SQLite file also stores audit metadata for command runs, query UUID
+  observations, and artifact records
+- intermediate TXT/JSON files are not kept
+
+Advanced-search query build safety:
+
+- `query build` avoids clicking the main WOS Search/run button
+- it prefers `Add to history`
+- when WOS exposes a Search split button, it opens the menu from the arrow icon
+  and chooses `Add to history` so history UUID/count metadata is captured
+
+## Local Project Files
+
+Default local state:
 
 ```text
-POST /api/wosnx/indic/export/saveToFile
+.iiaide-wos-cli/project.json
+.iiaide-wos-cli/state.json
+.iiaide-wos-cli/config.json
+.iiaide-wos-cli/index.json
+.iiaide-wos-cli/latest
+.iiaide-wos-cli/runs/<run-id>/command.json
+.iiaide-wos-cli/runs/<run-id>/runtime.jsonl
+.iiaide-wos-cli/runs/<run-id>/summary.json
+.iiaide-wos-cli/audit/activity.jsonl
+.iiaide-wos-cli/audit/searches.jsonl
+.iiaide-wos-cli/audit/resultsets.jsonl
+.iiaide-wos-cli/audit/artifacts.jsonl
+.iiaide-wos-cli/resultsets/<uuid>/raw/full-record/<uuid>_<start>_<end>.txt
+.iiaide-wos-cli/resultsets/<uuid>/raw/bib/<uuid>_<start>_<end>.bib
+.iiaide-wos-cli/resultsets/<uuid>/exports/bib/<uuid>.bib
+.iiaide-wos-cli/resultsets/<uuid-or-project-id>/<uuid-or-project-id>_wosid.csv
+.iiaide-wos-cli/wosData.sqlite
 ```
-
-The browser-side helper owns WOS request details such as `saveToBibtex`. CLI
-code writes raw batch files and resumes from existing raw `.bib` ranges.
-
-Artifact naming:
-
-```text
-raw/<uuid>/bib/<uuid>_<start>_<end>.bib
-```
-
-## Local-Only Methods
-
-These files are managed locally and do not call WOS request APIs:
-
-```text
-tasks/index.json
-tasks/latest
-tasks/config.json
-~/.iiaide-wos/config.json
-tasks/<task-id>/manifest.json
-tasks/<task-id>/summary.json
-tasks/<task-id>/logs/progress.jsonl
-tasks/<task-id>/raw/<uuid>/full-record/<uuid>_<start>_<end>.txt
-tasks/<task-id>/raw/<uuid>/bib/<uuid>_<start>_<end>.bib
-tasks/<task-id>/raw/<uuid-or-task-id>/full-record/<uuid-or-task-id>_wosid.csv (import only)
-```
-
-The CLI no longer creates, imports, or manages a WOS data SQLite database.
 
 ## Debug Checklist
 
-1. Confirm `WOS_SID` or the saved SID pool contains a current SID.
-2. Confirm the UUID is copied from a normal WOS records summary URL.
-3. Confirm `import/wos.js` exists or pass an explicit `--wosjs <file>`.
-4. Confirm raw batch filenames follow `<uuid>_<start>_<end>.txt` or `.bib`.
-5. Check `logs/progress.jsonl`, `manifest.json`, and `summary.json` in the task
-   directory before re-running with `--force`.
+1. Confirm the SID is current
+2. Confirm the UUID came from a WOS summary URL
+3. Confirm `import/wos.js` is present
+4. Check `.iiaide-wos-cli/runs/<run-id>/runtime.jsonl`
+5. Check `.iiaide-wos-cli/runs/<run-id>/summary.json`
+6. Check `.iiaide-wos-cli/audit/*.jsonl`

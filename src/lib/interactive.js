@@ -1,4 +1,5 @@
 const readline = require("node:readline/promises");
+const { spawn } = require("node:child_process");
 const { stdin, stdout } = require("node:process");
 const { Writable } = require("node:stream");
 const { color, isInteractive } = require("./terminal");
@@ -6,6 +7,7 @@ const { color, isInteractive } = require("./terminal");
 const ORANGE = "33";
 const CLI_AUTHOR = "lyj";
 const CLI_VERSION_UPDATED_AT = "2026-06-10";
+const COMMAND_DOC_URL = "https://github.com/iihciyekub/iiaide-wos-cli/blob/main/docs/commands.md";
 const CONTROL_BACK = Symbol.for("iiaide-wos.interactive.back");
 const CONTROL_QUIT = Symbol.for("iiaide-wos.interactive.quit");
 
@@ -128,7 +130,7 @@ function printHeader(version, workspace = {}) {
   const terminalWidth = Math.max(36, Math.min(stdout.columns || 100, 140));
   const twoColumns = terminalWidth >= 108;
   const panelWidth = twoColumns ? 52 : terminalWidth;
-  const workspacePath = workspace.tasksRoot || `${process.cwd()}/tasks`;
+  const workspacePath = workspace.tasksRoot || `${process.cwd()}/.iiaide-wos-cli`;
   const currentTask = workspace.currentTask || workspace.latestTask || "";
   const sidCheck = workspace.sidCheck || {};
   const sidStatus = workspaceSidStatus(workspace);
@@ -139,8 +141,8 @@ function printHeader(version, workspace = {}) {
   const sidPoolIndex = Number(workspace.sidPoolIndex || -1);
   const activeSidNumber = sidPoolIndex >= 0 ? sidPoolIndex + 1 : 0;
   const rightLines = [
-    kvLine("Workspace", workspacePath),
-    kvLine("Task ID", currentTask ? highlightTaskId(currentTask) : "none"),
+    kvLine(workspace.projectMode ? "Project store" : "Workspace", workspacePath),
+    kvLine(workspace.projectMode ? "Project ID" : "Task ID", currentTask ? highlightTaskId(currentTask) : "none"),
     "",
     kvLine("Auth", sidOkLabel(sidStatus)),
     kvLine("SID Value", sidValue || "none"),
@@ -260,6 +262,11 @@ function isControlInput(value) {
   return isBackInput(value) || isQuitInput(value);
 }
 
+function isLikelySidInput(value) {
+  const text = String(value || "").trim();
+  return /^[A-Za-z0-9_-]{12,}$/.test(text) && !/^(manual|auto|browser|pool|wait|help|docs)$/i.test(text);
+}
+
 function isBackResult(value) {
   return value === CONTROL_BACK;
 }
@@ -291,6 +298,12 @@ function defaultTaskId() {
 }
 
 function listTaskHints(workspace) {
+  if (workspace?.projectMode) {
+    const currentTask = workspace.currentTask || workspace.latestTask || "";
+    stdout.write(`${color("1", "Current project", stdout)}\n`);
+    stdout.write(`  ${currentTask ? color("36", currentTask, stdout) : "none"}\n\n`);
+    return;
+  }
   const tasks = Array.isArray(workspace.tasks) ? workspace.tasks : [];
   if (!tasks.length) {
     stdout.write(`${color("2", "No tasks in this directory yet. Enter creates a new task.", stdout)}\n\n`);
@@ -468,15 +481,32 @@ function shortcutRow(items) {
   stdout.write(`  ${text}\n`);
 }
 
-async function askWorkflow(rl) {
+function openUrl(url, options = {}) {
+  const platform = options.platform || process.platform;
+  const spawnFn = options.spawn || spawn;
+  const command = platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open";
+  const args = platform === "win32" ? ["/c", "start", "", url] : [url];
+  const child = spawnFn(command, args, { stdio: "ignore", detached: true });
+  child.on?.("error", () => {});
+  child.unref?.();
+  return { command, args };
+}
+
+async function askWorkflow(rl, workspace = {}) {
+  const projectMode = Boolean(workspace.projectMode);
   workflowGroup("1", "Download literature");
-  workflowItem("1.1", "UUID - TXT format", "URL/UUID -> raw/<uuid>/full-record/*.txt and WOS IDs");
-  workflowItem("1.2", "UUID - BIB format", "URL/UUID -> raw/<uuid>/bib/*.bib");
+  workflowItem("1.1", "UUID - TXT format", "URL/UUID -> resultsets/<uuid>/raw/full-record/*.txt and WOS IDs");
+  workflowItem("1.2", "UUID - BIB format", "URL/UUID -> resultsets/<uuid>/raw/bib/*.bib");
   workflowItem("1.3", "Batch UUID CSV - TXT", "Search uuid.csv files recursively and resume TXT downloads per UUID");
-  workflowGroup("3", "Task manager");
-  workflowItem("3.1", "New", "Create a fresh current task");
-  workflowItem("3.2", "Switch", "Select an existing current task");
-  workflowItem("3.3", "Clear", "Remove a managed task");
+  if (projectMode) {
+    workflowGroup("3", "Project");
+    workflowItem("3.3", "Clear data", "Remove the managed .iiaide-wos-cli project store in this directory");
+  } else {
+    workflowGroup("3", "Task manager");
+    workflowItem("3.1", "New", "Create a fresh current task");
+    workflowItem("3.2", "Switch", "Select an existing current task");
+    workflowItem("3.3", "Clear", "Remove a managed task");
+  }
   workflowGroup("5", "Settings");
   workflowItem("5.1", "Playwright visible", "Choose whether WOS browser work opens a visible window");
   workflowItem("5.2", "Add SIDs", "Paste one or more SIDs into the saved SID pool");
@@ -484,17 +514,21 @@ async function askWorkflow(rl) {
   workflowGroup("6", "Auth producer");
   workflowItem("6.1", "MUST login", "Run one MUST SSO login and save the produced SID");
   workflowItem("6.2", "MUST monitor", "Keep this CLI running to refill the SID pool");
-  shortcutRow([["c", "Check SID"], ["u", "Update"], ["B", "Back"], ["q", "Exit"]]);
+  shortcutRow([["?", "Commands doc"], ["c", "Check SID"], ["u", "Update"], ["B", "Back"], ["q", "Exit"]]);
   stdout.write("\n");
 
   for (;;) {
     const choice = (await ask(rl, "Select workflow")).toLowerCase();
     if (isBackInput(choice)) return CONTROL_BACK;
     if (isQuitInput(choice)) return CONTROL_QUIT;
+    if (choice === "?" || choice === "help" || choice === "docs") return "?";
     if (choice === "c") return "c";
     if (choice === "u") return "u";
-    if (["1.1", "1.2", "1.3", "3.1", "3.2", "3.3", "5.1", "5.2", "5.4", "6.1", "6.2"].includes(choice)) return choice;
-    stdout.write(`${color("33", "Required:", stdout)} choose 1.1, 1.2, 1.3, 3.1, 3.2, 3.3, 5.1, 5.2, 5.4, 6.1, 6.2, c to check SID, u to update, B to go back, or q to quit\n`);
+    const validChoices = projectMode
+      ? ["1.1", "1.2", "1.3", "3.3", "5.1", "5.2", "5.4", "6.1", "6.2"]
+      : ["1.1", "1.2", "1.3", "3.1", "3.2", "3.3", "5.1", "5.2", "5.4", "6.1", "6.2"];
+    if (validChoices.includes(choice)) return choice;
+    stdout.write(`${color("33", "Required:", stdout)} choose ${projectMode ? "1.1, 1.2, 1.3, 3.3, 5.1, 5.2, 5.4, 6.1, 6.2" : "1.1, 1.2, 1.3, 3.1, 3.2, 3.3, 5.1, 5.2, 5.4, 6.1, 6.2"}, ? to open command docs, c to check SID, u to update, B to go back, or q to quit\n`);
   }
 }
 
@@ -566,9 +600,14 @@ async function askSidFromBrowserOrManual(getRl, readBrowserSid, promptManualSid,
     option("B", "Back", "Return to workflow selection");
     option("q", "Exit", "Close without running a command");
     stdout.write("\n");
-    const action = (await ask(getRl(), "Select SID method")).toLowerCase();
+    const rawAction = await ask(getRl(), "Select SID method");
+    const action = rawAction.toLowerCase();
     if (isBackInput(action)) return CONTROL_BACK;
     if (isQuitInput(action)) return CONTROL_QUIT;
+    if (isLikelySidInput(rawAction)) {
+      stdout.write(`${color("32", "SID:", stdout)} received manually.\n\n`);
+      return rawAction.trim();
+    }
     if (action === "1" || action === "m" || action === "manual") {
       const sid = await promptManualSid();
       if (isBackResult(sid)) continue;
@@ -672,9 +711,15 @@ async function interactiveArgs(version, workspace, helpers = {}) {
 
   try {
     const generatedTaskId = helpers.makeTaskId?.() || defaultTaskId();
-    const choice = await askWorkflow(rl);
+    const choice = await askWorkflow(rl, activeWorkspace);
     if (isBackResult(choice)) return { refresh: true };
     if (isQuitResult(choice)) return null;
+
+    if (choice === "?") {
+      openUrl(COMMAND_DOC_URL);
+      stdout.write(`${color("32", "Docs:", stdout)} opened ${COMMAND_DOC_URL}\n\n`);
+      return { refresh: true };
+    }
 
     if (choice === "c") {
       return ["check", "--tasks-root", activeWorkspace.tasksRoot];
@@ -684,7 +729,7 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       return ["update"];
     }
 
-    if (choice === "3.1") {
+    if (choice === "3.1" && !activeWorkspace.projectMode) {
       const selection = await askTaskSelection(rl, activeWorkspace, { mode: "new", generatedTaskId });
       if (isBackResult(selection)) return { refresh: true };
       if (isQuitResult(selection)) return null;
@@ -695,7 +740,7 @@ async function interactiveArgs(version, workspace, helpers = {}) {
       return { refresh: true };
     }
 
-    if (choice === "3.2") {
+    if (choice === "3.2" && !activeWorkspace.projectMode) {
       const selection = await askTaskSelection(rl, activeWorkspace, { mode: "existing", generatedTaskId });
       if (isBackResult(selection)) return { refresh: true };
       if (isQuitResult(selection)) return null;
@@ -708,6 +753,10 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     }
 
     if (choice === "3.3") {
+      if (activeWorkspace.projectMode) {
+        stdout.write(`${color("32", "Clearing project data:", stdout)} ${activeWorkspace.tasksRoot}\n\n`);
+        return ["clear", "--tasks-root", activeWorkspace.tasksRoot];
+      }
       const selection = await askTaskSelection(rl, activeWorkspace, { mode: "existing", generatedTaskId });
       if (isBackResult(selection)) return { refresh: true };
       if (isQuitResult(selection)) return null;
@@ -772,10 +821,12 @@ async function interactiveArgs(version, workspace, helpers = {}) {
     }
     const taskId = selection.taskId;
     const task = selection.task;
-    stdout.write(`${color("32", "Using task:", stdout)} ${taskId}\n\n`);
+    stdout.write(`${color("32", activeWorkspace.projectMode ? "Using project:" : "Using task:", stdout)} ${taskId}\n\n`);
 
     if (choice === "1.3") {
-      return ["batch-run", "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot, "--allow-large-export"];
+      return activeWorkspace.projectMode
+        ? ["batch-run", "--allow-large-export"]
+        : ["batch-run", "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot, "--allow-large-export"];
     }
 
     const sourceFallback = [task?.url, task?.uuid].find(isWosSourceLike) || "";
@@ -808,7 +859,9 @@ async function interactiveArgs(version, workspace, helpers = {}) {
         stdout.write(`${color("32", "SID:", stdout)} saved.\n\n`);
       }
     }
-    const result = [command, sourceFlag, source, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot];
+    const result = activeWorkspace.projectMode
+      ? [command, sourceFlag, source]
+      : [command, sourceFlag, source, "--task", taskId, "--tasks-root", activeWorkspace.tasksRoot];
     if (command !== "bib") result.push("--reuse-raw");
     if (sid) result.push("--sid", sid);
     return result;
@@ -829,12 +882,14 @@ module.exports = {
   askTaskSelection,
   listTaskHints,
   printHeader,
+  openUrl,
   promptSid,
   promptSidBatch,
   askSidFromBrowserOrManual,
   resolveTaskSelection,
   isBackResult,
   isQuitResult,
+  isLikelySidInput,
   taskSelectionHint,
   taskPromptHelp,
 };

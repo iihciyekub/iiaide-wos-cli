@@ -53,6 +53,7 @@ async function callWosJsExport(page, methodName, options = {}) {
         batchSize: options.batchSize,
         sortBy: options.sortBy,
         filters: options.filters,
+        isRefQuery: options.isRefQuery,
       },
     }
   );

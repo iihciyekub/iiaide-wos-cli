@@ -1,53 +1,41 @@
 # Documentation Guide
 
-This directory stays lightweight on purpose. Each file has one role.
+This docs set assumes the default single-project model:
 
-## Document Roles
+```text
+<project>/.iiaide-wos-cli/
+```
+
+## File Roles
 
 - `README.md`
-  Install, quick start, command entry points, and the top-level project scope.
+  Install, quick start, project model, and command entry points
 - `docs/usage.md`
-  User-facing workflows, task lifecycle, task states, artifact layout, and
-  command behavior.
+  Workflow, artifact layout, and project lifecycle
 - `docs/commands.md`
-  Structured CLI command reference for humans, scripts, and LLM agents. Use it
-  when adding or changing command flags, stdout contracts, or examples.
+  Structured command contract
+- `docs/command-cheatsheet.html`
+  Static categorized command page with copy buttons
+- `docs/audit-view.html`
+  Local audit viewer template served by `db audit-html` and reused by static
+  audit export output, using the same light audit workspace style and command
+  manual layout
 - `docs/llm.md`
-  Agent-specific calling rules, JSON envelope, error codes, recovery actions,
-  and command recipes.
+  Agent-facing calling rules and recipes
 - `docs/curl.md`
-  Request-level WOS reference for debugging, reproducing exports, and keeping
-  CLI behavior aligned with the browser-side `wos.js` methods.
+  WOS request/init/export parity notes
 - `docs/auth-must.md`
-  MUST SSO SID producer design, credential boundaries, monitor behavior, and
-  handoff into the global saved SID pool.
+  MUST auth producer notes
 - `CHANGELOG.md`
-  Versioned behavior changes.
+  Released behavior changes
 - `AGENTS.md`
-  Development rules, review checklist, and doc-sync expectations for future
-  code changes.
+  Repository development rules
 
-## Update Rules
+## Sync Rules
 
-Update docs in the same change as code:
-
-- If install, command names, or quick-start commands change, update `README.md`.
-- If command flags, stdout contracts, or examples change, update
-  `docs/commands.md`; if the change affects agent behavior, update
-  `docs/llm.md`.
-- If task flow, task outputs, prompts, progress, confirmation, or lifecycle
-  behavior changes, update `docs/usage.md`.
-- If SID init, summary preparation, export endpoints, payload shape, or
-  browser-side WOS method usage changes, update `docs/curl.md`.
-- If auth producer behavior, credential handling, monitor heartbeat, or SID pool
-  handoff changes, update `docs/auth-must.md` and the authentication section in
-  `docs/usage.md`.
-- If behavior changes in any user-visible way, add a concise `CHANGELOG.md`
-  entry and bump `package.json` and `package-lock.json`.
-
-## Keep Or Remove
-
-- Avoid adding a new doc unless it has a stable, distinct role.
-- Remove docs that only repeat `README.md` or another doc without adding a
-  separate maintenance value.
-- Prefer renaming a misleading doc over keeping an ambiguous title.
+- If command shape or default storage changes, update `README.md`,
+  `docs/usage.md`, `docs/commands.md`, and `docs/llm.md`
+- If WOS session/bootstrap/export behavior changes, update `docs/curl.md`
+- If menu behavior changes, update `README.md`, `docs/usage.md`, and
+  `docs/command-cheatsheet.html`
+- Every behavior change must also bump version and changelog

@@ -1,0 +1,1220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WOS Audit Timeline</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #ffffff;
+      --panel: #ffffff;
+      --panel-2: #f7f7f8;
+      --text: #202123;
+      --muted: #6e6e80;
+      --line: #ececf1;
+      --line-strong: #d9d9e3;
+      --accent: #111111;
+      --accent-soft: #f4f4f6;
+      --ok: #0f766e;
+      --warn: #a16207;
+      --bad: #b42318;
+      --shadow: none;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 13px/1.42 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .page {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 16px 20px 28px;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+      margin-bottom: 14px;
+    }
+    .title {
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 0;
+    }
+    .sub {
+      color: var(--muted);
+      word-break: break-all;
+      font-size: 12px;
+      margin-top: 3px;
+    }
+    .header-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+    .header-actions button {
+      width: auto;
+    }
+    .sync-status {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .toolbar, .stats, .content {
+      display: grid;
+      gap: 10px;
+    }
+    .toolbar {
+      grid-template-columns: minmax(220px, 1.2fr) minmax(160px, 0.8fr) 92px auto;
+      align-items: end;
+      margin-bottom: 14px;
+    }
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+    .field label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    input, button, select {
+      width: 100%;
+      border: 1px solid var(--line-strong);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 7px 10px;
+      font: inherit;
+      box-shadow: var(--shadow);
+    }
+    button {
+      cursor: pointer;
+      background: var(--panel-2);
+      white-space: nowrap;
+    }
+    button.primary {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+      font-weight: 600;
+      width: auto;
+      min-width: 34px;
+      padding: 0 9px;
+      display: inline-grid;
+      place-items: center;
+    }
+    .stats {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin-bottom: 14px;
+    }
+    .stat, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      box-shadow: var(--shadow);
+    }
+    .stat .k {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+    .stat .v {
+      font-size: 20px;
+      font-weight: 600;
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .segmented {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px;
+      background: #f0f0f2;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
+      width: fit-content;
+      max-width: 100%;
+    }
+    .segmented button {
+      width: auto;
+      min-width: 0;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      box-shadow: none;
+      padding: 7px 13px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .segmented button.active {
+      background: #ffffff;
+      color: var(--accent);
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08), inset 0 1px 0 rgba(255,255,255,0.95);
+    }
+    .segmented button:hover:not(.active) {
+      background: rgba(255,255,255,0.4);
+    }
+    .content {
+      grid-template-columns: minmax(0, 1.75fr) minmax(280px, 0.75fr);
+      align-items: start;
+    }
+    .list {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+    .item {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+      box-shadow: var(--shadow);
+    }
+    .run-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      width: fit-content;
+      max-width: 100%;
+      padding: 3px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--line-strong);
+      background: #fafafa;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .run-pill .run-pill-label {
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0;
+      font-size: 11px;
+    }
+    .run-pill .run-pill-value {
+      min-width: 0;
+    }
+    .timeline {
+      position: relative;
+      display: grid;
+      gap: 8px;
+    }
+    .timeline::before {
+      content: "";
+      position: absolute;
+      left: 10px;
+      top: 6px;
+      bottom: 6px;
+      width: 1px;
+      background: var(--line-strong);
+    }
+    .timeline-item {
+      position: relative;
+      margin-left: 30px;
+    }
+    .timeline-item::before {
+      content: "";
+      position: absolute;
+      left: -24px;
+      top: 16px;
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: #ffffff;
+      border: 2px solid var(--accent);
+    }
+    .timeline-item.is-open::before {
+      background: var(--accent);
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: space-between;
+    }
+    .row-start {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      background: var(--accent-soft);
+      font-size: 12px;
+    }
+    .badge.ok { color: var(--ok); }
+    .badge.fail { color: var(--bad); }
+    .badge.warn { color: var(--warn); }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      word-break: break-all;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 96px 1fr;
+      gap: 4px 8px;
+      font-size: 12px;
+    }
+    .kv .key { color: var(--muted); }
+    .side {
+      display: grid;
+      gap: 10px;
+      position: sticky;
+      top: 16px;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #353740;
+      background: #f7f7f8;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    .empty, .error {
+      padding: 18px;
+      text-align: center;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      background: #fbfbfd;
+    }
+    .error { color: var(--bad); }
+    .mini {
+      color: #0f172a;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    button.mini {
+      border: 0;
+      background: transparent;
+      padding: 0;
+      box-shadow: none;
+    }
+    .mini:hover {
+      text-decoration: underline;
+    }
+    .summary-line {
+      font-size: 13px;
+      color: var(--text);
+    }
+    details.item {
+      padding: 0;
+      overflow: hidden;
+    }
+    details.item summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    details.item summary::-webkit-details-marker {
+      display: none;
+    }
+    .timeline-summary {
+      display: grid;
+      gap: 8px;
+    }
+    .timeline-field {
+      display: grid;
+      grid-template-columns: 96px minmax(0, 1fr);
+      gap: 4px 8px;
+      align-items: start;
+      font-size: 12px;
+    }
+    .timeline-field .key {
+      color: var(--muted);
+    }
+    .timeline-field .value {
+      min-width: 0;
+    }
+    .time {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(217, 217, 227, 0.8);
+      background: rgba(255, 255, 255, 0.7);
+      white-space: nowrap;
+    }
+    .timeline-body {
+      padding: 0 10px 10px;
+      display: grid;
+      gap: 8px;
+      border-top: 1px solid var(--line);
+      background: linear-gradient(to bottom, rgba(247,247,248,0.78), rgba(255,255,255,0));
+    }
+    .timeline-toggle {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .commands-shell {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 220px minmax(0, 1fr);
+      align-items: start;
+    }
+    .commands-head,
+    .command-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+    .commands-nav {
+      display: grid;
+      gap: 8px;
+      position: sticky;
+      top: 16px;
+      padding: 2px 0 2px 12px;
+      border-left: 1px solid var(--line-strong);
+      background: transparent;
+      box-shadow: none;
+    }
+    .commands-main,
+    .commands-sections {
+      display: grid;
+      gap: 10px;
+    }
+    .commands-head-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: nowrap;
+    }
+    .commands-eyebrow {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .commands-title,
+    .commands-doc-title {
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .commands-nav .commands-title {
+      font-size: 13px;
+    }
+    .commands-nav .commands-summary {
+      display: none;
+    }
+    .commands-summary {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .commands-vars {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      padding-top: 8px;
+    }
+    .commands-var-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .commands-var-input {
+      min-width: min(360px, 100%);
+      height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      padding: 0 9px;
+      font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .commands-page-list {
+      display: grid;
+      gap: 6px;
+      padding-bottom: 0;
+    }
+    .commands-page-list button {
+      width: 100%;
+      justify-content: flex-start;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      box-shadow: var(--shadow);
+      padding: 5px 8px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: left;
+    }
+    .commands-page-list button.active {
+      background: var(--accent-soft);
+      color: var(--accent);
+      box-shadow: var(--shadow);
+      font-weight: 600;
+    }
+    .commands-pager {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: nowrap;
+      white-space: nowrap;
+    }
+    .commands-pager button {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border-radius: 6px;
+      display: inline-grid;
+      place-items: center;
+      background: var(--panel);
+    }
+    .commands-page-indicator {
+      min-width: 46px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    button:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    .command-card {
+      padding: 10px;
+      display: grid;
+      gap: 10px;
+    }
+    .command-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .command-card-title {
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .command-blocks {
+      display: grid;
+      gap: 8px;
+    }
+    .command-line {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f7f7f8;
+      padding: 7px 7px 7px 10px;
+    }
+    .command-line code {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #202123;
+    }
+    .copy-icon {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 6px;
+      color: var(--muted);
+      background: transparent;
+    }
+    .copy-icon:hover {
+      background: #ffffff;
+      color: var(--text);
+    }
+    .copy-icon svg {
+      width: 14px;
+      height: 14px;
+      stroke: currentColor;
+    }
+    .nav-icon {
+      width: 14px;
+      height: 14px;
+      stroke: currentColor;
+    }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .command-notes {
+      display: grid;
+      gap: 6px;
+    }
+    .command-note {
+      color: var(--muted);
+      font-size: 13px;
+      padding-left: 14px;
+      position: relative;
+    }
+    .command-note::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 8px;
+      width: 5px;
+      height: 5px;
+      border-radius: 999px;
+      background: var(--line-strong);
+    }
+    @media (max-width: 960px) {
+      .toolbar, .stats, .content, .commands-shell {
+        grid-template-columns: 1fr;
+      }
+      .side {
+        position: static;
+      }
+      .commands-nav {
+        position: static;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="header">
+      <div>
+        <div class="title">WOS Audit Timeline</div>
+        <div class="sub" id="projectMeta">Loading...</div>
+      </div>
+      <div class="header-actions">
+        <button type="button" id="syncBtn" title="Sync" aria-label="Sync">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12a9 9 0 0 0-15.5-6.4L3 8"></path>
+            <path d="M3 3v5h5"></path>
+            <path d="M3 12a9 9 0 0 0 15.5 6.4L21 16"></path>
+            <path d="M16 21h5v-5"></path>
+          </svg>
+        </button>
+        <span class="sync-status" id="syncStatus">Not synced</span>
+      </div>
+    </div>
+
+    <div class="tabs segmented" id="surfaceTabs" style="margin-bottom:18px;">
+      <button type="button" data-surface="audit" class="active">Audit</button>
+      <button type="button" data-surface="commands">Commands</button>
+    </div>
+
+    <section id="auditSurface">
+      <form class="toolbar" id="filtersForm">
+        <div class="field">
+          <label for="uuidInput">UUID</label>
+          <input id="uuidInput" name="uuid" placeholder="Optional result-set UUID">
+        </div>
+        <div class="field">
+          <label for="wosidInput">WOSID</label>
+          <input id="wosidInput" name="wosid" placeholder="Optional WOS:...">
+        </div>
+        <div class="field">
+          <label for="limitInput">Limit</label>
+          <input id="limitInput" name="limit" type="number" min="1" max="2000" value="200">
+        </div>
+        <button type="button" id="resetBtn">Reset</button>
+      </form>
+
+      <div class="stats" id="stats"></div>
+
+      <div class="tabs segmented" id="tabs">
+        <button type="button" data-tab="timeline" class="active">Timeline</button>
+        <button type="button" data-tab="runs">Runs</button>
+        <button type="button" data-tab="searches">Searches</button>
+        <button type="button" data-tab="artifacts">Artifacts</button>
+      </div>
+
+      <div class="content">
+        <div id="mainList" class="list"></div>
+        <div class="side">
+          <div class="panel">
+            <div class="meta" style="margin-bottom:8px;">Current filters</div>
+            <pre id="filtersJson">{}</pre>
+          </div>
+          <div class="panel">
+            <div class="meta" style="margin-bottom:8px;">Selection detail</div>
+            <pre id="detailJson">Click a UUID or WOSID to inspect details.</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="commandsSurface" style="display:none;">
+      <div class="commands-shell">
+        <div class="commands-nav">
+          <div class="commands-eyebrow">Command Manual</div>
+          <div class="commands-title">CLI Help</div>
+          <div class="commands-summary">Project commands, WOS workflows, export paths, audit review, and auth utilities in one place.</div>
+          <div class="commands-page-list" id="commandsPageList"></div>
+        </div>
+        <div class="commands-main">
+          <div class="commands-head panel">
+            <div class="commands-head-top">
+              <div>
+                <div class="commands-eyebrow" id="commandsEyebrow">Loading</div>
+                <div class="commands-doc-title" id="commandsDocTitle">Loading command docs...</div>
+              </div>
+              <div class="commands-pager">
+                <button type="button" id="commandsPrev" aria-label="Previous page" title="Previous page">
+                  <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="m15 18-6-6 6-6"></path>
+                  </svg>
+                </button>
+                <div class="commands-page-indicator" id="commandsPageIndicator">1 / 1</div>
+                <button type="button" id="commandsNext" aria-label="Next page" title="Next page">
+                  <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="m9 18 6-6-6-6"></path>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div class="commands-summary" id="commandsDocSummary"></div>
+            <div class="commands-vars">
+              <label class="commands-var-label" for="commandsWosid">WOSID</label>
+              <input class="commands-var-input" id="commandsWosid" value="WOS:000000000000001" spellcheck="false">
+            </div>
+          </div>
+          <div class="commands-sections" id="commandsSections"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const EMBEDDED_COMMAND_DOCS = "__COMMAND_DOCS_JSON__";
+    const state = {
+      surface: "audit",
+      tab: "timeline",
+      overview: null,
+      detail: null,
+      commands: Array.isArray(EMBEDDED_COMMAND_DOCS) ? EMBEDDED_COMMAND_DOCS : [],
+      commandPage: 0,
+    };
+
+    const nodes = {
+      projectMeta: document.getElementById("projectMeta"),
+      syncBtn: document.getElementById("syncBtn"),
+      syncStatus: document.getElementById("syncStatus"),
+      surfaceTabs: document.getElementById("surfaceTabs"),
+      auditSurface: document.getElementById("auditSurface"),
+      commandsSurface: document.getElementById("commandsSurface"),
+      filtersForm: document.getElementById("filtersForm"),
+      uuidInput: document.getElementById("uuidInput"),
+      wosidInput: document.getElementById("wosidInput"),
+      limitInput: document.getElementById("limitInput"),
+      stats: document.getElementById("stats"),
+      mainList: document.getElementById("mainList"),
+      filtersJson: document.getElementById("filtersJson"),
+      detailJson: document.getElementById("detailJson"),
+      resetBtn: document.getElementById("resetBtn"),
+      tabs: document.getElementById("tabs"),
+      commandsPageList: document.getElementById("commandsPageList"),
+      commandsEyebrow: document.getElementById("commandsEyebrow"),
+      commandsDocTitle: document.getElementById("commandsDocTitle"),
+      commandsDocSummary: document.getElementById("commandsDocSummary"),
+      commandsSections: document.getElementById("commandsSections"),
+      commandsPrev: document.getElementById("commandsPrev"),
+      commandsNext: document.getElementById("commandsNext"),
+      commandsPageIndicator: document.getElementById("commandsPageIndicator"),
+      commandsWosid: document.getElementById("commandsWosid"),
+    };
+
+    function escapeHtml(text) {
+      return String(text ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function qs() {
+      const params = new URLSearchParams(location.search);
+      return {
+        uuid: params.get("uuid") || "",
+        wosid: params.get("wosid") || "",
+        limit: params.get("limit") || "200",
+      };
+    }
+
+    function syncForm(filters) {
+      nodes.uuidInput.value = filters.uuid || "";
+      nodes.wosidInput.value = filters.wosid || "";
+      if (filters.wosid) nodes.commandsWosid.value = filters.wosid;
+      nodes.limitInput.value = filters.limit || 200;
+    }
+
+    function setQuery(filters) {
+      const params = new URLSearchParams();
+      if (filters.uuid) params.set("uuid", filters.uuid);
+      if (filters.wosid) params.set("wosid", filters.wosid);
+      if (filters.limit) params.set("limit", String(filters.limit));
+      history.replaceState({}, "", `${location.pathname}?${params.toString()}`);
+    }
+
+    async function fetchJson(url) {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    }
+
+    function copyText(text, trigger) {
+      navigator.clipboard.writeText(text);
+      if (!trigger) return;
+      const previous = trigger.innerHTML;
+      trigger.innerHTML = checkIcon();
+      setTimeout(() => {
+        trigger.innerHTML = previous;
+      }, 900);
+    }
+
+    function copyIcon(title = "Copy command") {
+      return `
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+        </svg>
+        <span class="sr-only">${escapeHtml(title)}</span>
+      `;
+    }
+
+    function checkIcon(title = "Copied") {
+      return `
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20 6 9 17l-5-5"></path>
+        </svg>
+        <span class="sr-only">${escapeHtml(title)}</span>
+      `;
+    }
+
+    function currentCommandWosid() {
+      return (nodes.commandsWosid?.value || "WOS:000000000000001").trim() || "WOS:000000000000001";
+    }
+
+    function renderCommandTemplate(command = "") {
+      return String(command || "").replaceAll("WOS:000000000000001", currentCommandWosid());
+    }
+
+    function setSurface(surface) {
+      state.surface = surface === "commands" ? "commands" : "audit";
+      nodes.auditSurface.style.display = state.surface === "audit" ? "" : "none";
+      nodes.commandsSurface.style.display = state.surface === "commands" ? "" : "none";
+      for (const button of nodes.surfaceTabs.querySelectorAll("button[data-surface]")) {
+        button.classList.toggle("active", button.dataset.surface === state.surface);
+      }
+    }
+
+    function renderStats(stats = {}) {
+      const items = [
+        ["Timeline", stats.timeline || 0],
+        ["Runs", stats.runs || 0],
+        ["Searches", stats.searches || 0],
+        ["Artifacts", stats.artifacts || 0],
+      ];
+      nodes.stats.innerHTML = items.map(([k, v]) => `
+        <div class="stat">
+          <div class="k">${escapeHtml(k)}</div>
+          <div class="v">${escapeHtml(v)}</div>
+        </div>
+      `).join("");
+    }
+
+    function rowBadges(item) {
+      const badges = [];
+      if (item.type) badges.push(`<span class="badge">${escapeHtml(item.type)}</span>`);
+      if (item.command || item.operation) badges.push(`<span class="badge">${escapeHtml(item.command || item.operation)}</span>`);
+      if (item.ok === true) badges.push(`<span class="badge ok">ok</span>`);
+      if (item.ok === false) badges.push(`<span class="badge fail">failed</span>`);
+      if (item.role) badges.push(`<span class="badge warn">${escapeHtml(item.role)}</span>`);
+      if (item.kind) badges.push(`<span class="badge">${escapeHtml(item.kind)}</span>`);
+      return badges.join("");
+    }
+
+    function itemSortBy(item = {}) {
+      return item.sortBy || item.data?.sortBy || item.data?.summary?.sortBy || "relevance";
+    }
+
+    function itemUuid(item = {}) {
+      return item.uuid || item.data?.uuid || item.data?.resultset?.uuid || "";
+    }
+
+    function itemSourceWosId(item = {}) {
+      return item.sourceWosId || item.data?.sourceWosId || item.data?.source_wosid || item.data?.summary?.sourceWosId || "";
+    }
+
+    function itemQueryText(item = {}) {
+      return item.queryText || item.data?.queryText || item.data?.summary?.queryText || item.data?.summary?.rowText || item.data?.summary?.source?.value || "";
+    }
+
+    function wosSummaryUrl(uuid, sortBy = "relevance") {
+      return `https://www.webofscience.com/wos/woscc/summary/${encodeURIComponent(uuid)}/${encodeURIComponent(sortBy || "relevance")}/1`;
+    }
+
+    function uuidLink(uuid, sortBy = "relevance") {
+      if (!uuid) return "";
+      return `<a class="mini mono" href="${escapeHtml(wosSummaryUrl(uuid, sortBy))}" data-uuid="${escapeHtml(uuid)}" target="_blank" rel="noreferrer noopener">${escapeHtml(uuid)}</a>`;
+    }
+
+    function wosidLink(wosid) {
+      if (!wosid) return "";
+      return `<button type="button" class="mini mono" data-wosid="${escapeHtml(wosid)}">${escapeHtml(wosid)}</button>`;
+    }
+
+    function timelineMeta(item) {
+      const uuid = itemUuid(item);
+      const sourceWosId = itemSourceWosId(item);
+      const sortBy = itemSortBy(item);
+      const parts = [];
+      if (uuid) parts.push(`<div class="key">UUID</div><div>${uuidLink(uuid, sortBy)}</div>`);
+      if (sourceWosId) parts.push(`<div class="key">WOSID</div><div>${wosidLink(sourceWosId)}</div>`);
+      parts.push(`<div class="key">Count</div><div>${escapeHtml(item.count ?? "")}</div>`);
+      parts.push(`<div class="key">Run ID</div><div class="mono">${escapeHtml(item.runId || "")}</div>`);
+      return `<div class="kv">${parts.join("")}</div>`;
+    }
+
+    function runPill(item = {}) {
+      if (!item.runId) return "";
+      return `<div class="run-pill mono"><span class="run-pill-label">Run ID</span><span class="run-pill-value">${escapeHtml(item.runId)}</span></div>`;
+    }
+
+    const timeKeys = new Set(["createdAt", "finishedAt", "timestamp", "startedAt", "generatedAt", "observedAt", "firstSeenAt", "lastSeenAt", "updatedAt", "completedAt"]);
+
+    function formatLocalTime(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString([], {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        timeZoneName: "short",
+      });
+    }
+
+    function localizeTimes(value, key = "") {
+      if (typeof value === "string" && timeKeys.has(key)) return formatLocalTime(value);
+      if (Array.isArray(value)) return value.map((item) => localizeTimes(item));
+      if (!value || typeof value !== "object") return value;
+      return Object.fromEntries(Object.entries(value).map(([entryKey, entryValue]) => [entryKey, localizeTimes(entryValue, entryKey)]));
+    }
+
+    function renderTimeline(items = []) {
+      if (!items.length) return `<div class="empty">No timeline events.</div>`;
+      return `<div class="timeline">${items.map((item) => `
+        <details class="item timeline-item">
+          <summary>
+            <div class="timeline-summary">
+              <div class="row">
+                <div class="row-start">${rowBadges(item)}</div>
+                <div class="time">${escapeHtml(formatLocalTime(item.timestamp || ""))}</div>
+              </div>
+              <div class="summary-line">${escapeHtml(item.operation || item.command || item.type || "")}</div>
+              ${timelineMeta(item)}
+              ${itemQueryText(item) ? `<div class="timeline-field"><div class="key">Query text</div><div class="value mono">${escapeHtml(itemQueryText(item))}</div></div>` : ""}
+              <div class="timeline-toggle">Expand details</div>
+            </div>
+          </summary>
+          <div class="timeline-body">
+            <pre>${escapeHtml(JSON.stringify(localizeTimes(item.data || {}), null, 2))}</pre>
+          </div>
+        </details>
+      `).join("")}</div>`;
+    }
+
+    function renderRuns(items = []) {
+      if (!items.length) return `<div class="empty">No run rows.</div>`;
+      return items.map((item) => `
+        <div class="item">
+          ${runPill(item)}
+          <div class="row">
+            <div class="row-start">${rowBadges(item)}</div>
+            <div class="time">${escapeHtml(formatLocalTime(item.finishedAt || item.createdAt || ""))}</div>
+          </div>
+          <div class="summary-line">${escapeHtml(item.operation || "")}</div>
+          <div class="kv">
+            <div class="key">Run ID</div>
+            <div class="mono">${escapeHtml(item.runId || "")}</div>
+            <div class="key">UUID</div>
+            <div>${uuidLink(itemUuid(item), itemSortBy(item))}</div>
+            <div class="key">Count</div>
+            <div>${escapeHtml(item.count ?? "")}</div>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function renderSearches(items = []) {
+      if (!items.length) return `<div class="empty">No search rows.</div>`;
+      return items.map((item) => `
+        <div class="item">
+          <div class="row">
+            <div class="row-start">${rowBadges(item)}</div>
+            <div class="time">${escapeHtml(formatLocalTime(item.createdAt || ""))}</div>
+          </div>
+          <div class="summary-line">${escapeHtml(item.queryText || "")}</div>
+          <div class="kv">
+            <div class="key">UUID</div>
+            <div>${uuidLink(itemUuid(item), itemSortBy(item))}</div>
+            <div class="key">Source WOSID</div>
+            <div>${wosidLink(item.sourceWosId)}</div>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function renderArtifacts(items = []) {
+      if (!items.length) return `<div class="empty">No artifact rows.</div>`;
+      return items.map((item) => `
+        <div class="item">
+          <div class="row">
+            <div class="row-start">${rowBadges(item)}</div>
+            <div class="time">${escapeHtml(formatLocalTime(item.createdAt || ""))}</div>
+          </div>
+          <div class="summary-line">${escapeHtml(item.path || "")}</div>
+          <div class="kv">
+            <div class="key">UUID</div>
+            <div>${uuidLink(itemUuid(item), itemSortBy(item))}</div>
+            <div class="key">Role</div>
+            <div>${escapeHtml(item.role || "")}</div>
+            <div class="key">Run ID</div>
+            <div class="mono">${escapeHtml(item.runId || "")}</div>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function renderActiveTab() {
+      const data = state.overview || {};
+      const tab = state.tab;
+      const mapping = {
+        timeline: renderTimeline(data.timeline || []),
+        runs: renderRuns(data.runs || []),
+        searches: renderSearches(data.searches || []),
+        artifacts: renderArtifacts(data.artifacts || []),
+      };
+      nodes.mainList.innerHTML = mapping[tab] || "";
+      for (const button of nodes.tabs.querySelectorAll("button[data-tab]")) {
+        button.classList.toggle("active", button.dataset.tab === tab);
+      }
+    }
+
+    function renderCommandsNav() {
+      const pages = state.commands || [];
+      nodes.commandsPageList.innerHTML = pages.map((page, index) => `
+        <button type="button" class="${index === state.commandPage ? "active" : ""}" data-command-page="${index}">
+          ${escapeHtml(page.title || "")}
+        </button>
+      `).join("");
+    }
+
+    function renderCommandsPage() {
+      const pages = state.commands || [];
+      const page = pages[state.commandPage];
+      if (!page) {
+        nodes.commandsEyebrow.textContent = "Unavailable";
+        nodes.commandsDocTitle.textContent = "No command manual loaded";
+        nodes.commandsDocSummary.textContent = "";
+        nodes.commandsSections.innerHTML = `<div class="empty">No command manual loaded.</div>`;
+        nodes.commandsPageIndicator.textContent = "0 / 0";
+        return;
+      }
+      nodes.commandsEyebrow.textContent = page.eyebrow || "";
+      nodes.commandsDocTitle.textContent = page.title || "";
+      nodes.commandsDocSummary.textContent = page.summary || "";
+      nodes.commandsPageIndicator.textContent = `${state.commandPage + 1} / ${pages.length}`;
+      nodes.commandsPrev.disabled = state.commandPage <= 0;
+      nodes.commandsNext.disabled = state.commandPage >= pages.length - 1;
+      nodes.commandsSections.innerHTML = (page.sections || []).map((section) => `
+        <section class="panel command-card">
+          <div class="command-card-head">
+            <div>
+              <div class="command-card-title">${escapeHtml(section.title || "")}</div>
+            </div>
+          </div>
+          <div class="command-blocks">
+            ${Array.isArray(section.commands) ? section.commands.map((command) => `
+              <div class="command-line">
+                <code>${escapeHtml(renderCommandTemplate(command))}</code>
+                <button type="button" class="copy-icon" data-copy-command="${escapeHtml(renderCommandTemplate(command))}" data-command-template="${escapeHtml(command)}" aria-label="Copy command" title="Copy command">${copyIcon()}</button>
+              </div>
+            `).join("") : ""}
+          </div>
+          ${(section.notes || []).length ? `<div class="command-notes">${section.notes.map((note) => `<div class="command-note">${escapeHtml(note)}</div>`).join("")}</div>` : ""}
+        </section>
+      `).join("");
+      renderCommandsNav();
+    }
+
+    async function loadCommands() {
+      if (Array.isArray(state.commands) && state.commands.length) {
+        renderCommandsPage();
+        return;
+      }
+      try {
+        const data = await fetchJson("/api/commands");
+        state.commands = Array.isArray(data.pages) ? data.pages : [];
+      } catch (_) {
+        state.commands = [];
+      }
+      renderCommandsPage();
+    }
+
+    async function loadOverview() {
+      const filters = qs();
+      syncForm(filters);
+      nodes.mainList.innerHTML = `<div class="empty">Loading audit data...</div>`;
+      nodes.syncBtn.disabled = true;
+      nodes.syncStatus.textContent = "Syncing...";
+      try {
+        const params = new URLSearchParams(filters);
+        const data = await fetchJson(`/api/overview?${params.toString()}`);
+        state.overview = data;
+        nodes.projectMeta.textContent = `${data.taskId || ""} | ${data.sqlite || ""}`;
+        nodes.filtersJson.textContent = JSON.stringify(data.filters || {}, null, 2);
+        renderStats(data.stats || {});
+        renderActiveTab();
+        nodes.syncStatus.textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+      } catch (error) {
+        nodes.mainList.innerHTML = `<div class="error">${escapeHtml(error.message || error)}</div>`;
+        nodes.syncStatus.textContent = "Sync failed";
+      } finally {
+        nodes.syncBtn.disabled = false;
+      }
+    }
+
+    async function loadDetail(kind, value) {
+      if (!value) return;
+      nodes.detailJson.textContent = "Loading detail...";
+      try {
+        const param = kind === "uuid" ? "uuid" : "wosid";
+        const data = await fetchJson(`/api/${kind}?${param}=${encodeURIComponent(value)}`);
+        state.detail = data;
+        nodes.detailJson.textContent = JSON.stringify(data, null, 2);
+      } catch (error) {
+        nodes.detailJson.textContent = `Error: ${error.message || error}`;
+      }
+    }
+
+    nodes.filtersForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      setQuery({
+        uuid: nodes.uuidInput.value.trim(),
+        wosid: nodes.wosidInput.value.trim(),
+        limit: nodes.limitInput.value.trim() || "200",
+      });
+      loadOverview();
+    });
+
+    nodes.resetBtn.addEventListener("click", () => {
+      setQuery({ limit: 200 });
+      loadOverview();
+    });
+
+    nodes.syncBtn.addEventListener("click", () => {
+      loadOverview();
+    });
+
+    nodes.tabs.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-tab]");
+      if (!button) return;
+      state.tab = button.dataset.tab;
+      renderActiveTab();
+    });
+
+    nodes.surfaceTabs.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-surface]");
+      if (!button) return;
+      setSurface(button.dataset.surface);
+      if (button.dataset.surface === "commands") loadCommands();
+    });
+
+    nodes.commandsPageList.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-command-page]");
+      if (!button) return;
+      state.commandPage = Number(button.getAttribute("data-command-page")) || 0;
+      renderCommandsPage();
+    });
+
+    nodes.commandsPrev.addEventListener("click", () => {
+      if (state.commandPage <= 0) return;
+      state.commandPage -= 1;
+      renderCommandsPage();
+    });
+
+    nodes.commandsNext.addEventListener("click", () => {
+      if (state.commandPage >= (state.commands.length - 1)) return;
+      state.commandPage += 1;
+      renderCommandsPage();
+    });
+    nodes.commandsWosid.addEventListener("input", renderCommandsPage);
+
+    document.body.addEventListener("click", (event) => {
+      const uuidNode = event.target.closest("[data-uuid]");
+      if (uuidNode) {
+        const uuid = uuidNode.getAttribute("data-uuid");
+        loadDetail("uuid", uuid);
+        return;
+      }
+      const wosidNode = event.target.closest("[data-wosid]");
+      if (wosidNode) {
+        const wosid = wosidNode.getAttribute("data-wosid");
+        loadDetail("wosid", wosid);
+        return;
+      }
+      const commandNode = event.target.closest("[data-copy-command]");
+      if (commandNode) {
+        copyText(commandNode.getAttribute("data-copy-command") || "", commandNode);
+      }
+    });
+
+    document.body.addEventListener("toggle", (event) => {
+      const details = event.target.closest("details.timeline-item");
+      if (!details) return;
+      details.classList.toggle("is-open", details.open);
+      const toggle = details.querySelector(".timeline-toggle");
+      if (toggle) toggle.textContent = details.open ? "Collapse details" : "Expand details";
+    }, true);
+
+    loadOverview();
+    renderCommandsPage();
+  </script>
+</body>
+</html>

@@ -1,295 +1,238 @@
 # CLI Command Reference
 
-This document is the structured command contract for humans, scripts, and LLM
-agents that call `iiaide-wos`. Prefer these commands over scraping terminal
-prompts. Use explicit flags, stable `--task` names, and `--json` where the
-command supports machine-readable output.
-
-## Calling Rules For Automation
-
-- Run from the intended workspace directory, or pass `--tasks-root <dir>`.
-- Use `--task <task-id>` for repeatable jobs. If omitted, artifact commands
-  create a timestamp task id.
-- Do not pass full SID values through task labels or output files. Use
-  `--sid`, `WOS_SID`, or the saved SID pool.
-- Expect progress and warnings on stderr. Parse stdout only.
-- Query/Record commands print a UUID by default. Add `--json` to get the
-  standard LLM envelope `{ ok, code, command, taskId, artifact, uuid, count,
-  message, data }`.
-- Raw export commands print the final artifact directory/path on stdout.
-- Do not use `--force` unless intentionally replacing a CLI-managed task.
+Default mode is current-directory single-project mode. All managed state is
+written to `./.iiaide-wos-cli/`.
 
 ## Common Options
 
 ```text
---task <id>              Stable task id
---task-label <label>     Human label in task metadata
---tasks-root <dir>       Task workspace root, default ./tasks
---out-dir <dir>          Exact task directory override
---sid <SID>              WOS session SID
---from-browser           Open visible WOS login and detect SID
---wos-domain <domain>    WOS domain for generated URLs
---base-url <url>         WOS origin URL
---wosjs <file>           Browser-side wos.js helper path
---headed                 Show browser window
---headless               Run browser in background
---json                   Machine-readable output where supported
---quiet                  Suppress progress where supported
+--sid <SID>
+--from-browser
+--wos-domain <domain>
+--base-url <url>
+--wosjs <file>
+--headed
+--headless
+--json
+--jsonl
+--quiet
+--debug
+--force
+--reuse-raw
 ```
 
-## Query Commands
-
-### `query build`
-
-Build a WOS advanced-search query and return the result-set UUID.
-
-```bash
-iiaide-wos query build --expr 'PY=(2026)' --task "query-2026"
-iiaide-wos query build --expr 'TS=("large language model") AND PY=(2025)' --json
-```
-
-Output:
+Legacy-only options:
 
 ```text
-<uuid>
+--task <task-id>
+--task-label <label>
+--tasks-root <dir>
+--out-dir <dir>
 ```
 
-JSON output:
-
-```json
-{
-  "ok": true,
-  "code": "OK",
-  "command": "query build",
-  "taskId": "query-2026",
-  "artifact": "",
-  "uuid": "<uuid>",
-  "count": 123,
-  "message": "WOS UUID resolved",
-  "data": {
-    "operation": "query build",
-    "rowText": "PY=(2026)",
-    "source": { "kind": "expr", "value": "PY=(2026)" }
-  }
-}
-```
-
-### `query batch`
-
-Run many WOS advanced-search queries through one prepared WOS session and return
-one UUID result per input line.
+## Query
 
 ```bash
-iiaide-wos query batch --expr-file "./queries.txt" --task "query-batch"
-iiaide-wos query batch --expr-file "./queries.txt" --task "query-batch" --jsonl
-iiaide-wos query batch --expr-file "./queries.txt" --task "query-batch" --json
+iiaide-wos query build --expr 'PY=(2026)'
+iiaide-wos query parse --text "2026 AI safety papers"
+iiaide-wos query ids --wosid "WOS:000000000000001"
+iiaide-wos query ids --csv "./input/ids.csv"
+iiaide-wos query batch --expr 'PY=(2025)' --expr 'PY=(2026)'
+iiaide-wos query batch --expr-file "./queries.txt" --jsonl
+iiaide-wos query ingest --expr 'PY=(2026)' --description "2026 search"
 ```
 
-Input file format:
+- `query build` prints compact single-line JSON by default:
+  `{"uuid":"...","url":"...","count":123,"queryText":"...","cached":false}`
+- `query build` reuses the same successful task/query text from SQLite by
+  default; pass `--force` to query WOS again
+- use `--json` for the full LLM-style machine-readable result envelope
+- `query parse` and `query ids` print UUID by default
+- `query batch` accepts repeated `--expr` and/or `--expr-file`
+- `query batch` prints one LLM-readable JSON object per query line by default;
+  `--json` prints one full summary envelope
+- uncached `query batch` items run sequentially in one WOS browser session;
+  cached items are returned from SQLite without touching WOS
+- `--expr-file` points to a plain UTF-8 text file with one WOS advanced-search
+  expression per line; blank lines and `#` comment lines are ignored
+
+Example `queries.txt`:
 
 ```text
-# empty lines and comment lines are ignored
-PY=(2025)
-TS=("large language model") AND PY=(2026)
+# Two-dimensional materials project: compare recent yearly result sets
+TS=("two-dimensional materials") AND PY=(2025)
+TS=("two-dimensional materials") AND PY=(2026)
+
+# Atomic thickness theory slice
+TS=(("two-dimensional materials" OR graphene OR "transition metal dichalcogenide*") AND ("atomic thickness" OR monolayer) AND (theor* OR model* OR simulation*))
 ```
 
-Default stdout prints one successful UUID per line. Failed items are reported on
-stderr so scripts can keep stdout as the data channel.
+- query commands also append structured audit rows to `.iiaide-wos-cli/wosData.sqlite`
+- `query ingest` additionally stores parsed WOS records in `.iiaide-wos-cli/wosData.sqlite`
+- `query build` uses the advanced-search `Add to history` path and avoids
+  clicking the main Search/run button so it can capture history UUID/count
+  metadata without jumping straight to a summary page
 
-`--jsonl` prints one LLM envelope per query line:
-
-```json
-{"ok":true,"code":"OK","command":"query batch","taskId":"query-batch","artifact":"","uuid":"<uuid>","count":123,"message":"WOS UUID resolved","data":{"index":1,"total":2,"expr":"PY=(2025)","operation":"query build","rowText":"PY=(2025)","source":{"kind":"expr","value":"PY=(2025)"}}}
-```
-
-`--json` prints one final summary envelope after the whole batch completes.
-Use this when the caller wants all item results in one JSON object.
-
-### `query parse`
-
-Ask the WOS search engine to parse search text into a query, open it, and return
-the result-set UUID.
+## Record
 
 ```bash
-iiaide-wos query parse --text "2026 AI safety papers" --task "query-ai-safety"
-iiaide-wos query parse --text "papers about graph neural networks in 2025" --json
+iiaide-wos record relations --wosid "WOS:000000000000001" --type citations
+iiaide-wos record collect --wosid "WOS:000000000000001" --json
+iiaide-wos record shared --wosid "WOS:000000000000001" --with "WOS:000000000000002"
+iiaide-wos record ingest --wosid "WOS:000000000000001" --type references
 ```
 
-Use this when the user gave natural search text instead of a WOS advanced query.
+- relation types: `citations`, `references`, `related`
+- `record collect` writes relation JSON plus per-relation WOSID CSVs
+- record commands also append structured audit rows to `.iiaide-wos-cli/wosData.sqlite`
+- `record ingest` collects relation WOSIDs from the first 6 `relevance` pages,
+  queries those WOSIDs, and stores parsed WOS records in
+  `.iiaide-wos-cli/wosData.sqlite`
+- confirmed zero-count relation results are stored as completed SQLite
+  resultsets and reused for the same source WOSID/type unless `--force` is used
+- relation ingest UUIDs are marked `exportMode=front-scroll-wosid` and
+  `uuidDirectExport=false`
 
-### `query ids`
-
-Build a WOS query from WOS IDs and/or DOIs, then return the result-set UUID.
+## TXT Export
 
 ```bash
-iiaide-wos query ids --wosid "WOS:000000000000001" --task "query-one-id"
-iiaide-wos query ids --wosid "WOS:000000000000001" --doi "10.1000/example" --json
-iiaide-wos query ids --csv "./input/ids.csv" --task "query-from-csv"
+iiaide-wos run --uuid "<uuid>"
+iiaide-wos run --url "https://www.webofscience.com/wos/woscc/summary/<uuid>/relevance/1"
+iiaide-wos run --uuid "<uuid>" --from-index 501 --limit 1000
+iiaide-wos run --uuid "<relation-uuid>" --ref-query
 ```
 
-CSV input may contain `wosid`, `UT`, or `doi` columns. If no recognized header
-exists, the first column is treated as WOS IDs.
-
-## Record Commands
-
-### `record relations`
-
-Open a relation result set for one WOS record and return its UUID.
-
-```bash
-iiaide-wos record relations --wosid "WOS:000000000000001" --type citations --task "citations"
-iiaide-wos record relations --wosid "WOS:000000000000001" --type references --json
-iiaide-wos record relations --wosid "WOS:000000000000001" --type related --json
-```
-
-Allowed `--type` values:
+Success stdout:
 
 ```text
-citations
-references
-related
+.iiaide-wos-cli/resultsets/<uuid>/raw/full-record
 ```
 
-### `record shared`
+`run` also records export audit metadata in `.iiaide-wos-cli/wosData.sqlite`.
 
-Open the shared-reference result set between two WOS records and return its
-UUID.
+## BibTeX Export
 
 ```bash
-iiaide-wos record shared \
-  --wosid "WOS:000000000000001" \
-  --with "WOS:000000000000002" \
-  --task "shared-refs"
+iiaide-wos bib --uuid "<uuid>"
+iiaide-wos bib --uuid "<uuid>" --from-index 1 --limit 500
 ```
 
-## Export Commands
-
-### `run`
-
-Download raw full-record TXT batches for a WOS result-set UUID or summary URL.
-
-```bash
-iiaide-wos run --uuid "<uuid>" --task "txt-export"
-iiaide-wos run --url "https://www.webofscience.com/wos/woscc/summary/<uuid>/relevance/1" --task "txt-export"
-iiaide-wos run --uuid "<uuid>" --from-index 501 --limit 1000 --task "txt-slice"
-```
-
-Stdout on success:
+Success stdout:
 
 ```text
-tasks/<task-id>/raw/<uuid>/full-record
+.iiaide-wos-cli/resultsets/<uuid>/raw/bib
 ```
 
-Notes:
+`bib` also records export audit metadata in `.iiaide-wos-cli/wosData.sqlite`.
 
-- Existing raw batches are skipped when coverage is complete.
-- Default batch size is 500 records.
-- Large result sets over 100,000 records require `--allow-large-export`.
-
-### `bib`
-
-Download raw BibTeX batches for a WOS result-set UUID or summary URL.
+## Batch UUID TXT Export
 
 ```bash
-iiaide-wos bib --uuid "<uuid>" --task "bib-export"
-iiaide-wos bib --uuid "<uuid>" --from-index 1 --limit 500 --task "bib-slice"
+iiaide-wos batch-run --search-root "."
+iiaide-wos batch-run --search-root "./input" --allow-large-export
 ```
 
-Stdout on success:
+This recursively finds `uuid.csv` files, reuses one prepared WOS session, and
+downloads TXT result sets into the current project's `resultsets/` tree.
 
-```text
-tasks/<task-id>/raw/<uuid>/bib
-```
-
-### `batch-run`
-
-Recursively find `uuid.csv` files and download TXT batches for each UUID.
+## CSV Import
 
 ```bash
-iiaide-wos batch-run --task "batch-demo" --search-root "."
-iiaide-wos batch-run --task "batch-large" --search-root "./input" --allow-large-export
+iiaide-wos import --csv "./input/wosids.csv"
 ```
 
-Stdout on success:
+Success stdout:
 
 ```text
-tasks/<task-id>/raw
+.iiaide-wos-cli/resultsets/<project-id>/<project-id>_wosid.csv
 ```
 
-## Import Commands
+`import` also records artifact audit metadata in `.iiaide-wos-cli/wosData.sqlite`.
 
-### `import`
-
-Normalize an existing WOSID CSV into a managed task without contacting WOS.
+## SQLite Lookup
 
 ```bash
-iiaide-wos import --csv "./input/wosids.csv" --task "imported-ids"
+iiaide-wos db uuid --uuid "<uuid>" --json
+iiaide-wos db wosid --wosid "WOS:000000000000001" --json
+iiaide-wos db list --uuid "<uuid>" --json
+iiaide-wos db list --uuid "<uuid>" --context --json
+iiaide-wos db list --wosid "WOS:000000000000001" --type citations --json
+iiaide-wos db list --wosid "WOS:000000000000001" --type references --context --json
+iiaide-wos db context --wosid "WOS:000000000000001" --type self --json
+iiaide-wos db context --wosid "WOS:000000000000001" --type references --limit 100 --json
+iiaide-wos db searches --limit 50 --json
+iiaide-wos db searches --uuid "<uuid>" --json
+iiaide-wos db artifacts --limit 50 --json
+iiaide-wos db artifacts --uuid "<uuid>" --json
+iiaide-wos db runs --limit 50 --json
+iiaide-wos db runs --uuid "<uuid>" --json
+iiaide-wos db timeline --limit 100 --json
+iiaide-wos db timeline --wosid "WOS:000000000000001" --json
+iiaide-wos db audit-html
+iiaide-wos db audit-html --port 3761 --uuid "<uuid>"
+iiaide-wos db audit-export
+iiaide-wos db audit-export --format html
+iiaide-wos db audit-export --report-dir "./reports/latest-audit" --format both
 ```
 
-Stdout on success:
+- `db audit-html` is read-only, does not start WOS, and serves a local HTML
+  audit viewer backed by `wosData.sqlite`, with integrated command-help pages
+- `db audit-export` is read-only, does not start WOS, and writes a static audit
+  snapshot from `wosData.sqlite`
+- `db list` is read-only and does not start WOS. It returns ordered WOSIDs from
+  `resultset_items`; `--context` also joins stored `records` context.
+- For confirmed empty relation resultsets, `db list` returns `ok=true`,
+  `count=0`, and an empty `wosids` array.
 
-```text
-tasks/<task-id>/raw/<task-id>/full-record/<task-id>_wosid.csv
+Direct SQLite equivalents:
+
+```sql
+-- WOSIDs for a UUID, using its latest ingest run
+WITH latest_run AS (
+  SELECT run_id
+  FROM ingest_runs
+  WHERE uuid = '<uuid>'
+  ORDER BY finished_at DESC, started_at DESC, run_id DESC
+  LIMIT 1
+)
+SELECT i.position, i.wosid
+FROM resultset_items i
+WHERE i.uuid = '<uuid>'
+  AND i.run_id = (SELECT run_id FROM latest_run)
+ORDER BY i.position
+LIMIT 500;
+
+-- Relation UUIDs linked to a source WOSID
+SELECT uuid, kind, available_count, last_ingested_count, last_seen_at
+FROM resultsets
+WHERE source_wosid = 'WOS:000000000000001'
+  AND kind IN ('citations', 'references', 'related')
+ORDER BY kind, last_seen_at DESC;
 ```
 
-## Workspace And Task Commands
+## Project Commands
 
 ```bash
 iiaide-wos init
 iiaide-wos workspace
 iiaide-wos list
+iiaide-wos tasks
 iiaide-wos latest
-iiaide-wos show --task "txt-export"
-iiaide-wos show --latest
-iiaide-wos path --task "txt-export"
-iiaide-wos validate --task "txt-export"
-iiaide-wos clear --task "txt-export"
+iiaide-wos show
+iiaide-wos path
+iiaide-wos validate
+iiaide-wos clear
 ```
 
-Output expectations:
+Notes:
 
-- `init` and `workspace` print JSON status objects.
-- `list` prints CSV by default; `list --json` prints the standard LLM envelope
-  with `data.tasks`.
-- `show` and `validate` print command-specific JSON by default; `--json` wraps
-  them in the standard LLM envelope.
-- `latest` prints the latest task id.
-- `path` prints the task directory.
-- `latest --json` and `path --json` print the standard LLM envelope.
-- `clear` prints the removed task directory after confirmation.
+- `tasks` and `list` are read-only views
+- `latest` prints the current project id in default mode
+- `clear` removes the managed project store after confirmation
 
-## Authentication And Settings Commands
+## Output Rules
 
-```bash
-iiaide-wos check
-iiaide-wos sid --from-browser
-iiaide-wos sid-pool
-iiaide-wos settings --add-sids "SID_ONE SID_TWO"
-iiaide-wos settings --clear-sids
-iiaide-wos settings --clear-dead-sids
-iiaide-wos settings --playwright-visible on
-```
-
-MUST SID producer:
-
-```bash
-iiaide-wos auth login --provider must
-iiaide-wos auth monitor --provider must --min-sids 2 --interval-ms 3000
-```
-
-Use `auth monitor` when long-running workflows should wait for a refreshed SID
-pool instead of manually pasting SIDs.
-
-## Maintenance Commands
-
-```bash
-iiaide-wos install-browser
-iiaide-wos install-browser --with-deps
-iiaide-wos update --check
-iiaide-wos update
-iiaide-wos --help
-iiaide-wos --version
-```
-
-Run `install-browser` after a fresh install or when the bundled Playwright
-version changes.
+- `--json` commands return one JSON object on stdout
+- `--jsonl` batch commands return one JSON object per line
+- progress/debug goes to stderr
+- `run`, `bib`, and `import` print artifact paths on stdout

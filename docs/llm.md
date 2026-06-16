@@ -1,19 +1,20 @@
 # LLM Calling Guide
 
-This guide is for agents that call `iiaide-wos` as a tool. The stable rule is:
-parse stdout, ignore stderr unless debugging, and prefer `--json` or `--jsonl`
-for machine workflows.
+Use stdout as the data channel and ignore stderr unless debugging.
 
-## Output Contract
+Default mode is current-directory single-project mode with state under
+`./.iiaide-wos-cli/`.
 
-Commands that support `--json` return one JSON object on stdout:
+## JSON Envelope
+
+Commands with `--json` return:
 
 ```json
 {
   "ok": true,
   "code": "OK",
   "command": "query build",
-  "taskId": "query-2026",
+  "taskId": "my-project",
   "artifact": "",
   "uuid": "<uuid>",
   "count": 123,
@@ -22,127 +23,130 @@ Commands that support `--json` return one JSON object on stdout:
 }
 ```
 
-On failure, `--json` commands return:
+## Recovery Hints
 
-```json
-{
-  "ok": false,
-  "code": "SID_INVALID",
-  "command": "query build",
-  "taskId": "query-2026",
-  "artifact": "",
-  "uuid": "",
-  "count": 0,
-  "message": "Saved SID is invalid",
-  "data": {},
-  "nextAction": "Run iiaide-wos sid --from-browser --json, or start iiaide-wos auth monitor."
-}
+- `SID_MISSING` / `SID_INVALID`
+  Run `iiaide-wos sid --from-browser --json` or start `iiaide-wos auth monitor`
+- `PLAYWRIGHT_MISSING`
+  Run `iiaide-wos install-browser`
+- `WOS_API_MISSING`
+  Check `import/wos.js` or pass `--wosjs`
+- `TASK_NOT_FOUND`
+  Check the current directory's `.iiaide-wos-cli/` state or run `iiaide-wos workspace`
+- `ARTIFACT_EXISTS`
+  Reuse the current project or pass `--force` only when replacement is intended
+
+## Recipes
+
+Build one UUID:
+
+```bash
+iiaide-wos query build --expr 'PY=(2026)' --json
 ```
 
-Progress, browser notices, and warnings go to stderr. Do not parse stderr for
-normal control flow.
+For shell pipelines, omit `--json`; `query build` prints compact single-line
+JSON with `uuid`, `url`, `count`, `queryText`, and `cached`. Add `--force` only
+when the same task/query text should be queried in WOS again instead of reused
+from SQLite.
 
-## Error Codes
+Build many UUIDs:
+
+```bash
+iiaide-wos query batch --expr 'PY=(2025)' --expr 'PY=(2026)'
+iiaide-wos query batch --expr-file ./queries.txt --jsonl
+```
+
+`query batch` prints JSONL by default, one LLM-readable result envelope per
+query. Cached expressions return `data.cached=true`; uncached expressions are
+resolved sequentially in the same WOS browser session.
+The `--expr-file` input is plain UTF-8 text with one WOS advanced-search
+expression per line; blank lines and `#` comment lines are ignored.
 
 ```text
-OK
-INVALID_ARGS
-SID_MISSING
-SID_INVALID
-SID_POOL_EMPTY
-WOS_API_MISSING
-WOS_QUERY_FAILED
-WOS_UUID_MISSING
-PLAYWRIGHT_MISSING
-TASK_NOT_FOUND
-TASK_INCOMPLETE
-ARTIFACT_EXISTS
-UNKNOWN_ERROR
+# Two-dimensional materials project: compare recent yearly result sets
+TS=("two-dimensional materials") AND PY=(2025)
+TS=("two-dimensional materials") AND PY=(2026)
+
+# Atomic thickness theory slice
+TS=(("two-dimensional materials" OR graphene OR "transition metal dichalcogenide*") AND ("atomic thickness" OR monolayer) AND (theor* OR model* OR simulation*))
 ```
 
-Recommended recovery:
-
-- `SID_MISSING` or `SID_INVALID`: run `iiaide-wos sid --from-browser --json`,
-  or start `iiaide-wos auth monitor`.
-- `PLAYWRIGHT_MISSING`: run `iiaide-wos install-browser`.
-- `WOS_API_MISSING`: verify `import/wos.js` exists or pass `--wosjs`.
-- `TASK_NOT_FOUND`: run `iiaide-wos list` and choose an existing task.
-- `ARTIFACT_EXISTS`: use a new `--task` or intentionally pass `--force`.
-
-## Intent Recipes
-
-### Build a UUID from a WOS query
+Parse natural language:
 
 ```bash
-iiaide-wos query build --expr 'PY=(2026)' --task query-2026 --json
+iiaide-wos query parse --text 'recent AI safety papers from 2026' --json
 ```
 
-Read `.uuid` and `.count`. If `.ok` is false, follow `.nextAction`.
-
-### Build many UUIDs from WOS queries
+Download TXT:
 
 ```bash
-iiaide-wos query batch --expr-file ./queries.txt --task query-batch --jsonl
+iiaide-wos run --uuid '<uuid>' --json
 ```
 
-Put one WOS advanced-search query on each line. Empty lines and lines starting
-with `#` are ignored. `--jsonl` emits one JSON envelope per query and keeps one
-prepared WOS session for the whole file.
-
-### Download TXT after query
+Download BibTeX:
 
 ```bash
-iiaide-wos query build --expr 'PY=(2026)' --task query-2026 --json
-iiaide-wos run --uuid '<uuid>' --task query-2026-txt --json
+iiaide-wos bib --uuid '<uuid>' --json
 ```
 
-Read `.artifact` from the second command. It points to the raw TXT batch
-directory.
-
-### Download BibTeX after query
+Ingest query results into SQLite:
 
 ```bash
-iiaide-wos query build --expr 'PY=(2026)' --task query-2026 --json
-iiaide-wos bib --uuid '<uuid>' --task query-2026-bib --json
+iiaide-wos query ingest --expr 'PY=(2026)' --description '2026 search' --json
 ```
 
-Read `.artifact` from the second command. It points to the raw BibTeX batch
-directory.
+Ingest relation results into SQLite:
 
-### Resolve citations, references, or related records
+```bash
+iiaide-wos record ingest --wosid 'WOS:000000000000001' --type references --json
+```
+
+For `citations`, `references`, and `related`, relation ingest does not directly
+export the relation UUID. It collects WOSIDs from at most the first 6
+`relevance` pages, queries those WOSIDs, and stores the full records under the
+relation UUID with `exportMode=front-scroll-wosid`. Confirmed zero-count
+relation results are stored with `emptyResult=true` and should be treated as
+complete.
+
+Read stored metadata/context:
+
+```bash
+iiaide-wos db uuid --uuid '<uuid>' --json
+iiaide-wos db wosid --wosid 'WOS:000000000000001' --json
+iiaide-wos db list --uuid '<uuid>' --context --json
+iiaide-wos db list --wosid 'WOS:000000000000001' --type citations --json
+iiaide-wos db context --wosid 'WOS:000000000000001' --type references --limit 50 --json
+iiaide-wos db searches --limit 50 --json
+iiaide-wos db artifacts --limit 50 --json
+iiaide-wos db runs --limit 50 --json
+iiaide-wos db timeline --limit 100 --json
+iiaide-wos db audit-html
+iiaide-wos db audit-export
+```
+
+Use `db list` when the user wants the ordered WOSID list for a UUID or for one
+source WOSID's citations/references/related relation. Add `--context` when the
+LLM needs title, abstract, keywords, and authors alongside each WOSID.
+
+Resolve relation UUIDs:
 
 ```bash
 iiaide-wos record relations --wosid 'WOS:000000000000001' --type citations --json
-iiaide-wos record relations --wosid 'WOS:000000000000001' --type references --json
-iiaide-wos record relations --wosid 'WOS:000000000000001' --type related --json
 ```
 
-Read `.uuid`, then optionally pass it to `run` or `bib`.
-
-### Build a UUID from IDs or DOI values
+Inspect project status:
 
 ```bash
-iiaide-wos query ids --csv ./input/ids.csv --task ids-query --json
-```
-
-CSV columns may be `wosid`, `UT`, or `doi`.
-
-### Check whether auth is ready
-
-```bash
-iiaide-wos check --json
-iiaide-wos sid-pool
 iiaide-wos workspace
+iiaide-wos tasks --json
+iiaide-wos list --json
 ```
-
-Use `check --json` for a direct auth status. `sid-pool` and `workspace` print
-JSON status objects.
 
 ## Guardrails
 
-- Never echo full SID values in task labels, summaries, or user-visible output.
-- Prefer stable task ids generated from user intent, such as `query-2026-txt`.
-- Use `--quiet --json` when a command is run inside an agent loop.
-- Do not use `--force` unless the user explicitly asked to replace a task.
-- For repeated advanced-search queries, prefer `query batch --jsonl` so one CLI
-  process and one WOS session handle the full input file.
+- Prefer `--json` or `--jsonl`
+- Prefer `query batch` over one CLI process per query
+- Do not echo full SID values
+- Do not use `--force` unless replacement is intended
+- In default mode, do not invent many `--task` names; the working directory is
+  already the project boundary

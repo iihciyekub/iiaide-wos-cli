@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iiaide-wos Command Cheatsheet</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; background: #0b1020; color: #e8ecf5; }
+    main { max-width: 1080px; margin: 0 auto; padding: 32px 20px 64px; }
+    h1, h2, h3, p { margin: 0 0 12px; }
+    .lead { color: #a8b3c7; margin-bottom: 24px; }
+    .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+    section { background: #121933; border: 1px solid #26304f; border-radius: 8px; padding: 16px; }
+    pre { margin: 0; padding: 12px; overflow: auto; border-radius: 6px; background: #0a0f1f; border: 1px solid #202947; }
+    code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 13px; }
+    button { margin-top: 10px; width: 32px; height: 32px; padding: 0; display: inline-grid; place-items: center; border: 0; border-radius: 6px; background: #5eead4; color: #081018; cursor: pointer; font-weight: 600; }
+    button svg { width: 15px; height: 15px; stroke: currentColor; }
+    .tag { display: inline-block; margin-bottom: 10px; padding: 3px 8px; border-radius: 999px; background: #233054; color: #b8c5e0; font-size: 12px; }
+    .vars { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 20px; }
+    .vars label { color: #a8b3c7; font-size: 13px; font-weight: 700; }
+    .vars input { min-width: min(420px, 100%); height: 34px; border: 1px solid #26304f; border-radius: 6px; background: #0a0f1f; color: #e8ecf5; padding: 0 10px; font: 13px ui-monospace, SFMono-Regular, monospace; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>iiaide-wos Command Cheatsheet</h1>
+    <p class="lead">Default mode is one managed project per working directory. State is stored in <code>./.iiaide-wos-cli/</code>.</p>
+    <div class="vars">
+      <label for="wosidVar">WOSID</label>
+      <input id="wosidVar" value="WOS:000000000000001" spellcheck="false">
+    </div>
+
+    <div class="grid">
+      <section>
+        <span class="tag">Project</span>
+        <h3>Initialize / inspect</h3>
+        <pre><code>iiaide-wos init
+iiaide-wos workspace
+iiaide-wos list
+iiaide-wos tasks
+iiaide-wos latest
+iiaide-wos show
+iiaide-wos path
+iiaide-wos validate
+iiaide-wos clear</code></pre>
+        <button onclick="copyBlock(this)" aria-label="Copy commands" title="Copy commands"></button>
+      </section>
+
+      <section>
+        <span class="tag">Auth</span>
+        <h3>SID and browser</h3>
+        <pre><code>iiaide-wos check
+iiaide-wos sid --from-browser --debug
+iiaide-wos sid-pool
+iiaide-wos auth login --provider must
+iiaide-wos auth monitor --provider must</code></pre>
+        <button onclick="copyBlock(this)" aria-label="Copy commands" title="Copy commands"></button>
+      </section>
+
+      <section>
+        <span class="tag">Query</span>
+        <h3>UUID discovery</h3>
+        <pre><code>iiaide-wos query build --expr 'PY=(2026)'
+iiaide-wos query build --expr 'PY=(2026)' --force
+iiaide-wos query batch --expr 'PY=(2025)' --expr 'PY=(2026)'
+cat > queries.txt <<'EOF'
+# Two-dimensional materials project: compare recent yearly result sets
+TS=("two-dimensional materials") AND PY=(2025)
+TS=("two-dimensional materials") AND PY=(2026)
+
+# Atomic thickness theory slice
+TS=(("two-dimensional materials" OR graphene OR "transition metal dichalcogenide*") AND ("atomic thickness" OR monolayer) AND (theor* OR model* OR simulation*))
+EOF
+iiaide-wos query batch --expr-file ./queries.txt
+iiaide-wos query parse --text "2026 AI safety papers"
+iiaide-wos query ids --wosid "WOS:000000000000001"
+iiaide-wos query ids --csv "./input/ids.csv"
+iiaide-wos query batch --expr-file "./queries.txt" --jsonl</code></pre>
+        <p><code>query build</code> prints compact single-line JSON with <code>uuid</code>, <code>url</code>, <code>count</code>, <code>queryText</code>, and <code>cached</code>. The same successful task/query text is reused from SQLite by default; use <code>--force</code> to query WOS again. <code>query batch</code> prints JSONL by default, accepts repeated <code>--expr</code>, and runs uncached expressions sequentially in one WOS browser session. A <code>queries.txt</code> file is plain UTF-8 text: one WOS advanced-search expression per line; blank lines and lines starting with <code>#</code> are ignored.</p>
+        <button onclick="copyBlock(this)" aria-label="Copy commands" title="Copy commands"></button>
+      </section>
+
+      <section>
+        <span class="tag">Record</span>
+        <h3>Relation UUIDs</h3>
+        <pre><code>iiaide-wos record relations --wosid "WOS:000000000000001" --type citations
+iiaide-wos record collect --wosid "WOS:000000000000001" --json
+iiaide-wos record shared --wosid "WOS:000000000000001" --with "WOS:000000000000002"</code></pre>
+        <button onclick="copyBlock(this)" aria-label="Copy commands" title="Copy commands"></button>
+      </section>
+
+      <section>
+        <span class="tag">Ingest</span>
+        <h3>SQLite</h3>
+        <pre><code>iiaide-wos query ingest --expr 'PY=(2026)' --description "2026 search"
+iiaide-wos record ingest --wosid "WOS:000000000000001" --type references
+iiaide-wos db uuid --uuid "&lt;uuid&gt;" --json
+iiaide-wos db wosid --wosid "WOS:000000000000001" --json
+iiaide-wos db list --uuid "&lt;uuid&gt;" --context --json
+iiaide-wos db list --wosid "WOS:000000000000001" --type references --json
+iiaide-wos db list --wosid "WOS:000000000000001" --type references --context --json
+iiaide-wos record ingest --wosid "WOS:000000000000001" --type citations --force --json
+iiaide-wos db context --wosid "WOS:000000000000001" --type references --json
+iiaide-wos db audit-html
+iiaide-wos db audit-export</code></pre>
+        <p>Relation ingest collects WOSIDs from at most the first 6 relevance pages, queries those WOSIDs, and marks the relation UUID as <code>exportMode=front-scroll-wosid</code>. Confirmed zero-count relations are stored and reused. Use <code>db list</code> for the ordered stored WOSID list, with optional record context.</p>
+        <button onclick="copyBlock(this)" aria-label="Copy commands" title="Copy commands"></button>
+      </section>
+
+      <section>
+        <span class="tag">Export</span>
+        <h3>TXT / BibTeX</h3>
+        <pre><code>iiaide-wos run --uuid "&lt;uuid&gt;"
+iiaide-wos run --uuid "&lt;relation-uuid&gt;" --ref-query
+iiaide-wos bib --uuid "&lt;uuid&gt;"
+iiaide-wos batch-run --search-root "."</code></pre>
+        <button onclick="copyBlock(this)" aria-label="Copy commands" title="Copy commands"></button>
+      </section>
+
+      <section>
+        <span class="tag">Import</span>
+        <h3>CSV</h3>
+        <pre><code>iiaide-wos import --csv "./input/wosids.csv"</code></pre>
+        <button onclick="copyBlock(this)" aria-label="Copy commands" title="Copy commands"></button>
+      </section>
+
+      <section>
+        <span class="tag">Legacy</span>
+        <h3>Optional multi-task mode</h3>
+        <pre><code>iiaide-wos run --uuid "&lt;uuid&gt;" --tasks-root "/path/to/tasks" --task "txt-export"
+iiaide-wos query ingest --expr 'PY=(2026)' --tasks-root "/path/to/tasks" --task "query-db"</code></pre>
+        <button onclick="copyBlock(this)" aria-label="Copy commands" title="Copy commands"></button>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    function copyIcon() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    }
+    function checkIcon() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>';
+    }
+    function currentWosid() {
+      return document.getElementById("wosidVar").value.trim() || "WOS:000000000000001";
+    }
+    function renderTemplate(text) {
+      return String(text || "").replaceAll("WOS:000000000000001", currentWosid());
+    }
+    function refreshCommands() {
+      for (const code of document.querySelectorAll("pre code")) {
+        if (!code.dataset.template) code.dataset.template = code.innerText;
+        code.innerText = renderTemplate(code.dataset.template);
+      }
+    }
+    async function copyBlock(button) {
+      const text = button.parentElement.querySelector("pre code").innerText;
+      await navigator.clipboard.writeText(text);
+      const previous = button.innerHTML;
+      button.innerHTML = checkIcon();
+      setTimeout(() => { button.innerHTML = previous; }, 900);
+    }
+    document.getElementById("wosidVar").addEventListener("input", refreshCommands);
+    for (const button of document.querySelectorAll("button[onclick='copyBlock(this)']")) button.innerHTML = copyIcon();
+    refreshCommands();
+  </script>
+</body>
+</html>

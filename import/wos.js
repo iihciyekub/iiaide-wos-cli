@@ -1843,34 +1843,80 @@ class WosUuidStore {
         return this.currentUuid;
     }
 
+    #parseCountText(text = '') {
+        const raw = String(text || '').replace(/\u00a0/g, ' ').trim();
+        if (!raw) return '';
+        const direct = raw.replace(/,/g, '').match(/^\d+$/);
+        if (direct) return String(Number(direct[0]));
+        const patterns = [
+            /(?:of|from|total|共|共有|总计|總計|合计|合計)\s*([\d,]+)/i,
+            /([\d,]+)\s*(?:records?|results?|文献|篇|条|條)/i,
+        ];
+        for (const pattern of patterns) {
+            const match = raw.match(pattern);
+            if (match) return String(Number(String(match[1]).replace(/,/g, '')) || 0);
+        }
+        return '';
+    }
+
+    #firstCountText(candidates = []) {
+        for (const candidate of candidates) {
+            const value = this.#parseCountText(candidate);
+            if (value !== '') return value;
+        }
+        return '';
+    }
+
+    #readCurrentPageInfoSnapshot(note = '') {
+        const searchInfo = document.querySelector('div[data-ta="search-info"]');
+        const rowTextElement = document.querySelector('.search-text');
+        const uuid = searchInfo?.getAttribute('data-ta-search-info-qid')
+            || this.#extractUuid(window.location.href)
+            || '';
+        const summarySortMatch = window.location.pathname.match(/\/wos\/woscc\/summary\/[^/]+\/([^/?#]+)/i);
+        const sortBy = summarySortMatch ? decodeURIComponent(summarySortMatch[1] || '') : '';
+        const countElements = [
+            searchInfo,
+            document.querySelector('[data-ta-search-info-count]'),
+            document.querySelector('[data-ta="search-info-count"]'),
+            document.querySelector('[data-ta*="records-count"]'),
+            document.querySelector('[data-ta*="record-count"]'),
+        ].filter(Boolean);
+        const ref_count = this.#firstCountText([
+            searchInfo?.getAttribute('data-ta-search-info-count') || '',
+            ...countElements.flatMap((el) => [
+                el.getAttribute?.('data-ta-search-info-count') || '',
+                el.getAttribute?.('aria-label') || '',
+                el.textContent || '',
+            ]),
+        ]);
+        const rowText = rowTextElement?.textContent?.trim() || '';
+        return {
+            uuid,
+            ref_count,
+            rowText,
+            note,
+            sortBy,
+            href: window.location.href,
+            status: uuid ? 'success' : 'failed',
+            debug: {
+                href: window.location.href,
+                sortBy,
+                hasSearchInfo: Boolean(searchInfo),
+                hasCount: ref_count !== '',
+            }
+        };
+    }
+
     /** 获取当前页面的 uuid 信息,并将相关信息合并到本地缓存中
     */
-    async fetchCurrentPageInfo(note = '') {
-        // 等待显示文献数据的元素是否有出现
-        let res = {};
-        const ele = await webWait.waitForElementBySelector('div[data-ta="search-info"]', 60, 100);
-        if (!ele) {
-            res = {
-                uuid: '',
-                ref_count: '',
-                rowText: '',
-                note,
-                status: 'failed'
-            };
-        } else {
-            const searchInfo = document.querySelector('div[data-ta="search-info"]');
-            const rowTextElement = document.querySelector('.search-text');
-            const uuid = searchInfo?.getAttribute('data-ta-search-info-qid') || '';
-            const ref_count = searchInfo?.getAttribute('data-ta-search-info-count') || '';
-            const rowText = rowTextElement?.textContent?.trim() || '';
-            const hasValidSearchInfo = Boolean(uuid) && ref_count !== '';
-            res = {
-                uuid,
-                ref_count,
-                rowText,
-                note,
-                status: hasValidSearchInfo ? 'success' : 'failed'
-            }
+    async fetchCurrentPageInfo(note = '', expectedUuid = '') {
+        let res = { uuid: '', ref_count: '', rowText: '', note, status: 'failed' };
+        for (let i = 0; i < 80; i++) {
+            res = this.#readCurrentPageInfoSnapshot(note);
+            const uuidReady = expectedUuid ? res.uuid === expectedUuid : Boolean(res.uuid);
+            if (uuidReady && res.ref_count !== '') break;
+            if (i < 79) await webFuncs.sleep(100);
         }
         if (res.status === 'success' && res.uuid) {
             this.currentUuid = res.uuid;
@@ -1907,7 +1953,7 @@ class WosUuidStore {
      */
     async #fetchPageInfoByUuid(uuid, sortBy = 'relevance', pageNumber = 1, note = '') {
         await this.viewResultsPageByUuid(uuid, sortBy, pageNumber);
-        return this.fetchCurrentPageInfo(note);
+        return this.fetchCurrentPageInfo(note, uuid);
     }
 
     /** 查看指定 UUID 的结果页，并可指定排序方式与页码
@@ -2454,11 +2500,20 @@ class WosUuidStore {
             return null;
         }
 
+        const allRows = [];
+        const seen = new Set();
         for (const pageNumber of targetPages) {
             await this.goToPage(pageNumber);
-            await this.collectWosIdsFromCurrentUuidPage();
+            const pageRows = await this.collectWosIdsFromCurrentUuidPage();
+            for (const row of pageRows || []) {
+                const key = row?.wosid || '';
+                if (!key || seen.has(key)) continue;
+                seen.add(key);
+                allRows.push(row);
+            }
         }
-        return this.db[uuid]?.page_wosids || null;
+        this.mergeIntoCache(uuid, { page_wosids: allRows });
+        return allRows;
     }
 
     /** 兼容旧接口：基于当前页 uuid 抓取全部页的 WOS ID
@@ -2585,7 +2640,7 @@ class WosUuidStore {
             markFrom: `${markFrom}`,
             markTo: `${markTo}`,
             view: "summary",
-            isRefQuery: "false",
+            isRefQuery: options.isRefQuery ? "true" : "false",
         };
 
         const sid = wosInfo.sid;
@@ -2604,7 +2659,8 @@ class WosUuidStore {
             });
 
             if (!response.ok) {
-                console.error(`request failed:uuid: ${uuid} \n status code: ${response.status}`);
+                const errorText = await response.text().catch(() => '');
+                console.error(`request failed:uuid: ${uuid} \n status code: ${response.status} \n response: ${String(errorText).slice(0, 500)}`);
                 return null;
             }
             const text = await response.text();
@@ -2642,7 +2698,7 @@ class WosUuidStore {
             markFrom: `${markFrom}`,
             markTo: `${markTo}`,
             view: 'summary',
-            isRefQuery: 'false',
+            isRefQuery: options.isRefQuery ? 'true' : 'false',
             locale: 'en_US',
             filters,
         };
@@ -2663,7 +2719,8 @@ class WosUuidStore {
             });
 
             if (!response.ok) {
-                console.error(`bib export failed:uuid: ${uuid} \n status code: ${response.status}`);
+                const errorText = await response.text().catch(() => '');
+                console.error(`bib export failed:uuid: ${uuid} \n status code: ${response.status} \n response: ${String(errorText).slice(0, 500)}`);
                 return null;
             }
             const text = await response.text();
@@ -2691,6 +2748,7 @@ class WosUuidStore {
         batchSize = 200,
         fieldList = 'fullRecord',
         sortBy = 'relevance',
+        isRefQuery = false,
         onProgress = null,
         onBatch = null,
         fetchBatch = null,
@@ -2704,7 +2762,7 @@ class WosUuidStore {
             }
         };
 
-        const res = await this.#fetchPageInfoByUuid(uuid);
+        const res = await this.#fetchPageInfoByUuid(uuid, sortBy, 1, 'export');
         if (!res || res.status === 'failed') {
             const message = 'Failed to retrieve UUID information.';
             console.error(message);
@@ -2737,6 +2795,7 @@ class WosUuidStore {
             totalRecords,
             totalBatches,
             completedBatches,
+            isRefQuery,
         });
 
         while (current <= markTo) {
@@ -2748,9 +2807,9 @@ class WosUuidStore {
                     batchStart,
                     batchStop,
                     currentFieldList,
-                    { sortBy },
+                    { sortBy, isRefQuery },
                 );
-            const text = await fetchBatchFn(uuid, current, batchEnd, fieldList);
+            const text = await fetchBatchFn(uuid, current, batchEnd, fieldList, { sortBy, isRefQuery });
             if (text === null) {
                 const message = `Export request failed for records ${current}-${batchEnd}.`;
                 console.error(message);
@@ -2762,6 +2821,7 @@ class WosUuidStore {
                     batchEnd,
                     completedBatches,
                     totalBatches,
+                    isRefQuery,
                 });
                 throw new Error(message);
             }
@@ -2781,6 +2841,7 @@ class WosUuidStore {
                 completedBatches,
                 current,
                 batchEnd,
+                isRefQuery,
                 ...(batchMeta && typeof batchMeta === 'object' ? batchMeta : {}),
             });
             current = batchEnd + 1;
@@ -2794,6 +2855,7 @@ class WosUuidStore {
             totalRecords,
             totalBatches,
             completedBatches,
+            isRefQuery,
         });
 
         return {
@@ -2802,6 +2864,7 @@ class WosUuidStore {
             totalRecords,
             totalBatches,
             completedBatches,
+            isRefQuery,
         };
     }
 
@@ -2857,6 +2920,7 @@ class WosUuidStore {
             markTo = 0,
             batchSize = 200,
             sortBy = 'relevance',
+            isRefQuery = false,
             onProgress = null,
         } = options || {};
         const batches = [];
@@ -2866,6 +2930,7 @@ class WosUuidStore {
             batchSize,
             fieldList: 'fullRecord',
             sortBy,
+            isRefQuery,
             onProgress,
             onBatch: async (text, batchStart, batchEnd, currentUuid) => {
                 batches.push({
@@ -2939,6 +3004,7 @@ class WosUuidStore {
             batchSize = 200,
             sortBy = 'relevance',
             filters = 'authorTitleSource',
+            isRefQuery = false,
             onProgress = null,
         } = options || {};
         const batches = [];
@@ -2948,6 +3014,7 @@ class WosUuidStore {
             batchSize,
             fieldList: filters,
             sortBy,
+            isRefQuery,
             onProgress,
             onBatch: async (text, batchStart, batchEnd, currentUuid) => {
                 batches.push({
@@ -2958,7 +3025,7 @@ class WosUuidStore {
                 });
                 return { resultLength: batches.length };
             },
-            fetchBatch: (currentUuid, batchStart, batchEnd, currentFieldList) => this.#fetchBibtexByRange(currentUuid, batchStart, batchEnd, currentFieldList, { sortBy }),
+            fetchBatch: (currentUuid, batchStart, batchEnd, currentFieldList, currentOptions) => this.#fetchBibtexByRange(currentUuid, batchStart, batchEnd, currentFieldList, currentOptions),
         });
         if (!summary) return null;
         return {
@@ -3601,16 +3668,48 @@ class WosQuery {
                 const uuid = entry.getAttribute('data-hist-qid');
 
                 let ref_count_text = entry.querySelector('a[data-ta="SearchHistory-records-count"]')?.textContent?.trim() || '';
-                let ref_count = ref_count_text ? parseInt(ref_count_text.replace(/,/g, '')) : 0;
+                let ref_count = ref_count_text ? parseInt(ref_count_text.replace(/,/g, '')) : '';
 
                 result = {
                     uuid: uuid,
-                    ref_count: ref_count
+                    ref_count: ref_count,
+                    ref_count_text,
                 };
                 break;
             }
         }
         return result;
+    }
+
+    #readHistoryEntryResult(entry, expr = '') {
+        if (!entry) return null;
+        const uuid = entry.getAttribute('data-hist-qid') || '';
+        const ref_count_text = entry.querySelector('a[data-ta="SearchHistory-records-count"]')?.textContent?.trim() || '';
+        const ref_count = ref_count_text ? parseInt(ref_count_text.replace(/,/g, '')) : '';
+        if (!uuid) return null;
+        return {
+            uuid,
+            ref_count,
+            ref_count_text,
+            rowText: expr,
+            status: 'success',
+        };
+    }
+
+    async #waitForHistoryResult(oldCount, expr = '', maxTry = 100) {
+        for (let i = 0; i < maxTry; i++) {
+            const entries = Array.from(document.querySelectorAll('app-history-entries-list app-history-search-entry'));
+            if (entries.length > oldCount) {
+                for (const entry of entries.slice(0, entries.length - oldCount || 1)) {
+                    const result = this.#readHistoryEntryResult(entry, expr);
+                    if (result && result.ref_count !== '') return result;
+                }
+                const partial = this.#readHistoryEntryResult(entries[0], expr);
+                if (partial && i >= 20) return partial;
+            }
+            await webFuncs.sleep(100);
+        }
+        return this.#readHistoryEntryResult(document.querySelector('app-history-entries-list app-history-search-entry'), expr);
     }
 
     /** 在输入框中设置值并触发输入事件,以模拟用户输入
@@ -3622,6 +3721,141 @@ class WosQuery {
         const tracker = el._valueTracker;
         if (tracker) tracker.setValue(last); // React 特有
         el.dispatchEvent(event);
+    }
+
+    #advancedSearchState() {
+        const input = document.querySelector('#advancedSearchInputArea');
+        const labels = Array.from(document.querySelectorAll('.mdc-button__label'))
+            .map((el) => (el.textContent || '').trim())
+            .filter(Boolean);
+        const runSearchButton = document.querySelector('button[data-ta="run-search"]');
+        const historyCount = document.querySelectorAll('app-history-entries-list app-history-search-entry').length;
+        const errorText = document.querySelector('.search-error.error-code')?.textContent?.trim() || '';
+        return {
+            href: window.location.href,
+            pathname: window.location.pathname,
+            inputReady: Boolean(input),
+            inputVisible: Boolean(input && input.offsetParent !== null),
+            inputValue: input?.value || '',
+            historyCount,
+            runSearchReady: Boolean(runSearchButton && !runSearchButton.disabled),
+            buttonLabels: labels.slice(0, 8),
+            errorText,
+        };
+    }
+
+    async #waitForAdvancedSearchReady(maxTry = 100) {
+        for (let i = 0; i < maxTry; i++) {
+            const state = this.#advancedSearchState();
+            const hasAction = state.runSearchReady || state.buttonLabels.some((label) => /add to history|add to query|search/i.test(label));
+            if (state.inputReady && state.inputVisible && (hasAction || state.historyCount > 0)) {
+                return state;
+            }
+            await webFuncs.sleep(100);
+        }
+        return this.#advancedSearchState();
+    }
+
+    #findButtonLabelByText(selector, keyText) {
+        const lowered = String(keyText || '').trim().toLowerCase();
+        return Array.from(document.querySelectorAll(selector)).find((el) =>
+            (el.textContent || '').trim().toLowerCase().includes(lowered)
+        ) || null;
+    }
+
+    #resolveButtonFromLabel(labelEl) {
+        if (!labelEl) return null;
+        return labelEl.closest('button,[role="button"],.mdc-button') || labelEl.parentElement || null;
+    }
+
+    #clickElementCenter(el) {
+        if (!el || el.disabled) return false;
+        const rect = el.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                clientX: x,
+                clientY: y,
+                view: window,
+            }));
+        }
+        return true;
+    }
+
+    #findAdvancedSearchMenuTrigger() {
+        return document.querySelector('mat-icon.search-arrow-svg-icon.mat-mdc-menu-trigger') ||
+            document.querySelector('mat-icon.mat-mdc-menu-trigger.search-arrow-svg-icon') ||
+            document.querySelector('button[data-ta="run-search"] mat-icon.mat-mdc-menu-trigger') ||
+            document.querySelector('button[data-ta="run-search"] [aria-haspopup="menu"]') ||
+            null;
+    }
+
+    async #openAdvancedSearchActionMenu() {
+        const trigger = this.#findAdvancedSearchMenuTrigger();
+        if (!trigger) return false;
+        this.#clickElementCenter(trigger);
+        for (let i = 0; i < 30; i++) {
+            const menuItems = Array.from(document.querySelectorAll(
+                '.cdk-overlay-pane [role="menuitem"], .cdk-overlay-pane button.mat-mdc-menu-item, .mat-mdc-menu-panel [role="menuitem"], .mat-mdc-menu-panel button.mat-mdc-menu-item'
+            ));
+            if (menuItems.length) return true;
+            await webFuncs.sleep(100);
+        }
+        return false;
+    }
+
+    #findAdvancedSearchMenuItem(keyText) {
+        const lowered = String(keyText || '').trim().toLowerCase();
+        return Array.from(document.querySelectorAll(
+            '.cdk-overlay-pane [role="menuitem"], .cdk-overlay-pane button.mat-mdc-menu-item, .mat-mdc-menu-panel [role="menuitem"], .mat-mdc-menu-panel button.mat-mdc-menu-item'
+        )).find((el) => (el.textContent || '').trim().toLowerCase().includes(lowered)) || null;
+    }
+
+    async #clickAdvancedSearchMenuItem(keyText) {
+        const item = this.#findAdvancedSearchMenuItem(keyText);
+        if (!item) return false;
+        this.#clickElementCenter(item);
+        await webFuncs.sleep(300);
+        return true;
+    }
+
+    async #submitAdvancedSearchAction(oldCount) {
+        const clickIfReady = (el) => {
+            if (!el || el.disabled) return false;
+            el.click();
+            return true;
+        };
+
+        const addToHistoryLabel = this.#findButtonLabelByText('.mdc-button__label', 'add to history');
+        if (clickIfReady(this.#resolveButtonFromLabel(addToHistoryLabel))) {
+            return { clicked: true, mode: 'add-to-history' };
+        }
+
+        const addToQueryLabel = this.#findButtonLabelByText('.mdc-button__label', 'add to query');
+        if (clickIfReady(this.#resolveButtonFromLabel(addToQueryLabel))) {
+            await webFuncs.sleep(300);
+            const historyChanged = document.querySelectorAll('app-history-entries-list app-history-search-entry').length > oldCount;
+            if (historyChanged) {
+                return { clicked: true, mode: 'add-to-query' };
+            }
+            return { clicked: true, mode: 'add-to-query' };
+        }
+
+        const menuOpened = await this.#openAdvancedSearchActionMenu();
+        if (menuOpened) {
+            if (await this.#clickAdvancedSearchMenuItem('add to history')) {
+                return { clicked: true, mode: 'search-menu-add-to-history' };
+            }
+            if (await this.#clickAdvancedSearchMenuItem('add to query')) {
+                const historyChanged = document.querySelectorAll('app-history-entries-list app-history-search-entry').length > oldCount;
+                return { clicked: true, mode: historyChanged ? 'search-menu-add-to-query' : 'search-menu-add-to-query-no-history-yet' };
+            }
+        }
+
+        return { clicked: false, mode: '' };
     }
 
     /** 检查当前结果页是否已经对应指定查询表达式
@@ -3648,10 +3882,21 @@ class WosQuery {
     async buildQuery(expr = 'PY=(2025)') {
         // 进入高级搜索页面
         await wosGoto.goToAdvancedSearchPage();
+        const readyState = await this.#waitForAdvancedSearchReady(100);
+        if (!readyState.inputReady || !readyState.inputVisible) {
+            return {
+                uuid: webFuncs.randomUuid(),
+                ref_count: 0,
+                rowText: expr,
+                status: 'failed',
+                error_code: 'advanced search page not ready',
+                debug: readyState,
+            };
+        }
 
         // 从历史查询中记录中获取
         const result = this.#findQueryInHistory(expr);
-        if (result) {
+        if (result && result.ref_count !== '') {
             // 如果找到历史记录，直接使用
             const uuid = result.uuid;
             const ref_count = result.ref_count;
@@ -3666,36 +3911,25 @@ class WosQuery {
         // 设置搜索框内容
         const input = document.querySelector('#advancedSearchInputArea');
         if (input) {
-            input.value = expr;
-            input.dispatchEvent(new Event('input', { bubbles: true }));
+            this.#setNativeInputValue(input, expr);
             input.dispatchEvent(new Event('change', { bubbles: true }));
         }
         input?.dispatchEvent(new Event('input', { bubbles: true })); // 页面上的input监听器会响应
+        await webFuncs.sleep(200);
 
         const old_num = document.querySelectorAll('app-history-entries-list app-history-search-entry').length;
 
-        // 尝试找到 "add to history" 按钮
-        const findButtonLabelByText = (selector, keyText) => {
-            return Array.from(document.querySelectorAll(selector)).find((el) =>
-                (el.textContent || '').trim().toLowerCase().includes(keyText)
-            ) || null;
-        };
-
-        let add_his = findButtonLabelByText('.mdc-button__label', 'add to history');
-        if (!add_his) {
-            // 如果没有 "add to history"，执行 search
-            const temp = findButtonLabelByText('.button-row.adv.ng-star-inserted .mdc-button__label', 'search');
-            if (temp) {
-                temp.parentElement?.querySelector('mat-icon')?.click();
-                await webWait.waitForElementBySelector(".mat-mdc-menu-item-text span", 100);
-                document.querySelector('.mat-mdc-menu-item-text span')?.click();
-                // 再次尝试获取 "add to history"
-
-                await webFuncs.sleep(500); // 等待2秒，确保结果加载完成
-                add_his = findButtonLabelByText('.mdc-button__label', 'add to history');
-            }
+        const submitResult = await this.#submitAdvancedSearchAction(old_num);
+        if (!submitResult.clicked) {
+            return {
+                uuid: webFuncs.randomUuid(),
+                ref_count: 0,
+                rowText: expr,
+                status: 'failed',
+                error_code: 'advanced search action button not ready',
+                debug: this.#advancedSearchState(),
+            };
         }
-        add_his?.parentElement?.click();
 
         // 2秒内, 检查是否有错误信息出现
         const search_error = await webWait.waitForElementBySelector('.search-error.error-code.light-red-bg.ng-star-inserted', 20);
@@ -3706,6 +3940,7 @@ class WosQuery {
                 rowText: expr,
                 status: 'failed',
                 error_code: document.querySelector('.search-error.error-code.light-red-bg.ng-star-inserted')?.textContent?.trim() || 'unknown error',
+                debug: this.#advancedSearchState(),
             };
         }
 
@@ -3718,25 +3953,22 @@ class WosQuery {
                 ref_count: 0,
                 rowText: expr,
                 status: 'failed',
-                error_code: 'unknown error',
+                error_code: 'advanced search history did not update',
+                debug: this.#advancedSearchState(),
             };
         }
 
-        // 等待查询结果加载完成#
-        const resEl = document.querySelector('app-history-search-entry');
-        let uuid = resEl?.getAttribute('data-hist-qid');
-        let ref_count = resEl?.querySelector('a[data-ta="SearchHistory-records-count"]')?.textContent || '';
-        if (!ref_count) {
-            ref_count = 0
-        } else {
-            ref_count = parseInt(ref_count.replace(/,/g, ''));
-        }
+        // 等待新增历史记录里的 UUID 和记录数加载完成。
+        const historyResult = await this.#waitForHistoryResult(old_num, expr, 100);
+        if (historyResult) return historyResult;
         return {
-            uuid: uuid,
-            ref_count,
+            uuid: webFuncs.randomUuid(),
+            ref_count: 0,
             rowText: expr,
-            status: 'success',
-        }
+            status: 'failed',
+            error_code: 'advanced search history result did not expose uuid/count',
+            debug: this.#advancedSearchState(),
+        };
     }
 
     /** 在旧版结果页上下文中执行查询
@@ -3868,44 +4100,49 @@ class WosQuery {
         return { wosIds, dois };
     }
 
+    async #parseWithSearchEngine(text, options = {}) {
+        const llmParse = Boolean(options.llmParse);
+        const response = await fetch(`${window.location.origin}/api/esti/SearchEngine/parse`, {
+            method: 'POST',
+            headers: {
+                'accept': 'application/json',
+                'content-type': 'text/plain;charset=UTF-8',
+                ...(wosInfo.sid ? { 'x-1p-wos-sid': wosInfo.sid } : {}),
+            },
+            credentials: 'same-origin',
+            body: JSON.stringify({
+                "userQuery": text,
+                "databaseID": "WOSCC",
+                "llmParse": llmParse
+            })
+        });
+
+        if (!response.ok) {
+            console.error(`API request failed with status: ${response.status}`);
+            return null;
+        }
+
+        const data = await response.json();
+        const rowText = data[0]?.query?.[0]?.rowText || data?.query?.[0]?.rowText || '';
+        if (rowText) {
+            await this.openQueryPage(rowText);
+        }
+        return rowText;
+    }
+
     /** 使用 WOS 内部搜索引擎解析自然语句并执行查询
      */
     async parseQueryWithSearchEngine(text) {
         try {
-            const response = await fetch(`${window.location.origin}/api/esti/SearchEngine/parse`, {
-                method: 'POST',
-                headers: {
-                    'accept': 'application/json',
-                    'content-type': 'text/plain;charset=UTF-8',
-                    ...(wosInfo.sid ? { 'x-1p-wos-sid': wosInfo.sid } : {}),
-                },
-                credentials: 'same-origin',
-                body: JSON.stringify({
-                    "userQuery": text,
-                    "databaseID": "WOSCC",
-                    "llmParse": false
-                })
-            });
-
-            // 检查响应是否成功
-            if (!response.ok) {
-                console.error(`API request failed with status: ${response.status}`);
-                return null;
-            }
-
-            // 尝试解析 JSON
-            const data = await response.json();
-            const rowText = data[0]?.query[0]?.rowText;
-            if (rowText) {
-                await this.openQueryPage(rowText);
-            }
-            return rowText;
+            await wosGoto.goToBasicSearchPage();
+            return await this.#parseWithSearchEngine(text, { llmParse: false });
 
         } catch (error) {
             console.error('Error calling WOS SearchEngine parse API:', error);
             return null;
         }
     }
+
 }
 const wosQuery = WosQuery.getInstance();
 

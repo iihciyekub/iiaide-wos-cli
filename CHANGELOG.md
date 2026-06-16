@@ -3,6 +3,458 @@
 All notable changes are documented here. The version in `package.json` is the
 authoritative CLI version.
 
+## 0.6.50 - 2026-06-17
+
+- Document the `query batch --expr-file ./queries.txt` file format in the
+  HTML command help, static cheatsheet, and text docs.
+- Add a two-dimensional-materials scenario showing one WOS advanced-search
+  expression per line, with blank lines and `#` comments ignored.
+
+## 0.6.49 - 2026-06-17
+
+- Allow `query batch` to accept multiple inline query expressions with repeated
+  `--expr`, in addition to `--expr-file`.
+- Make default `query batch` output JSONL, one LLM-readable result envelope per
+  query, including URL, query text, sort order, cache status, and errors.
+- Reuse cached SQLite `query build` results per batch item and run uncached
+  batch items sequentially in one WOS browser session.
+
+## 0.6.48 - 2026-06-17
+
+- Sync the static HTML command cheatsheet with the `query build` single-line
+  JSON output and SQLite cache reuse behavior.
+- Add an agent development rule requiring command/help HTML surfaces to be
+  updated together with CLI behavior, stdout, option, audit, and SQLite changes.
+
+## 0.6.47 - 2026-06-17
+
+- Change default `query build` stdout to a compact single-line JSON result with
+  `uuid`, `url`, `count`, `queryText`, and `cached`.
+- Reuse successful SQLite `query build` results for the same task/query text by
+  default, avoiding a repeat WOS browser query unless `--force` is passed.
+- Include milliseconds in generated run IDs so rapid consecutive operations do
+  not overwrite audit rows in SQLite.
+
+## 0.6.46 - 2026-06-17
+
+- Include the resolved summary URL/sort order in the `query build --json` data
+  payload.
+
+## 0.6.45 - 2026-06-17
+
+- Make `query build` submit WOS advanced-search expressions through a
+  history-safe action path: prefer `Add to history`, otherwise open the Search
+  split-button menu through its arrow icon and select `Add to history`.
+- Remove the risky advanced-search fallback that clicked the main Search/run
+  button and could jump directly to the summary page before history metadata
+  was captured.
+
+## 0.6.44 - 2026-06-17
+
+- Make WOSID examples editable in the HTML command manuals so changing the
+  WOSID input re-renders displayed commands and copied command text.
+- Change HTML command copy buttons to icon-only controls that show a check mark
+  after a successful copy instead of replacing the button with text.
+
+## 0.6.43 - 2026-06-17
+
+- Add explicit HTML command-help recipes for confirmed empty WOS relation
+  resultsets, including SQLite `db list` review and `--force` re-check flows.
+- Clarify in the HTML Database section that confirmed empty relation lookups
+  return `ok=true`, `count=0`, and `wosids=[]`.
+
+## 0.6.42 - 2026-06-17
+
+- Treat confirmed zero-count record relation ingest results as completed SQLite
+  resultsets instead of failures.
+- Reuse stored zero-count citations/references/related ingest metadata for the
+  same source WOSID and relation type unless `--force` is passed.
+- Mark empty relation summaries with `emptyResult=true` so audit logs can
+  distinguish confirmed empty results from failed collection.
+
+## 0.6.41 - 2026-06-17
+
+- Add read-only `db list` lookups over `wosData.sqlite` for stored UUID and
+  WOSID relation WOSID lists.
+- Support `db list --context` to include stored title, abstract, keyword, and
+  author context for each listed WOSID without opening WOS.
+- Document the underlying SQLite relation-list queries for direct audit review.
+
+## 0.6.40 - 2026-06-17
+
+- Change `record ingest` for citations/references/related to use the front-end
+  WOSID collection path: open the relation UUID in `relevance` order, scroll and
+  collect WOSIDs from at most the first 6 pages, then query those WOSIDs for
+  full-record ingest.
+- Mark relation ingest resultsets with `exportMode=front-scroll-wosid` and
+  `uuidDirectExport=false` in SQLite so those UUIDs are not treated as directly
+  exportable full-record UUIDs.
+- Preserve relation-page WOSID order when storing relation resultset items, even
+  if the follow-up WOSID query returns records in a different order.
+
+## 0.6.39 - 2026-06-16
+
+- Make SQLite relation ingest open the resolved WOS summary URL with a full
+  browser navigation and confirm the page UUID before starting TXT export.
+- Fix browser-side UUID TXT/BibTeX export refreshes so they preserve the
+  requested `sortBy` instead of re-opening the result set with the default
+  `relevance` order.
+
+## 0.6.38 - 2026-06-16
+
+- Preserve the actual WOS summary-page sort order when resolving query and
+  relation UUIDs, and use that sort order for SQLite ingest exports instead of
+  forcing `relevance`.
+- Fix relation ingest exports for citations/references/related UUIDs whose WOS
+  export endpoint expects `date-descending` or another page-derived `sortBy`
+  value.
+
+## 0.6.37 - 2026-06-16
+
+- Make BibTeX UUID exports use the same automatic relation/ref-query detection
+  as TXT exports, so citations/references/related UUIDs can be exported without
+  manually passing `--ref-query` when the page context identifies them.
+
+## 0.6.36 - 2026-06-16
+
+- Fix `record ingest` relation exports by opening the resolved relation summary
+  page before calling the WOS TXT export API, matching the normal export
+  workflow's page-context preparation.
+- Include short WOS export failure response bodies in browser-side TXT/BibTeX
+  debug logs so rejected export requests are easier to diagnose.
+
+## 0.6.35 - 2026-06-16
+
+- Add a `Recipes` page to the audit HTML CLI Help manual with scenario-based
+  command sequences for project setup, SID validation, query ingest, relation
+  ingest, file downloads, and audit review.
+
+## 0.6.34 - 2026-06-16
+
+- Remove the redundant filter-form refresh icon from the live audit page while
+  keeping the header `Sync` control and Enter-to-submit filters.
+- Restyle the command manual navigation as a lighter API-docs-style sidebar
+  instead of a bordered panel.
+
+## 0.6.33 - 2026-06-16
+
+- Restyle run cards so `Run ID` appears first as a compact pill and make the
+  timeline query text read as a labeled field/value row.
+- Tighten the audit viewer controls toward the OpenAI batch-page feel with
+  icon-only refresh and pager buttons.
+- Keep the live audit page and static export visually aligned.
+
+## 0.6.32 - 2026-06-16
+
+- Turn UUID values in the audit timeline and audit summary cards into WOS
+  summary links.
+- Show timeline query text directly on the card when it is available, and make
+  the timestamp badge a lighter transparent pill.
+- Keep the live audit page and static audit export aligned with the same link
+  and card layout behavior.
+
+## 0.6.18 - 2026-06-16
+
+- Fix `query build` advanced-search submission on newer WOS pages by accepting
+  `Add to query` and direct `run-search` controls instead of waiting only for
+  the older `Add to history` flow.
+- Make the browser-side advanced-search helper retry with `run-search` after an
+  `Add to query` click when the query history does not update immediately.
+
+## 0.6.23 - 2026-06-16
+
+- Add `db audit-html`, a read-only local audit viewer that serves an HTML page
+  over `http://127.0.0.1:<port>/` and loads `wosData.sqlite` timeline data over
+  AJAX.
+- Add `docs/audit-view.html` and local JSON endpoints for overview, UUID
+  detail, and WOSID detail so one project can be reviewed as a live audit
+  timeline without starting WOS.
+
+## 0.6.24 - 2026-06-16
+
+- Add `db audit-export` to write a static audit snapshot from `wosData.sqlite`
+  into a project report directory as HTML, JSON, or both.
+- Default static audit exports to
+  `.iiaide-wos-cli/audit/reports/<timestamp>/audit-report.{html,json}` so audit
+  review can be archived without keeping a local HTTP server running.
+
+## 0.6.25 - 2026-06-16
+
+- Restyle the dynamic audit viewer and static audit export pages to a lighter,
+  calmer workspace aesthetic with a vertical timeline presentation that is
+  easier to scan during audit review.
+- Keep the same audit data and commands while making `db audit-html` and
+  `db audit-export` visually consistent with each other.
+
+## 0.6.26 - 2026-06-16
+
+- Add an integrated command-help manual to the audit HTML workspace so `db
+  audit-html` now includes both audit review and CLI command reference in one
+  paged interface.
+- Add a structured command catalog and expose it through the local audit server,
+  keeping the live audit view and static audit export consistent.
+
+## 0.6.27 - 2026-06-16
+
+- Change audit HTML page switching to pill-style segmented controls for a
+  cleaner workspace feel.
+- Make timeline nodes in both the live audit view and static audit export
+  collapsible so dense audit detail can stay tucked behind expandable entries.
+
+## 0.6.28 - 2026-06-16
+
+- Keep the main page/tab switches as pill controls, but restore the command
+  manual side navigation to a normal panel-style list for clearer hierarchy.
+
+## 0.6.29 - 2026-06-16
+
+- Tighten the live audit viewer and static audit export into a denser
+  API-docs-style layout with white backgrounds, smaller type, thinner borders,
+  and more compact command sections.
+- Add a `Sync` control to the live audit HTML viewer so the current SQLite
+  overview can be reloaded from the page without restarting the local server.
+
+## 0.6.30 - 2026-06-16
+
+- Make the command manual pager a single compact row in the audit HTML pages.
+- Remove section-level `Copy all` buttons from the command manual and keep only
+  lightweight icon copy buttons on individual command code blocks.
+
+## 0.6.31 - 2026-06-16
+
+- Display audit timestamps in the user's local time zone in the live audit
+  HTML page, static audit export, and non-JSON `db searches`, `db artifacts`,
+  `db runs`, and `db timeline` output.
+- Keep SQLite and machine-readable JSON output on the existing UTC ISO
+  timestamps for stable storage and automation.
+
+## 0.6.22 - 2026-06-16
+
+- Add `db runs` for read-only SQLite audit lookup of command-level run
+  summaries, with optional `--limit` and `--uuid` filters.
+- Add `db timeline` for merged run/search/artifact audit review in one
+  time-ordered stream, with optional `--limit`, `--uuid`, and `--wosid`
+  filters.
+
+## 0.6.21 - 2026-06-16
+
+- Add `db searches` for read-only SQLite audit lookup of stored query/result
+  history, with optional `--limit`, `--uuid`, and `--wosid` filters.
+- Add `db artifacts` for read-only SQLite audit lookup of recorded artifact
+  paths, with optional `--limit` and `--uuid` filters.
+
+## 0.6.20 - 2026-06-16
+
+- Add SQLite audit tables in `wosData.sqlite` for command runs, query/result
+  metadata, and artifact records.
+- Make `query build`, `query parse`, `query ids`, `query batch`, `record`
+  result discovery, raw export commands, and import summaries write structured
+  audit rows into SQLite in addition to `audit/*.jsonl`.
+- Keep structured WOS record storage separate: only ingest commands still write
+  parsed WOS records and ordered result-set items.
+
+## 0.6.19 - 2026-06-16
+
+- Simplify WOS no-result query errors so `query build` returns the clean
+  user-facing message `Your search found no results` instead of appending noisy
+  browser-state details.
+
+## 0.6.17 - 2026-06-16
+
+- Change the default storage model from multi-task `./tasks/` mode to one
+  current-directory project store at `./.iiaide-wos-cli/`.
+- Make default commands stop requiring `--task`; the current directory name is
+  now the default managed project id.
+- Update workspace/list/tasks/latest/show/path/validate/clear behavior and the
+  interactive menu to follow the single-project model.
+- Rewrite README, usage, commands, llm, curl, agents, and cheatsheet docs to
+  document the new default project layout.
+
+## 0.6.16 - 2026-06-16
+
+- Add `docs/command-cheatsheet.html`, a static categorized CLI command
+  cheatsheet with formatted command blocks, search filtering, and copy buttons.
+
+## 0.6.15 - 2026-06-16
+
+- Add `iiaide-wos tasks` for a quick read-only list of existing task names in
+  the current `tasks` root. It reads both `tasks/index.json` and managed task
+  directories with `project.json`, and does not create a new task.
+
+## 0.6.14 - 2026-06-16
+
+- Make `db uuid --uuid <uuid>` return both UUID metadata and ordered context
+  rows from the task-level SQLite database.
+- Keep `db context` as the explicit relation/self context selector, but let
+  UUID lookup expose its own stored rows directly for one-step review.
+
+## 0.6.13 - 2026-06-16
+
+- Add local SQLite lookup commands:
+  `db uuid`, `db wosid`, and `db context`.
+- `db uuid --uuid <uuid>` returns result-set metadata from
+  `wosData.sqlite`; `db wosid --wosid <id>` returns the stored self record plus
+  citations/references/related UUID metadata; `db context --wosid <id> --type
+  <self|citations|references|related>` returns ordered
+  `wosid/title/abstract/authors/keywords` context rows without opening WOS.
+
+## 0.6.12 - 2026-06-16
+
+- Make `record ingest --wosid <id> --type <citations|references|related>`
+  reuse existing task-level SQLite rows for the same WOSID/type pair. If
+  `wosData.sqlite` already has an ingested result set with ordered items, the
+  command writes a reused run summary and skips WOS browser/export work.
+- Keep `--force` as the explicit way to refresh an already-ingested WOSID/type
+  relation.
+
+## 0.6.11 - 2026-06-16
+
+- Add task-level SQLite ingest commands:
+  `iiaide-wos query ingest ...` and
+  `iiaide-wos record ingest --wosid <id> --type <citations|references|related>`.
+- Store structured query/record-ingest data in `tasks/<task-id>/wosData.sqlite`
+  with run timestamps, result-set metadata, ordered UUID WOSID positions, and
+  WOS records keyed by WOSID.
+- Keep `run` and `bib` as file-download-only commands. TXT/BibTeX downloads do
+  not parse JSON or write SQLite; only ingest commands do in-memory
+  TXT-to-record conversion before writing SQLite.
+
+## 0.6.10 - 2026-06-16
+
+- Add WOS reference-query export support for TXT/BibTeX UUID downloads. TXT
+  export automatically retries a failed batch with `isRefQuery=true`, matching
+  WOS citations/references/related-record result-set exports.
+- Add `--ref-query` and `--no-ref-query` for explicit export request-mode
+  debugging, and record the resolved TXT export mode in run summaries.
+
+## 0.6.9 - 2026-06-16
+
+- Add `iiaide-wos record collect --wosid <id>` to resolve citations,
+  references, and related-record UUIDs, collect WOS IDs from up to the first 20
+  pages of each relation result set, and save relation JSON plus WOSID CSV
+  artifacts.
+- Make browser-side UUID page WOSID collection accumulate rows across requested
+  pages instead of returning only the most recently collected page.
+
+## 0.6.8 - 2026-06-16
+
+- Remove the `iiaide-wos query smart` command from the CLI surface. Natural
+  language query parsing remains available through `iiaide-wos query parse`.
+- Remove the public browser-side smart query helper binding from
+  `window.wos.query` so automation callers do not accidentally use the removed
+  command path.
+
+## 0.6.7 - 2026-06-16
+
+- Revert `iiaide-wos query smart --text <text>` to the traditional
+  `smartSearchWithSearchEngine()` path instead of operating the visible Smart
+  Search input box.
+- Remove the browser-side input-version Smart Search helpers from the public
+  `window.wos.query` API to avoid accidentally using the slower page-input
+  workflow.
+
+## 0.6.6 - 2026-06-16
+
+- Forward browser-side `[iiaide-wos]` console debug messages to CLI `--debug`
+  output while a WOS browser API call is running.
+- Add step-level debug messages for input-version Smart Search, including page
+  open, input readiness, input setting, submit action, result-page wait, and
+  UUID/count read completion without printing the full search text.
+
+## 0.6.5 - 2026-06-16
+
+- Add browser-side `window.wos.query.composeQuerySmartSearch(text)` as the
+  complete input-version Smart Search workflow: open the WOS smart-search page,
+  enter text in the visible input, submit the page action, then return
+  UUID/count metadata from the generated result page.
+- Route `iiaide-wos query smart --text <text>` through
+  `composeQuerySmartSearch()` so UUID and count discovery are owned by the
+  injected `wos.js` helper instead of split between browser helper and CLI code.
+
+## 0.6.4 - 2026-06-16
+
+- Change `iiaide-wos query smart --text <text>` to operate the WOS Smart
+  Search page directly: open `/wos/woscc/smart-search`, locate the smart-search
+  input, enter the text with native input events, submit the page action, and
+  read UUID/count metadata from the generated result page.
+- Add browser-side `window.wos.query.smartSearchFromInput()` for direct smart
+  search box automation while keeping `smartSearchWithSearchEngine()` available
+  as a lower-level parser helper.
+
+## 0.6.3 - 2026-06-16
+
+- Add `iiaide-wos query smart --text <text>` for WOS Smart Search style
+  natural-language UUID discovery through the injected `wos.js` helper.
+- Expose the browser-side `window.wos.query.smartSearchWithSearchEngine()`
+  helper, which opens WOS smart search, asks the WOS SearchEngine parser to use
+  LLM parsing, opens the generated result page, and returns UUID/count metadata.
+
+## 0.6.2 - 2026-06-16
+
+- Prevent the interactive menu from creating a new placeholder task when the
+  task directory already contains managed `project.json` task folders.
+- Restore `index.json` and `latest` from discovered managed task directories
+  before falling back to automatic task creation.
+
+## 0.6.1 - 2026-06-16
+
+- Make WOS query/result-set count detection wait for count metadata instead of
+  treating an empty page attribute as zero.
+- Read result-set counts from multiple WOS summary/history metadata locations
+  and fall back to the UUID in the current URL when the summary DOM has not
+  exposed the UUID attribute yet.
+
+## 0.6.0 - 2026-06-16
+
+- Replace the old single-command task layout with a project-oriented structure:
+  `project.json`, `state.json`, `runs/<run-id>/`, `audit/*.jsonl`,
+  `resultsets/<uuid>/`, and `pdf/`.
+- Separate user/LLM-facing audit streams from CLI runtime noise. Searches,
+  result sets, and artifact paths are written under `audit/`, while debug,
+  progress, sanitized inputs, and per-command summaries are written under
+  `runs/<run-id>/`.
+- Move TXT, BibTeX, combined BibTeX, and WOSID CSV artifacts under
+  `resultsets/<uuid>/...` and stop documenting the old `raw/`,
+  `manifest.json`, `summary.json`, and `logs/progress.jsonl` task roots.
+- Update validation, clear, show, import, query, record, TXT export, BibTeX
+  export, and batch UUID export paths for the new layout without legacy
+  directory compatibility.
+
+## 0.5.3 - 2026-06-16
+
+- Replace SID validation's fixed `networkidle` wait with a WOS session-signal
+  wait, so debug timing is no longer delayed by background analytics or ad
+  requests after the WOS shell opens.
+- Skip `networkidle` while preparing WOS summary request context and let the
+  injected WOS page helper read summary metadata directly after DOM readiness.
+
+## 0.5.2 - 2026-06-16
+
+- Include `loginElapsedMs=<ms>` in SID validation debug output so
+  `iiaide-wos sid --sid "<SID>" --debug` shows how long WOS SID login and
+  acceptance took.
+
+## 0.5.1 - 2026-06-16
+
+- Add `--debug` for WOS browser-backed commands so SID initialization, session
+  validation, WOS helper injection, and query/record browser API waits can be
+  inspected on stderr without changing default stdout results.
+
+## 0.5.0 - 2026-06-16
+
+- Add `? Commands doc` to the interactive workflow panel so users can open the
+  GitHub command reference in their default browser.
+- Let the same interactive shortcut accept `help` or `docs` as aliases.
+- Let SID setup accept a pasted SID directly at the method prompt.
+- Replace generic WOS `unknown error` query failures with contextual guidance
+  that includes the query expression and next action.
+- Harden browser-side `query build` by waiting for the WOS advanced-search
+  input and action controls before submitting, using native input events, and
+  returning browser-page state when UUID creation fails.
+- Open the WOS basic-search page before `query parse` calls the WOS parse API,
+  so every browser-backed query and record command starts from its expected WOS
+  page before operating.
+
 ## 0.4.103 - 2026-06-16
 
 - Remove the interactive Settings menu item `5.3 Clear all SIDs` to simplify

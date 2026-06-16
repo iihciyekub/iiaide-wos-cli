@@ -9,16 +9,29 @@ const cli = require("../src/iiaide-wos");
 const playwrightInstall = require("../src/lib/playwright-install");
 const { readJson, writeJson } = require("../src/lib/io");
 const { errorCode, llmErrorResult, llmResult } = require("../src/lib/llm-output");
-const { askSidFromBrowserOrManual, currentTaskSelection, formatBytes, formatRuntime, isWosSourceLike, listTaskHints, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
+const { askSidFromBrowserOrManual, currentTaskSelection, formatBytes, formatRuntime, isLikelySidInput, isWosSourceLike, listTaskHints, openUrl, printHeader, resolveTaskSelection, taskPromptHelp, taskSelectionHint } = require("../src/lib/interactive");
 const { createProgress, createSpinner } = require("../src/lib/terminal");
 const { callWosBrowserApi } = require("../src/lib/wos-browser-bridge");
 const { normalizeBatchResult } = require("../src/lib/wos-browser-export");
 const { wosIdsEquivalent } = require("../src/lib/wos-ids");
-const { normalizeUuidResult, publicResult, queryTextForIds } = require("../src/lib/wos-query-record");
+const { formatUuidDebug, normalizeUuidError, normalizeUuidResult, publicResult, queryTextForIds } = require("../src/lib/wos-query-record");
 function temporaryDirectory() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "iiaide-wos-test-"));
   process.env.IIAIDE_WOS_CONFIG = path.join(root, "global-config.json");
   return root;
+}
+
+function writeProjectMarker(taskDir) {
+  writeJson(path.join(taskDir, "project.json"), {
+    command: "iiaide-wos",
+    kind: "wos-project",
+  });
+}
+
+function firstRunDir(taskDir) {
+  const runsDir = path.join(taskDir, "runs");
+  const [runId] = fs.readdirSync(runsDir).sort();
+  return path.join(runsDir, runId);
 }
 
 test("rejects unsafe task IDs and malformed option values", () => {
@@ -50,12 +63,24 @@ test("places named tasks inside tasks root", () => {
   assert.equal(args.outDir, path.join(root, "safe"));
 });
 
+test("defaults to a single managed project store in the current directory", () => {
+  const args = cli.parseArgs(["node", "cli", "run", "--uuid", "abc"]);
+  assert.equal(args.projectMode, true);
+  assert.equal(args.tasksRoot, path.join(process.cwd(), ".iiaide-wos-cli"));
+  assert.equal(args.outDir, path.join(process.cwd(), ".iiaide-wos-cli"));
+  assert.equal(args.taskId, path.basename(process.cwd()));
+});
+
 test("parses BibTeX export tasks", () => {
   const root = temporaryDirectory();
   const args = cli.parseArgs(["node", "cli", "bib", "--uuid", "abc", "--task", "refs", "--tasks-root", root]);
   assert.equal(args.command, "bib");
   assert.equal(args.url, "https://www.webofscience.com/wos/woscc/summary/abc/relevance/1");
   assert.equal(args.outDir, path.join(root, "refs"));
+  const refArgs = cli.parseArgs(["node", "cli", "run", "--uuid", "abc", "--ref-query", "--task", "ref", "--tasks-root", root]);
+  assert.equal(refArgs.refQuery, true);
+  const normalArgs = cli.parseArgs(["node", "cli", "run", "--uuid", "abc", "--no-ref-query", "--task", "normal", "--tasks-root", root]);
+  assert.equal(normalArgs.refQuery, false);
 });
 
 test("parses batch UUID TXT tasks", () => {
@@ -77,6 +102,9 @@ test("parses Query and Record command families", () => {
   assert.equal(queryArgs.queryExpr, "PY=(2026)");
   assert.equal(queryArgs.outDir, path.join(root, "q1"));
 
+  const debugArgs = cli.parseArgs(["node", "cli", "query", "build", "--expr", "PY=(2026)", "--debug", "--task", "q-debug", "--tasks-root", root]);
+  assert.equal(debugArgs.debug, true);
+
   const batchArgs = cli.parseArgs(["node", "cli", "query", "batch", "--expr-file", "queries.txt", "--jsonl", "--task", "qb1", "--tasks-root", root]);
   assert.equal(batchArgs.command, "query");
   assert.equal(batchArgs.queryCommand, "batch");
@@ -84,11 +112,60 @@ test("parses Query and Record command families", () => {
   assert.equal(batchArgs.jsonl, true);
   assert.equal(batchArgs.outDir, path.join(root, "qb1"));
 
+  const inlineBatchArgs = cli.parseArgs([
+    "node", "cli", "query", "batch",
+    "--expr", "PY=(2025)",
+    "--expr", "PY=(2026)",
+    "--task", "qb-inline",
+    "--tasks-root", root,
+  ]);
+  assert.deepEqual(inlineBatchArgs.queryExprs, ["PY=(2025)", "PY=(2026)"]);
+  assert.equal(inlineBatchArgs.queryExpr, "PY=(2026)");
+  assert.deepEqual(cli.readQueryBatchExpressions(inlineBatchArgs), ["PY=(2025)", "PY=(2026)"]);
+
+  const ingestArgs = cli.parseArgs(["node", "cli", "query", "ingest", "--expr", "PY=(2026)", "--description", "recent papers", "--task", "qi1", "--tasks-root", root]);
+  assert.equal(ingestArgs.command, "query");
+  assert.equal(ingestArgs.queryCommand, "ingest");
+  assert.equal(ingestArgs.queryExpr, "PY=(2026)");
+  assert.equal(ingestArgs.semanticDescription, "recent papers");
+
   const recordArgs = cli.parseArgs(["node", "cli", "record", "relations", "--wosid", "WOS:ABC", "--type", "citations", "--task", "r1", "--tasks-root", root]);
   assert.equal(recordArgs.command, "record");
   assert.equal(recordArgs.recordCommand, "relations");
   assert.deepEqual(recordArgs.wosIds, ["WOS:ABC"]);
   assert.equal(recordArgs.relationType, "citations");
+
+  const recordIngestArgs = cli.parseArgs(["node", "cli", "record", "ingest", "--wosid", "WOS:ABC", "--type", "references", "--task", "ri1", "--tasks-root", root]);
+  assert.equal(recordIngestArgs.command, "record");
+  assert.equal(recordIngestArgs.recordCommand, "ingest");
+  assert.equal(recordIngestArgs.relationType, "references");
+
+  const dbArgs = cli.parseArgs(["node", "cli", "db", "context", "--wosid", "WOS:ABC", "--type", "ref", "--task", "db1", "--tasks-root", root]);
+  assert.equal(dbArgs.command, "db");
+  assert.equal(dbArgs.dbCommand, "context");
+  assert.equal(dbArgs.relationType, "ref");
+
+  const dbListArgs = cli.parseArgs(["node", "cli", "db", "list", "--wosid", "WOS:ABC", "--type", "citations", "--context", "--task", "db1", "--tasks-root", root]);
+  assert.equal(dbListArgs.command, "db");
+  assert.equal(dbListArgs.dbCommand, "list");
+  assert.equal(dbListArgs.context, true);
+
+  const auditHtmlArgs = cli.parseArgs(["node", "cli", "db", "audit-html", "--task", "db1", "--tasks-root", root, "--port", "0"]);
+  assert.equal(auditHtmlArgs.command, "db");
+  assert.equal(auditHtmlArgs.dbCommand, "audit-html");
+  assert.equal(auditHtmlArgs.port, 0);
+
+  const auditExportArgs = cli.parseArgs(["node", "cli", "db", "audit-export", "--task", "db1", "--tasks-root", root, "--format", "html", "--report-dir", "./tmp-report"]);
+  assert.equal(auditExportArgs.command, "db");
+  assert.equal(auditExportArgs.dbCommand, "audit-export");
+  assert.equal(auditExportArgs.outputFormat, "html");
+  assert.equal(auditExportArgs.reportDir, path.resolve("tmp-report"));
+
+  const collectArgs = cli.parseArgs(["node", "cli", "record", "collect", "--wosid", "WOS:ABC", "--types", "references,related", "--pages", "12", "--task", "rc1", "--tasks-root", root]);
+  assert.equal(collectArgs.command, "record");
+  assert.equal(collectArgs.recordCommand, "collect");
+  assert.deepEqual(collectArgs.relationTypes, ["references", "related"]);
+  assert.equal(collectArgs.pages, 12);
 });
 
 test("help output groups command families for automation", () => {
@@ -97,10 +174,22 @@ test("help output groups command families for automation", () => {
   });
   assert.equal(result.status, 0);
   assert.match(result.stdout, /Command groups:/);
+  assert.doesNotMatch(result.stdout, /iiaide-wos query smart/);
   assert.match(result.stdout, /Query UUID discovery:/);
   assert.match(result.stdout, /Record relation UUID discovery:/);
+  assert.match(result.stdout, /SQLite lookup:/);
+  assert.match(result.stdout, /iiaide-wos tasks/);
+  assert.match(result.stdout, /iiaide-wos record collect --wosid <id>/);
   assert.match(result.stdout, /Output conventions:/);
   assert.match(result.stdout, /docs\/commands\.md/);
+});
+
+test("query smart command is not supported", () => {
+  const result = spawnSync(process.execPath, [path.join(__dirname, "..", "bin", "iiaide-wos.js"), "query", "smart", "--text", "AI safety papers"], {
+    encoding: "utf8",
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unknown query command: smart/);
 });
 
 test("documentation guide links the structured command reference", () => {
@@ -110,6 +199,24 @@ test("documentation guide links the structured command reference", () => {
   assert.match(docsReadme, /docs\/llm\.md/);
   assert.match(rootReadme, /CLI Command Reference/);
   assert.match(rootReadme, /LLM Calling Guide/);
+});
+
+test("tasks command lists existing task names from the current tasks root", () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const taskDir = path.join(tasksRoot, "existing-task");
+  fs.mkdirSync(taskDir, { recursive: true });
+  writeProjectMarker(taskDir);
+  writeJson(path.join(taskDir, "state.json"), {
+    status: "completed",
+    uuid: "uuid-1",
+    updatedAt: "2026-06-16T12:00:00.000Z",
+  });
+
+  const result = cli.listTaskNames(cli.parseArgs(["node", "cli", "tasks", "--tasks-root", tasksRoot]));
+  assert.equal(result.count, 1);
+  assert.deepEqual(result.taskIds, ["existing-task"]);
+  assert.equal(result.tasks[0].uuid, "uuid-1");
 });
 
 test("LLM output helpers normalize success and error envelopes", () => {
@@ -189,10 +296,171 @@ test("normalizes Query and Record UUID metadata without leaking SID", () => {
   result.sid = "SECRET";
   assert.equal(result.ok, true);
   assert.equal(result.count, 1234);
+  assert.equal(normalizeUuidResult(
+    { uuid: "uuid-2", ref_count: "8", sortBy: "date-descending", href: "https://example.test/wos/woscc/summary/uuid-2/date-descending/1" },
+    { operation: "record citations" }
+  ).sortBy, "date-descending");
   const output = publicResult(result);
   assert.deepEqual(Object.keys(output), ["ok", "taskId", "operation", "uuid", "count", "rowText", "source"]);
   assert.equal(JSON.stringify(output).includes("SECRET"), false);
   assert.equal(queryTextForIds(["WOS:A", "WOS:B"], ["10.1/a"]), "UT=(WOS:A OR WOS:B) OR DO=(10.1/a)");
+});
+
+test("Query UUID errors replace generic unknown browser failures with context", () => {
+  const error = normalizeUuidError("unknown error", {
+    operation: "query build",
+    rowText: "PY=(2026)",
+    debug: {
+      pathname: "/wos/woscc/advanced-search",
+      inputReady: true,
+      inputVisible: true,
+      inputValue: "PY=(2026)",
+      historyCount: 0,
+      buttonLabels: ["Search", "Add to history"],
+    },
+  });
+  assert.match(error, /query build failed for "PY=\(2026\)"/);
+  assert.match(error, /did not create a result-set UUID/);
+  assert.match(error, /path=\/wos\/woscc\/advanced-search/);
+  assert.match(error, /buttons=Search\|Add to history/);
+
+  const result = normalizeUuidResult(
+    { uuid: "ignored-on-failure", status: "failed", error_code: "unknown error", debug: { inputVisible: false } },
+    { operation: "query build", rowText: "PY=(2026)" }
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /inputVisible=false/);
+  assert.match(result.error, /Check the query in Web of Science advanced search/);
+  assert.match(formatUuidDebug({ pathname: "/wos/woscc/advanced-search", historyCount: 1 }), /history=1/);
+});
+
+test("Query UUID no-result errors collapse to the user-facing WOS message", () => {
+  const error = normalizeUuidError("Your search found no resultsCheck the spelling and/or broaden your search parameters.", {
+    operation: "query build",
+    rowText: "TP=(what is the )",
+    debug: {
+      pathname: "/wos/woscc/advanced-search",
+      inputValue: "TP=(what is the )",
+      historyCount: 10,
+      buttonLabels: ["Add to query"],
+      errorText: "Your search found no resultsCheck the spelling and/or broaden your search parameters.",
+    },
+  });
+  assert.equal(error, "Your search found no results");
+});
+
+test("browser query helper waits for advanced search readiness before submitting", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  const buildQuery = source.match(/async buildQuery\(expr = 'PY=\(2025\)'\) \{[\s\S]*?\n    \}/);
+  assert.ok(buildQuery, "buildQuery source should be present");
+  assert.match(source, /#advancedSearchState\(\)/);
+  assert.match(source, /#waitForAdvancedSearchReady/);
+  assert.match(source, /#submitAdvancedSearchAction/);
+  assert.match(buildQuery[0], /await this\.#waitForAdvancedSearchReady\(100\)/);
+  assert.match(buildQuery[0], /advanced search page not ready/);
+  assert.match(buildQuery[0], /this\.#setNativeInputValue\(input, expr\)/);
+  assert.match(source, /add to history\|add to query\|search/);
+  assert.match(source, /button\[data-ta="run-search"\]/);
+  assert.match(source, /#findAdvancedSearchMenuTrigger/);
+  assert.match(source, /search-arrow-svg-icon/);
+  assert.match(source, /search-menu-add-to-history/);
+  assert.doesNotMatch(source.match(/async #submitAdvancedSearchAction\(oldCount\) \{[\s\S]*?\n    \}/)?.[0] || "", /add-to-query-then-run-search|search-button/);
+  assert.match(buildQuery[0], /submitResult = await this\.#submitAdvancedSearchAction\(old_num\)/);
+  assert.match(buildQuery[0], /advanced search action button not ready/);
+  assert.match(buildQuery[0], /advanced search history did not update/);
+  assert.match(buildQuery[0], /debug: this\.#advancedSearchState\(\)/);
+});
+
+test("browser query helper waits for count metadata instead of defaulting to zero", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  const buildQuery = source.match(/async buildQuery\(expr = 'PY=\(2025\)'\) \{[\s\S]*?\n    \}/);
+  assert.ok(buildQuery, "buildQuery source should be present");
+  assert.match(source, /#readCurrentPageInfoSnapshot\(note = ''\)/);
+  assert.match(source, /this\.\#extractUuid\(window\.location\.href\)/);
+  assert.match(source, /summarySortMatch/);
+  assert.match(source, /sortBy,/);
+  assert.match(source, /const uuidReady = expectedUuid \? res\.uuid === expectedUuid : Boolean\(res\.uuid\)/);
+  assert.match(source, /uuidReady && res\.ref_count !== ''/);
+  assert.match(source, /#waitForHistoryResult\(oldCount, expr = '', maxTry = 100\)/);
+  assert.match(buildQuery[0], /result && result\.ref_count !== ''/);
+  assert.match(buildQuery[0], /this\.#waitForHistoryResult\(old_num, expr, 100\)/);
+});
+
+test("browser-backed commands navigate to their command-specific pages before operating", () => {
+  const browserSource = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  const cliSource = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const querySource = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "wos-query-record.js"), "utf8");
+
+  const buildQuery = browserSource.match(/async buildQuery\(expr = 'PY=\(2025\)'\) \{[\s\S]*?\n    \}/);
+  const parseQuery = browserSource.match(/async parseQueryWithSearchEngine\(text\) \{[\s\S]*?\n    \}/);
+  const openQueryPage = browserSource.match(/async openQueryPage\(rowText = 'PY=2025'\) \{[\s\S]*?\n    \}/);
+  const recordMethods = browserSource.match(/async collectCitationsByWosId[\s\S]*?async collectSharedReferencesBetweenWosIds\(wosid1, wosid2\) \{[\s\S]*?\n    \}/);
+  const requestContextStart = cliSource.indexOf("async function prepareWosRequestContext(page, args)");
+  const requestContextEnd = cliSource.indexOf("function pageContextUuid", requestContextStart);
+  const requestContext = requestContextStart >= 0 && requestContextEnd > requestContextStart
+    ? cliSource.slice(requestContextStart, requestContextEnd)
+    : "";
+  const runQueryStart = querySource.indexOf("async function runQueryBrowserCommand(page, args)");
+  const runRecordStart = querySource.indexOf("async function runRecordBrowserCommand(page, args)");
+  const publicResultStart = querySource.indexOf("function publicResult", runRecordStart);
+  const runQuery = runQueryStart >= 0 && runRecordStart > runQueryStart
+    ? querySource.slice(runQueryStart, runRecordStart)
+    : "";
+  const runRecord = runRecordStart >= 0 && publicResultStart > runRecordStart
+    ? querySource.slice(runRecordStart, publicResultStart)
+    : "";
+
+  assert.ok(buildQuery, "query build helper should be present");
+  assert.ok(parseQuery, "query parse helper should be present");
+  assert.ok(openQueryPage, "query result page helper should be present");
+  assert.ok(recordMethods, "record relation helpers should be present");
+  assert.ok(requestContext, "export request context helper should be present");
+  assert.ok(runQuery, "query command bridge should be present");
+  assert.ok(runRecord, "record command bridge should be present");
+
+  assert.match(buildQuery[0], /wosGoto\.goToAdvancedSearchPage\(\)/);
+  assert.match(parseQuery[0], /wosGoto\.goToBasicSearchPage\(\)/);
+  assert.match(browserSource, /await this\.openQueryPage\(rowText\)/);
+  assert.doesNotMatch(browserSource, /goToSmartSearchPage/);
+  assert.doesNotMatch(browserSource, /smartSearchWithSearchEngine/);
+  assert.doesNotMatch(browserSource, /smartSearchFromInput/);
+  assert.doesNotMatch(browserSource, /composeQuerySmartSearch/);
+  assert.match(openQueryPage[0], /\/wos\/woscc\/general-summary\?queryJson=/);
+  assert.match(openQueryPage[0], /waitForUrlChange/);
+
+  assert.match(recordMethods[0], /goToCitationsPageByWosId/);
+  assert.match(recordMethods[0], /goToReferencesPageByWosId/);
+  assert.match(recordMethods[0], /goToRelatedRecordsPageByWosId/);
+  assert.match(recordMethods[0], /goToSharedReferencesPageByWosIds/);
+
+  assert.match(requestContext, /page\.goto\(args\.url/);
+  assert.match(requestContext, /fetchCurrentPageInfo\("iiaide-wos request context"\)/);
+  assert.doesNotMatch(requestContext, /networkidle/);
+  assert.match(cliSource, /phase: "txt-export-ref-query-retry"/);
+  assert.match(cliSource, /isRefQuery: exportRefQuery/);
+  assert.match(cliSource, /prepareWosRequestContext\(page, args\)/);
+  assert.match(cliSource, /debug\("wos sid: domcontentloaded"/);
+  assert.match(cliSource, /waitForWosSidSessionSignal\(page, args\)/);
+  assert.match(cliSource, /debug\("wos sid: session signal wait complete"/);
+  assert.match(cliSource, /debug\("wos sid: wos\.js injected"/);
+  assert.match(cliSource, /loginElapsedMs: Date\.now\(\) - loginStartedAt/);
+  const validateStart = cliSource.indexOf("async function validateSid(page, args)");
+  const validateEnd = cliSource.indexOf("async function detectSidFromPage", validateStart);
+  const validateSidSource = cliSource.slice(validateStart, validateEnd);
+  assert.doesNotMatch(validateSidSource, /networkidle/);
+
+  assert.match(runQuery, /query\.buildQuery/);
+  assert.match(querySource, /waiting for WOS browser API/);
+  assert.match(runQuery, /query\.parseQueryWithSearchEngine/);
+  assert.doesNotMatch(runQuery, /query\.smartSearchWithSearchEngine/);
+  assert.doesNotMatch(runQuery, /query\.composeQuerySmartSearch/);
+  assert.match(runQuery, /query\.openQueryByWosIdsOrDois/);
+  assert.match(querySource, /citations: "record\.collectCitationsByWosId"/);
+  assert.match(querySource, /references: "record\.collectReferencesByWosId"/);
+  assert.match(querySource, /related: "record\.collectRelatedRecordsByWosId"/);
+  assert.match(runRecord, /record collect: collecting WOS IDs from relation result set/);
+  assert.match(runRecord, /results\.collectWosIdsByUuidPages/);
+  assert.match(runRecord, /record\.collectSharedReferencesBetweenWosIds/);
 });
 
 test("Query workflow writes only task metadata and returns resolved UUID", async () => {
@@ -212,17 +480,834 @@ test("Query workflow writes only task metadata and returns resolved UUID", async
   });
   assert.equal(summary.ok, true);
   assert.equal(summary.uuid, "12345678-1234-1234-1234-123456789abc-123456789a");
-  assert.equal(fs.existsSync(path.join(args.outDir, "manifest.json")), true);
-  assert.equal(fs.existsSync(path.join(args.outDir, "summary.json")), true);
-  assert.equal(fs.existsSync(path.join(args.outDir, "logs", "progress.jsonl")), true);
-  assert.equal(fs.existsSync(path.join(args.outDir, "raw")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "project.json")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "state.json")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "audit", "activity.jsonl")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "audit", "searches.jsonl")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "wosData.sqlite")), true);
+  assert.equal(fs.existsSync(path.join(firstRunDir(args.outDir), "command.json")), true);
+  assert.equal(fs.existsSync(path.join(firstRunDir(args.outDir), "summary.json")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "resultsets")), true);
+  const searchRows = spawnSync("sqlite3", [
+    path.join(args.outDir, "wosData.sqlite"),
+    "select command || ':' || subcommand || ':' || query_text || ':' || uuid || ':' || result_count || ':' || ok from search_queries order by id;",
+  ], { encoding: "utf8" });
+  assert.equal(searchRows.status, 0);
+  assert.match(searchRows.stdout.trim(), /^query:build:PY=\(2026\):12345678-1234-1234-1234-123456789abc-123456789a:42:1$/);
+  const auditRows = spawnSync("sqlite3", [
+    path.join(args.outDir, "wosData.sqlite"),
+    "select command || ':' || operation || ':' || uuid || ':' || count from audit_runs;",
+  ], { encoding: "utf8" });
+  assert.equal(auditRows.status, 0);
+  assert.match(auditRows.stdout.trim(), /^query:query build:12345678-1234-1234-1234-123456789abc-123456789a:42$/);
 });
 
-test("Query batch workflow reuses one session and prints JSONL items", async () => {
+test("Query build default output prints a compact single-line JSON result", () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "query", "build", "--expr", "TS=(\"two-dimensional materials\") AND PY=(2026)", "--tasks-root", root]);
+  const summary = {
+    ok: true,
+    command: "query",
+    subcommand: "build",
+    uuid: "bd5e1b31-f8d7-4326-8b4f-8cf430b14d89-01b9d68a89",
+    sortBy: "relevance",
+    count: 855,
+    rowText: "TS=(\"two-dimensional materials\") AND PY=(2026)",
+  };
+  const output = cli.formatQueryRecordOutput(args, summary);
+  assert.equal(output.includes("\n"), false);
+  assert.deepEqual(JSON.parse(output), {
+    uuid: "bd5e1b31-f8d7-4326-8b4f-8cf430b14d89-01b9d68a89",
+    url: "https://www.webofscience.com/wos/woscc/summary/bd5e1b31-f8d7-4326-8b4f-8cf430b14d89-01b9d68a89/relevance/1",
+    count: 855,
+    queryText: "TS=(\"two-dimensional materials\") AND PY=(2026)",
+    cached: false,
+  });
+});
+
+test("Query build reuses successful SQLite results for the same expression", async () => {
+  const root = temporaryDirectory();
+  const argv = ["node", "cli", "query", "build", "--expr", "PY=(2026)", "--task", "query-cache", "--tasks-root", root];
+  const firstArgs = cli.parseArgs(argv);
+  await cli.runQueryRecord(firstArgs, {
+    prepareWosSession: async () => ({ page: {}, close: async () => {} }),
+    runQueryBrowserCommand: async () => ({
+      ok: true,
+      taskId: firstArgs.taskId,
+      operation: "query build",
+      uuid: "12345678-1234-1234-1234-123456789abc-123456789a",
+      count: 42,
+      rowText: "PY=(2026)",
+      source: { kind: "expr", value: "PY=(2026)" },
+      sortBy: "relevance",
+    }),
+  });
+
+  let preparedBrowser = false;
+  const secondArgs = cli.parseArgs(argv);
+  const secondSummary = await cli.runQueryRecord(secondArgs, {
+    prepareWosSession: async () => {
+      preparedBrowser = true;
+      throw new Error("browser should not start on cache hit");
+    },
+  });
+
+  assert.equal(preparedBrowser, false);
+  assert.equal(secondSummary.method, "wos-sqlite-cache");
+  assert.equal(secondSummary.cached, true);
+  assert.equal(secondSummary.uuid, "12345678-1234-1234-1234-123456789abc-123456789a");
+  assert.equal(secondSummary.count, 42);
+  const auditRows = spawnSync("sqlite3", [
+    path.join(secondArgs.outDir, "wosData.sqlite"),
+    "select count(*) from search_queries where command='query' and subcommand='build' and query_text='PY=(2026)' and ok=1;",
+  ], { encoding: "utf8" });
+  assert.equal(auditRows.status, 0);
+  assert.equal(auditRows.stdout.trim(), "2");
+});
+
+test("Record collect workflow writes relation JSON and WOSID CSV artifacts", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "record", "collect", "--wosid", "WOS:ABC", "--task", "record-collect", "--tasks-root", root]);
+  const ids = {
+    citations: "11111111-1111-1111-1111-111111111111-1111111111",
+    references: "22222222-2222-2222-2222-222222222222-2222222222",
+    related: "33333333-3333-3333-3333-333333333333-3333333333",
+  };
+  const summary = await cli.runQueryRecord(args, {
+    prepareWosSession: async () => ({ page: {}, close: async () => {} }),
+    runRecordBrowserCommand: async () => ({
+      ok: true,
+      taskId: args.taskId,
+      operation: "record collect",
+      uuid: ids.citations,
+      count: 3,
+      rowText: "citations,references,related relations for WOS:ABC",
+      source: { kind: "record-relation-collection", wosid: "WOS:ABC", types: ["citations", "references", "related"], pages: 20 },
+      relations: Object.entries(ids).map(([type, uuid], index) => ({
+        type,
+        ok: true,
+        uuid,
+        count: 10,
+        rowText: `${type} of WOS:ABC`,
+        pagesRequested: 20,
+        uniqueCount: 1,
+        wosids: [{ wosid: `WOS:${type.toUpperCase()}${index + 1}` }],
+      })),
+    }),
+  });
+  const relationDir = path.join(args.outDir, "record-relations", "WOS:ABC");
+  assert.equal(summary.ok, true);
+  assert.equal(summary.files.relationsDir, relationDir);
+  assert.equal(fs.existsSync(path.join(relationDir, "citations.json")), true);
+  assert.equal(fs.existsSync(path.join(relationDir, "references.json")), true);
+  assert.equal(fs.existsSync(path.join(relationDir, "related.json")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "resultsets", ids.references, `${ids.references}_wosid.csv`)), true);
+  const references = JSON.parse(fs.readFileSync(path.join(relationDir, "references.json"), "utf8"));
+  assert.equal(references.type, "references");
+  assert.equal(references.uniqueCount, 1);
+  assert.match(references.files.wosidsCsv, /22222222-2222-2222-2222-222222222222-2222222222_wosid\.csv$/);
+});
+
+test("WOS ingest writes task-level SQLite with result-set order", () => {
+  const root = temporaryDirectory();
+  const taskDir = path.join(root, "tasks", "sqlite-task");
+  const basePaths = cli.getRunPaths(taskDir);
+  const runId = "RUN20260616120000-query-ingest";
+  const paths = {
+    ...basePaths,
+    runId,
+    runDir: path.join(taskDir, "runs", runId),
+    progressLog: path.join(taskDir, "runs", runId, "runtime.jsonl"),
+    commandJson: path.join(taskDir, "runs", runId, "command.json"),
+    runSummary: path.join(taskDir, "runs", runId, "summary.json"),
+  };
+  const args = cli.parseArgs(["node", "cli", "query", "ingest", "--expr", "PY=(2026)", "--task", "sqlite-task", "--tasks-root", path.join(root, "tasks")]);
+  fs.mkdirSync(taskDir, { recursive: true });
+  writeProjectMarker(taskDir);
+  writeJson(path.join(root, "tasks", "index.json"), {
+    version: 1,
+    tasks: [{ taskId: "sqlite-task", taskDir: "sqlite-task", uuid: "query-uuid" }],
+  });
+
+  const summary = cli.writeWosIngestSummary(paths, args, {
+    startedAt: "2026-06-16T12:00:00.000Z",
+    finishedAt: "2026-06-16T12:00:01.000Z",
+    operation: "query ingest build",
+    kind: "normal",
+    queryText: "PY=(2026)",
+    semanticDescription: "2026 papers",
+    uuid: "query-uuid",
+    isRefQuery: false,
+    availableCount: 2,
+    records: [
+      { wos_id: "A", meta_info: { doi: "10.1/a" }, wos_data: { title: "First", publication_year: "2026", source_title: "Journal A" } },
+      { wos_id: "WOS:B", meta_info: { doi: "10.1/b" }, wos_data: { title: "Second", publication_year: "2026", source_title: "Journal B" } },
+    ],
+  });
+
+  assert.equal(summary.files.sqlite, path.join(taskDir, "wosData.sqlite"));
+  assert.equal(summary.ingestedCount, 2);
+  const rows = spawnSync("sqlite3", [
+    summary.files.sqlite,
+    "select position || ':' || wosid from resultset_items order by position;",
+  ], { encoding: "utf8" });
+  assert.equal(rows.status, 0);
+  assert.deepEqual(rows.stdout.trim().split(/\n/), ["1:WOS:A", "2:WOS:B"]);
+  const resultset = spawnSync("sqlite3", [
+    summary.files.sqlite,
+    "select kind || ':' || is_ref_query || ':' || query_text from resultsets where uuid='query-uuid';",
+  ], { encoding: "utf8" });
+  assert.equal(resultset.status, 0);
+  assert.equal(resultset.stdout.trim(), "normal:0:PY=(2026)");
+  const searches = spawnSync("sqlite3", [
+    summary.files.sqlite,
+    "select command || ':' || subcommand || ':' || semantic_description || ':' || uuid || ':' || result_count from search_queries where uuid='query-uuid';",
+  ], { encoding: "utf8" });
+  assert.equal(searches.status, 0);
+  assert.equal(searches.stdout.trim(), "query:ingest:2026 papers:query-uuid:2");
+  const validation = cli.validateTask(cli.parseArgs(["node", "cli", "validate", "--task", "sqlite-task", "--tasks-root", path.join(root, "tasks")]));
+  assert.equal(validation.ok, true);
+  assert.equal(validation.sqlite, summary.files.sqlite);
+});
+
+test("record ingest reuses existing SQLite rows for the same WOSID and type", async () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const taskDir = path.join(tasksRoot, "record-sqlite");
+  const args = cli.parseArgs([
+    "node", "cli", "record", "ingest",
+    "--wosid", "WOS:SOURCE",
+    "--type", "references",
+    "--task", "record-sqlite",
+    "--tasks-root", tasksRoot,
+  ]);
+  const seedPaths = {
+    ...cli.getRunPaths(taskDir),
+    runId: "RUN20260616121000-record-ingest",
+    runDir: path.join(taskDir, "runs", "RUN20260616121000-record-ingest"),
+    progressLog: path.join(taskDir, "runs", "RUN20260616121000-record-ingest", "runtime.jsonl"),
+    commandJson: path.join(taskDir, "runs", "RUN20260616121000-record-ingest", "command.json"),
+    runSummary: path.join(taskDir, "runs", "RUN20260616121000-record-ingest", "summary.json"),
+  };
+  fs.mkdirSync(taskDir, { recursive: true });
+  writeProjectMarker(taskDir);
+  cli.writeWosIngestSummary(seedPaths, args, {
+    startedAt: "2026-06-16T12:10:00.000Z",
+    finishedAt: "2026-06-16T12:10:01.000Z",
+    operation: "record ingest references",
+    kind: "references",
+    sourceWosId: "WOS:SOURCE",
+    queryText: "references of WOS:SOURCE",
+    semanticDescription: "seed references",
+    uuid: "references-uuid",
+    isRefQuery: true,
+    availableCount: 1,
+    records: [
+      { wos_id: "WOS:REF1", meta_info: { doi: "10.1/ref1" }, wos_data: { title: "Reference 1" } },
+    ],
+  });
+
+  const summary = await cli.runRecordIngest(args, {
+    prepareWosSession: async () => assert.fail("record ingest should reuse SQLite before opening WOS"),
+  });
+
+  assert.equal(summary.ok, true);
+  assert.equal(summary.reused, true);
+  assert.equal(summary.uuid, "references-uuid");
+  assert.equal(summary.ingestedCount, 1);
+  assert.equal(summary.files.sqlite, path.join(taskDir, "wosData.sqlite"));
+});
+
+test("record ingest stores and reuses confirmed empty relation resultsets", async () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const args = cli.parseArgs([
+    "node", "cli", "record", "ingest",
+    "--wosid", "WOS:EMPTY",
+    "--type", "related",
+    "--task", "record-empty",
+    "--tasks-root", tasksRoot,
+  ]);
+  let prepared = 0;
+  const relationUuid = "534b543d-9f54-4350-b079-7ed7bf16f9c1-01b9d5c991";
+  const summary = await cli.runRecordIngest(args, {
+    prepareWosSession: async () => {
+      prepared += 1;
+      return { page: {}, close: async () => {} };
+    },
+    runRecordBrowserCommand: async () => ({
+      ok: true,
+      taskId: args.taskId,
+      operation: "record related",
+      uuid: relationUuid,
+      count: 0,
+      rowText: "related of WOS:EMPTY",
+      source: { kind: "record-relation", wosid: "WOS:EMPTY", type: "related" },
+    }),
+    collectRelationWosIdsForIngest: async () => assert.fail("empty relation count should not collect WOSIDs"),
+    exportIngestRecordsByWosIds: async () => assert.fail("empty relation count should not export records"),
+  });
+
+  assert.equal(prepared, 1);
+  assert.equal(summary.ok, true);
+  assert.equal(summary.emptyResult, true);
+  assert.equal(summary.uuid, relationUuid);
+  assert.equal(summary.expectedCount, 0);
+  assert.equal(summary.ingestedCount, 0);
+
+  const uuidResult = cli.runDbLookup(cli.parseArgs([
+    "node", "cli", "db", "uuid",
+    "--uuid", relationUuid,
+    "--task", "record-empty",
+    "--tasks-root", tasksRoot,
+  ]));
+  assert.equal(uuidResult.ok, true);
+  assert.equal(uuidResult.resultset.kind, "related");
+  assert.equal(uuidResult.resultset.itemCount, 0);
+  assert.equal(uuidResult.resultset.availableCount, 0);
+
+  const listResult = cli.runDbLookup(cli.parseArgs([
+    "node", "cli", "db", "list",
+    "--wosid", "WOS:EMPTY",
+    "--type", "related",
+    "--task", "record-empty",
+    "--tasks-root", tasksRoot,
+  ]));
+  assert.equal(listResult.ok, true);
+  assert.equal(listResult.uuid, relationUuid);
+  assert.equal(listResult.count, 0);
+  assert.deepEqual(listResult.wosids, []);
+
+  const reused = await cli.runRecordIngest(args, {
+    prepareWosSession: async () => assert.fail("empty relation resultset should be reused before opening WOS"),
+  });
+  assert.equal(reused.ok, true);
+  assert.equal(reused.reused, true);
+  assert.equal(reused.emptyResult, true);
+  assert.equal(reused.uuid, relationUuid);
+  assert.equal(reused.ingestedCount, 0);
+});
+
+test("record ingest uses front-scroll WOSIDs instead of direct relation UUID export", async () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const args = cli.parseArgs([
+    "node", "cli", "record", "ingest",
+    "--wosid", "WOS:SOURCE",
+    "--type", "citations",
+    "--task", "record-front-scroll",
+    "--tasks-root", tasksRoot,
+  ]);
+  const relationUuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-aaaaaaaaaa";
+  const queryUuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb-bbbbbbbbbb";
+  const calls = [];
+  const summary = await cli.runRecordIngest(args, {
+    prepareWosSession: async () => ({ page: {}, close: async () => {} }),
+    runRecordBrowserCommand: async (_page, itemArgs) => {
+      calls.push(`relation:${itemArgs.recordCommand}:${itemArgs.sortBy}`);
+      return {
+        ok: true,
+        taskId: args.taskId,
+        operation: "record citations",
+        uuid: relationUuid,
+        count: 99,
+        rowText: "citations of WOS:SOURCE",
+        sortBy: "date-descending",
+        source: { kind: "record-relation", wosid: "WOS:SOURCE", type: "citations" },
+      };
+    },
+    collectRelationWosIdsForIngest: async (_page, _args, options) => {
+      calls.push(`collect:${options.uuid}:${options.kind}`);
+      assert.equal(options.uuid, relationUuid);
+      return {
+        rows: [{ wosid: "WOS:C1" }, { wosid: "WOS:C2" }],
+        wosIds: ["WOS:C1", "WOS:C2"],
+        pagesRequested: 6,
+        sortBy: "relevance",
+      };
+    },
+    exportIngestRecordsByWosIds: async (_page, _args, options) => {
+      calls.push(`export-wosids:${options.relationUuid}:${options.wosIds.join(",")}`);
+      assert.equal(options.relationUuid, relationUuid);
+      assert.deepEqual(options.wosIds, ["WOS:C1", "WOS:C2"]);
+      return {
+        records: [
+          { wos_id: "WOS:C1", wos_data: { title: "Citation 1" } },
+          { wos_id: "WOS:C2", wos_data: { title: "Citation 2" } },
+        ],
+        requestedLimit: 500,
+        exportedCount: 2,
+        textBytes: 100,
+        queryUuid,
+        queryCount: 2,
+      };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    "relation:relations:relevance",
+    `collect:${relationUuid}:citations`,
+    `export-wosids:${relationUuid}:WOS:C1,WOS:C2`,
+  ]);
+  assert.equal(summary.ok, true);
+  assert.equal(summary.uuid, relationUuid);
+  assert.equal(summary.sourceQueryUuid, queryUuid);
+  assert.equal(summary.exportMode, "front-scroll-wosid");
+  assert.equal(summary.uuidDirectExport, false);
+  assert.equal(summary.sortBy, "relevance");
+  assert.equal(summary.ingestedCount, 2);
+
+  const uuidResult = cli.runDbLookup(cli.parseArgs([
+    "node", "cli", "db", "uuid",
+    "--uuid", relationUuid,
+    "--task", "record-front-scroll",
+    "--tasks-root", tasksRoot,
+  ]));
+  assert.equal(uuidResult.resultset.exportMode, "front-scroll-wosid");
+  assert.equal(uuidResult.resultset.uuidDirectExport, false);
+  assert.equal(uuidResult.records[0].wosid, "WOS:C1");
+  assert.equal(uuidResult.records[1].wosid, "WOS:C2");
+});
+
+test("relation ingest record ordering follows collected WOSID order", () => {
+  const ordered = cli.orderedRecordsForWosIds(
+    [
+      { wos_id: "WOS:B", wos_data: { title: "B" } },
+      { wos_id: "WOS:A", wos_data: { title: "A" } },
+    ],
+    ["WOS:A", "WOS:B", "WOS:MISSING"]
+  );
+  assert.deepEqual(ordered.map((record) => record.wos_id), ["WOS:A", "WOS:B"]);
+});
+
+test("direct UUID export refuses resultsets marked for front-end WOSID collection", async () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const taskDir = path.join(tasksRoot, "record-no-direct");
+  const relationUuid = "cccccccc-cccc-cccc-cccc-cccccccccccc-cccccccccc";
+  const args = cli.parseArgs([
+    "node", "cli", "record", "ingest",
+    "--wosid", "WOS:SOURCE",
+    "--type", "related",
+    "--task", "record-no-direct",
+    "--tasks-root", tasksRoot,
+  ]);
+  const paths = {
+    ...cli.getRunPaths(taskDir),
+    runId: "RUN20260617120000-record-ingest",
+    runDir: path.join(taskDir, "runs", "RUN20260617120000-record-ingest"),
+    progressLog: path.join(taskDir, "runs", "RUN20260617120000-record-ingest", "runtime.jsonl"),
+    commandJson: path.join(taskDir, "runs", "RUN20260617120000-record-ingest", "command.json"),
+    runSummary: path.join(taskDir, "runs", "RUN20260617120000-record-ingest", "summary.json"),
+  };
+  fs.mkdirSync(taskDir, { recursive: true });
+  writeProjectMarker(taskDir);
+  cli.writeWosIngestSummary(paths, args, {
+    operation: "record ingest related",
+    kind: "related",
+    sourceWosId: "WOS:SOURCE",
+    uuid: relationUuid,
+    isRefQuery: true,
+    sortBy: "relevance",
+    exportMode: "front-scroll-wosid",
+    uuidDirectExport: false,
+    availableCount: 1,
+    records: [{ wos_id: "WOS:R1", wos_data: { title: "Related 1" } }],
+  });
+
+  const runArgs = cli.parseArgs([
+    "node", "cli", "run",
+    "--uuid", relationUuid,
+    "--task", "record-no-direct",
+    "--tasks-root", tasksRoot,
+    "--quiet",
+  ]);
+  await assert.rejects(
+    () => cli.prepareWosExport(runArgs),
+    /front-end WOSID collection only.*record ingest --wosid "WOS:SOURCE" --type related/
+  );
+});
+
+test("record ingest opens relation summary page before SQLite export", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "iiaide-wos.js"), "utf8");
+  const method = source.match(/async function exportIngestRecordsFromUuid\(page, args, options = \{\}\) \{[\s\S]*?\n}\n\nfunction writeWosIngestSummary/);
+  assert.ok(method, "exportIngestRecordsFromUuid should be present");
+  assert.match(method[0], /const sortBy = options\.sortBy \|\| "relevance"/);
+  assert.match(method[0], /phase: "wos-ingest-open-summary"/);
+  assert.match(method[0], /openSummaryPageForExport\(page, args, \{ uuid: options\.uuid, sortBy \}\)/);
+  assert.match(method[0], /phase: "wos-ingest-summary-ready"/);
+  assert.match(method[0], /exportTxtBatchesViaWosJs/);
+  assert.match(method[0], /sortBy,/);
+});
+
+test("db lookup returns UUID metadata and WOSID relation context from SQLite", () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const taskDir = path.join(tasksRoot, "record-db");
+  const args = cli.parseArgs([
+    "node", "cli", "record", "ingest",
+    "--wosid", "WOS:SOURCE",
+    "--type", "references",
+    "--task", "record-db",
+    "--tasks-root", tasksRoot,
+  ]);
+  const seedPaths = {
+    ...cli.getRunPaths(taskDir),
+    runId: "RUN20260616122000-record-ingest",
+    runDir: path.join(taskDir, "runs", "RUN20260616122000-record-ingest"),
+    progressLog: path.join(taskDir, "runs", "RUN20260616122000-record-ingest", "runtime.jsonl"),
+    commandJson: path.join(taskDir, "runs", "RUN20260616122000-record-ingest", "command.json"),
+    runSummary: path.join(taskDir, "runs", "RUN20260616122000-record-ingest", "summary.json"),
+  };
+  fs.mkdirSync(taskDir, { recursive: true });
+  writeProjectMarker(taskDir);
+  writeJson(path.join(tasksRoot, "index.json"), {
+    version: 1,
+    tasks: [{ taskId: "record-db", taskDir: "record-db", uuid: "references-uuid", status: "completed" }],
+  });
+  cli.writeWosIngestSummary(seedPaths, args, {
+    startedAt: "2026-06-16T12:20:00.000Z",
+    finishedAt: "2026-06-16T12:20:01.000Z",
+    operation: "record ingest references",
+    kind: "references",
+    sourceWosId: "WOS:SOURCE",
+    queryText: "references of WOS:SOURCE",
+    semanticDescription: "seed references",
+    uuid: "references-uuid",
+    isRefQuery: true,
+    availableCount: 2,
+    records: [
+      {
+        wos_id: "WOS:REF1",
+        meta_info: { doi: "10.1/ref1" },
+        wos_data: {
+          title: "Atomically thin theory paper",
+          abstract: "A density functional theory study of a monolayer material.",
+          author_full_names: ["Ada Example", "Ben Example"],
+          author_keywords: ["2D materials", "DFT"],
+        },
+      },
+      {
+        wos_id: "WOS:REF2",
+        wos_data: {
+          title: "Second reference",
+          keywords_plus: ["GRAPHENE"],
+        },
+      },
+    ],
+  });
+
+  const uuidResult = cli.runDbLookup(cli.parseArgs(["node", "cli", "db", "uuid", "--uuid", "references-uuid", "--task", "record-db", "--tasks-root", tasksRoot]));
+  assert.equal(uuidResult.ok, true);
+  assert.equal(uuidResult.resultset.kind, "references");
+  assert.equal(uuidResult.resultset.itemCount, 2);
+  assert.equal(uuidResult.records.length, 2);
+  assert.equal(uuidResult.records[0].wosid, "WOS:REF1");
+
+  const wosidResult = cli.runDbLookup(cli.parseArgs(["node", "cli", "db", "wosid", "--wosid", "SOURCE", "--task", "record-db", "--tasks-root", tasksRoot]));
+  assert.equal(wosidResult.ok, true);
+  assert.equal(wosidResult.relations.references[0].uuid, "references-uuid");
+
+  const contextResult = cli.runDbLookup(cli.parseArgs(["node", "cli", "db", "context", "--wosid", "WOS:SOURCE", "--type", "ref", "--task", "record-db", "--tasks-root", tasksRoot]));
+  assert.equal(contextResult.ok, true);
+  assert.equal(contextResult.type, "references");
+  assert.equal(contextResult.records.length, 2);
+  assert.equal(contextResult.records[0].wosid, "WOS:REF1");
+  assert.equal(contextResult.records[0].title, "Atomically thin theory paper");
+  assert.deepEqual(contextResult.records[0].authors, ["Ada Example", "Ben Example"]);
+  assert.deepEqual(contextResult.records[0].keywords, ["2D materials", "DFT"]);
+
+  const selfResult = cli.runDbLookup(cli.parseArgs(["node", "cli", "db", "context", "--wosid", "WOS:REF1", "--type", "self", "--task", "record-db", "--tasks-root", tasksRoot]));
+  assert.equal(selfResult.ok, true);
+  assert.equal(selfResult.records[0].abstract, "A density functional theory study of a monolayer material.");
+});
+
+test("db list returns stored WOSID lists and optional record context", () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const taskDir = path.join(tasksRoot, "record-list-db");
+  const args = cli.parseArgs([
+    "node", "cli", "record", "ingest",
+    "--wosid", "WOS:SOURCE",
+    "--type", "citations",
+    "--task", "record-list-db",
+    "--tasks-root", tasksRoot,
+  ]);
+  const seedPaths = {
+    ...cli.getRunPaths(taskDir),
+    runId: "RUN20260616123000-record-ingest",
+    runDir: path.join(taskDir, "runs", "RUN20260616123000-record-ingest"),
+    progressLog: path.join(taskDir, "runs", "RUN20260616123000-record-ingest", "runtime.jsonl"),
+    commandJson: path.join(taskDir, "runs", "RUN20260616123000-record-ingest", "command.json"),
+    runSummary: path.join(taskDir, "runs", "RUN20260616123000-record-ingest", "summary.json"),
+  };
+  fs.mkdirSync(taskDir, { recursive: true });
+  writeProjectMarker(taskDir);
+  writeJson(path.join(tasksRoot, "index.json"), {
+    version: 1,
+    tasks: [{ taskId: "record-list-db", taskDir: "record-list-db", uuid: "citations-uuid", status: "completed" }],
+  });
+  cli.writeWosIngestSummary(seedPaths, args, {
+    startedAt: "2026-06-16T12:30:00.000Z",
+    finishedAt: "2026-06-16T12:30:01.000Z",
+    operation: "record ingest citations",
+    kind: "citations",
+    sourceWosId: "WOS:SOURCE",
+    queryText: "citations of WOS:SOURCE",
+    semanticDescription: "seed citations",
+    uuid: "citations-uuid",
+    isRefQuery: true,
+    availableCount: 2,
+    records: [
+      {
+        wos_id: "WOS:CITE1",
+        wos_data: {
+          title: "First citing paper",
+          abstract: "Atomic thickness theory context.",
+          author_full_names: ["A. Writer"],
+          author_keywords: ["atomic layer"],
+        },
+      },
+      {
+        wos_id: "WOS:CITE2",
+        wos_data: {
+          title: "Second citing paper",
+          author_full_names: ["B. Writer"],
+        },
+      },
+    ],
+  });
+
+  const byWosId = cli.runDbLookup(cli.parseArgs([
+    "node", "cli", "db", "list",
+    "--wosid", "WOS:SOURCE",
+    "--type", "citations",
+    "--task", "record-list-db",
+    "--tasks-root", tasksRoot,
+  ]));
+  assert.equal(byWosId.ok, true);
+  assert.equal(byWosId.uuid, "citations-uuid");
+  assert.deepEqual(byWosId.wosids, ["WOS:CITE1", "WOS:CITE2"]);
+  assert.equal(byWosId.items[0].record, undefined);
+
+  const byUuid = cli.runDbLookup(cli.parseArgs([
+    "node", "cli", "db", "list",
+    "--uuid", "citations-uuid",
+    "--context",
+    "--task", "record-list-db",
+    "--tasks-root", tasksRoot,
+  ]));
+  assert.equal(byUuid.ok, true);
+  assert.equal(byUuid.type, "citations");
+  assert.equal(byUuid.items[0].record.title, "First citing paper");
+  assert.deepEqual(byUuid.items[0].record.authors, ["A. Writer"]);
+  assert.deepEqual(byUuid.items[0].record.keywords, ["atomic layer"]);
+
+  const formatted = cli.formatDbLookup(byUuid);
+  assert.match(formatted, /"wosids": \[/);
+  assert.match(formatted, /First citing paper/);
+});
+
+test("db searches and db artifacts return SQLite audit rows", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "query", "build", "--expr", "PY=(2026)", "--task", "audit-db", "--tasks-root", root]);
+  await cli.runQueryRecord(args, {
+    prepareWosSession: async () => ({ page: {}, close: async () => {} }),
+    runQueryBrowserCommand: async () => ({
+      ok: true,
+      taskId: args.taskId,
+      operation: "query build",
+      uuid: "12345678-1234-1234-1234-123456789abc-123456789a",
+      count: 12,
+      rowText: "PY=(2026)",
+      source: { kind: "expr", value: "PY=(2026)" },
+    }),
+  });
+
+  const searchesResult = cli.runDbLookup(cli.parseArgs(["node", "cli", "db", "searches", "--task", "audit-db", "--tasks-root", root, "--limit", "5"]));
+  assert.equal(searchesResult.ok, true);
+  assert.equal(searchesResult.command, "db searches");
+  assert.equal(searchesResult.count, 1);
+  assert.equal(searchesResult.searches[0].queryText, "PY=(2026)");
+  assert.equal(searchesResult.searches[0].uuid, "12345678-1234-1234-1234-123456789abc-123456789a");
+  assert.match(searchesResult.searches[0].createdAt, /Z$/);
+  const formattedSearches = cli.formatDbLookup(searchesResult);
+  assert.doesNotMatch(formattedSearches, /createdAt": "[^"]+Z"/);
+  assert.match(formattedSearches, /createdAt": "\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+
+  const searchesByUuid = cli.runDbLookup(cli.parseArgs(["node", "cli", "db", "searches", "--task", "audit-db", "--tasks-root", root, "--uuid", "12345678-1234-1234-1234-123456789abc-123456789a"]));
+  assert.equal(searchesByUuid.count, 1);
+
+  const artifactsResult = cli.runDbLookup(cli.parseArgs(["node", "cli", "db", "artifacts", "--task", "audit-db", "--tasks-root", root]));
+  assert.equal(artifactsResult.ok, true);
+  assert.equal(artifactsResult.command, "db artifacts");
+  assert.equal(artifactsResult.count >= 1, true);
+  assert.equal(artifactsResult.artifacts.some((item) => item.role === "progressLog"), true);
+
+  const runsResult = cli.runDbLookup(cli.parseArgs(["node", "cli", "db", "runs", "--task", "audit-db", "--tasks-root", root, "--limit", "5"]));
+  assert.equal(runsResult.ok, true);
+  assert.equal(runsResult.command, "db runs");
+  assert.equal(runsResult.count, 1);
+  assert.equal(runsResult.runs[0].operation, "query build");
+  const formattedRuns = cli.formatDbLookup(runsResult);
+  assert.doesNotMatch(formattedRuns, /finishedAt": "[^"]+Z"/);
+
+  const timelineResult = cli.runDbLookup(cli.parseArgs(["node", "cli", "db", "timeline", "--task", "audit-db", "--tasks-root", root, "--limit", "20"]));
+  assert.equal(timelineResult.ok, true);
+  assert.equal(timelineResult.command, "db timeline");
+  assert.equal(timelineResult.count >= 3, true);
+  assert.equal(timelineResult.items.some((item) => item.type === "run"), true);
+  assert.equal(timelineResult.items.some((item) => item.type === "search"), true);
+  assert.equal(timelineResult.items.some((item) => item.type === "artifact"), true);
+});
+
+test("db audit-html serves a local AJAX audit viewer over SQLite", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "query", "build", "--expr", "PY=(2026)", "--task", "audit-html", "--tasks-root", root]);
+  await cli.runQueryRecord(args, {
+    prepareWosSession: async () => ({ page: {}, close: async () => {} }),
+    runQueryBrowserCommand: async () => ({
+      ok: true,
+      taskId: args.taskId,
+      operation: "query build",
+      uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-aaaaaaaaaa",
+      count: 7,
+      rowText: "PY=(2026)",
+      source: { kind: "expr", value: "PY=(2026)" },
+    }),
+  });
+
+  const serverHandle = await cli.runAuditHtml(cli.parseArgs(["node", "cli", "db", "audit-html", "--task", "audit-html", "--tasks-root", root, "--port", "0", "--limit", "10"]));
+  try {
+    const htmlResponse = await fetch(serverHandle.url);
+    const html = await htmlResponse.text();
+    assert.equal(htmlResponse.status, 200);
+    assert.match(html, /WOS Audit Timeline/);
+    assert.match(html, /Commands/);
+    assert.match(html, /CLI Help/);
+    assert.match(html, /Recipes/);
+    assert.match(html, /Start a new literature project/);
+    assert.match(html, /id="syncBtn"/);
+    assert.match(html, /copy-icon/);
+    assert.match(html, /formatLocalTime/);
+    assert.match(html, /woscc\/summary/);
+    assert.match(html, /timeline-field/);
+    assert.match(html, /run-pill/);
+    assert.doesNotMatch(html, /copy-all/);
+
+    const overviewResponse = await fetch(`${serverHandle.url}api/overview?limit=10`);
+    const overview = await overviewResponse.json();
+    assert.equal(overview.ok, true);
+    assert.equal(overview.taskId, "audit-html");
+    assert.equal(overview.stats.searches >= 1, true);
+    assert.equal(overview.stats.timeline >= 3, true);
+
+    const commandsResponse = await fetch(`${serverHandle.url}api/commands`);
+    const commands = await commandsResponse.json();
+    assert.equal(commands.ok, true);
+    assert.equal(Array.isArray(commands.pages), true);
+    assert.equal(commands.pages.length >= 5, true);
+    assert.equal(commands.pages.some((page) => page.id === "recipes"), true);
+    assert.equal(commands.pages.some((page) => page.id === "db"), true);
+  } finally {
+    await new Promise((resolve) => serverHandle.server.close(resolve));
+  }
+});
+
+test("db audit-export writes static audit HTML and JSON snapshots", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "query", "build", "--expr", "PY=(2026)", "--task", "audit-export", "--tasks-root", root]);
+  await cli.runQueryRecord(args, {
+    prepareWosSession: async () => ({ page: {}, close: async () => {} }),
+    runQueryBrowserCommand: async () => ({
+      ok: true,
+      taskId: args.taskId,
+      operation: "query build",
+      uuid: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb-bbbbbbbbbb",
+      count: 5,
+      rowText: "PY=(2026)",
+      source: { kind: "expr", value: "PY=(2026)" },
+    }),
+  });
+
+  const reportDir = path.join(root, "audit-report-output");
+  const result = cli.runAuditExport(cli.parseArgs([
+    "node", "cli", "db", "audit-export",
+    "--task", "audit-export",
+    "--tasks-root", root,
+    "--report-dir", reportDir,
+    "--format", "both",
+    "--limit", "10",
+  ]));
+  assert.equal(result.ok, true);
+  assert.equal(result.command, "db audit-export");
+  assert.equal(fs.existsSync(path.join(reportDir, "audit-report.html")), true);
+  assert.equal(fs.existsSync(path.join(reportDir, "audit-report.json")), true);
+
+  const html = fs.readFileSync(path.join(reportDir, "audit-report.html"), "utf8");
+  assert.match(html, /WOS Audit Report/);
+  assert.match(html, /Command Manual/);
+  assert.match(html, /CLI Help/);
+  assert.match(html, /Recipes/);
+  assert.match(html, /Search, ingest, and review a normal query/);
+  assert.match(html, /copy-icon/);
+  assert.match(html, /woscc\/summary/);
+  assert.match(html, /timeline-field/);
+  assert.match(html, /run-pill/);
+  assert.doesNotMatch(html, /copy-all/);
+  assert.doesNotMatch(html, /T\d{2}:\d{2}:\d{2}\.\d{3}Z/);
+  const json = JSON.parse(fs.readFileSync(path.join(reportDir, "audit-report.json"), "utf8"));
+  assert.equal(json.ok, true);
+  assert.equal(json.taskId, "audit-export");
+  assert.equal(json.stats.searches >= 1, true);
+  assert.equal(json.stats.timeline >= 3, true);
+  assert.equal(Array.isArray(json.commandDocs), true);
+  assert.equal(json.commandDocs.some((page) => page.id === "recipes"), true);
+  assert.equal(json.commandDocs.some((page) => page.id === "query"), true);
+});
+
+test("browser-side WOS ID page collection accumulates multiple pages", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  const method = source.match(/async collectWosIdsByUuidPages\(uuid, pages = 2, sortBy = 'relevance'\) \{[\s\S]*?\n    \}/);
+  assert.ok(method, "collectWosIdsByUuidPages should be present");
+  assert.match(method[0], /const allRows = \[\]/);
+  assert.match(method[0], /for \(const row of pageRows \|\| \[\]\)/);
+  assert.match(method[0], /this\.mergeIntoCache\(uuid, \{ page_wosids: allRows \}\)/);
+  assert.match(method[0], /return allRows/);
+});
+
+test("Query debug mode reports session and browser command steps to stderr", async () => {
+  const root = temporaryDirectory();
+  const args = cli.parseArgs(["node", "cli", "query", "build", "--expr", "PY=(2026)", "--debug", "--task", "query-debug", "--tasks-root", root]);
+  const stderr = [];
+  const originalError = console.error;
+  console.error = (line) => stderr.push(String(line));
+  try {
+    await cli.runQueryRecord(args, {
+      prepareWosSession: async () => ({ page: {}, close: async () => {} }),
+      runQueryBrowserCommand: async () => ({
+        ok: true,
+        taskId: args.taskId,
+        operation: "query build",
+        uuid: "12345678-1234-1234-1234-123456789abc-123456789a",
+        count: 42,
+        rowText: "PY=(2026)",
+        source: { kind: "expr", value: "PY=(2026)" },
+      }),
+    });
+  } finally {
+    console.error = originalError;
+  }
+  assert.match(stderr.join("\n"), /\[debug\] query: preparing WOS session/);
+  assert.match(stderr.join("\n"), /\[debug\] query: running browser command/);
+  assert.match(stderr.join("\n"), /\[debug\] query: browser command complete/);
+});
+
+test("Query batch workflow reuses one session and prints LLM-readable JSONL items", async () => {
   const root = temporaryDirectory();
   const exprFile = path.join(root, "queries.txt");
   fs.writeFileSync(exprFile, "\n# ignored\nPY=(2025)\nPY=(2026)\n", "utf8");
-  const args = cli.parseArgs(["node", "cli", "query", "batch", "--expr-file", exprFile, "--jsonl", "--task", "query-batch", "--tasks-root", root]);
+  const args = cli.parseArgs(["node", "cli", "query", "batch", "--expr-file", exprFile, "--task", "query-batch", "--tasks-root", root]);
   let prepareCount = 0;
   const stdout = [];
   const summary = await cli.runQueryBatch(args, {
@@ -240,6 +1325,7 @@ test("Query batch workflow reuses one session and prints JSONL items", async () 
       count: itemArgs.queryExpr.includes("2025") ? 25 : 26,
       rowText: itemArgs.queryExpr,
       source: { kind: "expr", value: itemArgs.queryExpr },
+      sortBy: "relevance",
     }),
     writeStdout: (line) => stdout.push(line),
   });
@@ -253,13 +1339,70 @@ test("Query batch workflow reuses one session and prints JSONL items", async () 
   const first = JSON.parse(stdout[0]);
   assert.equal(first.command, "query batch");
   assert.equal(first.uuid, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-aaaaaaaaaa");
+  assert.equal(first.artifact, "https://www.webofscience.com/wos/woscc/summary/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-aaaaaaaaaa/relevance/1");
   assert.equal(first.data.index, 1);
   assert.equal(first.data.total, 2);
   assert.equal(first.data.expr, "PY=(2025)");
+  assert.equal(first.data.queryText, "PY=(2025)");
+  assert.equal(first.data.cached, false);
+  assert.equal(first.data.url, first.artifact);
   assert.equal(JSON.stringify(first).includes("SECRET"), false);
-  assert.equal(fs.existsSync(path.join(args.outDir, "manifest.json")), true);
-  assert.equal(fs.existsSync(path.join(args.outDir, "summary.json")), true);
-  assert.equal(fs.existsSync(path.join(args.outDir, "logs", "progress.jsonl")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "project.json")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "state.json")), true);
+  assert.equal(fs.existsSync(path.join(args.outDir, "audit", "activity.jsonl")), true);
+  assert.equal(fs.existsSync(path.join(firstRunDir(args.outDir), "runtime.jsonl")), true);
+});
+
+test("Query batch reuses cached SQLite results without opening WOS", async () => {
+  const root = temporaryDirectory();
+  const seedArgv = ["node", "cli", "query", "build", "--task", "query-batch-cache", "--tasks-root", root];
+  for (const [expr, uuid, count] of [
+    ["PY=(2025)", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-aaaaaaaaaa", 25],
+    ["PY=(2026)", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb-bbbbbbbbbb", 26],
+  ]) {
+    const args = cli.parseArgs([...seedArgv, "--expr", expr]);
+    await cli.runQueryRecord(args, {
+      prepareWosSession: async () => ({ page: {}, close: async () => {} }),
+      runQueryBrowserCommand: async () => ({
+        ok: true,
+        taskId: args.taskId,
+        operation: "query build",
+        uuid,
+        count,
+        rowText: expr,
+        source: { kind: "expr", value: expr },
+        sortBy: "relevance",
+      }),
+    });
+  }
+
+  let preparedBrowser = false;
+  const stdout = [];
+  const batchArgs = cli.parseArgs([
+    "node", "cli", "query", "batch",
+    "--expr", "PY=(2025)",
+    "--expr", "PY=(2026)",
+    "--task", "query-batch-cache",
+    "--tasks-root", root,
+  ]);
+  const summary = await cli.runQueryBatch(batchArgs, {
+    prepareWosSession: async () => {
+      preparedBrowser = true;
+      throw new Error("browser should not start when every batch item is cached");
+    },
+    writeStdout: (line) => stdout.push(line),
+  });
+
+  assert.equal(preparedBrowser, false);
+  assert.equal(summary.ok, true);
+  assert.equal(summary.completed, 2);
+  assert.equal(stdout.length, 2);
+  const rows = stdout.map((line) => JSON.parse(line));
+  assert.deepEqual(rows.map((row) => row.data.cached), [true, true]);
+  assert.deepEqual(rows.map((row) => row.uuid), [
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-aaaaaaaaaa",
+    "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb-bbbbbbbbbb",
+  ]);
 });
 
 test("parses SID check tasks", () => {
@@ -664,6 +1807,8 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(workflowMatch[0], /1\.1", "UUID - TXT format/);
   assert.match(workflowMatch[0], /1\.2", "UUID - BIB format/);
   assert.match(workflowMatch[0], /1\.3", "Batch UUID CSV - TXT/);
+  assert.match(workflowMatch[0], /projectMode/);
+  assert.match(workflowMatch[0], /3\.3", "Clear data/);
   assert.doesNotMatch(workflowMatch[0], /WOS IDs to SQL/);
   assert.doesNotMatch(workflowMatch[0], /2\.1", "Resume/);
   assert.doesNotMatch(workflowMatch[0], /Parse"\)/);
@@ -685,22 +1830,28 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.match(workflowMatch[0], /6\.1", "MUST login/);
   assert.match(workflowMatch[0], /6\.2", "MUST monitor/);
   assert.match(workflowMatch[0], /shortcutRow/);
+  assert.match(workflowMatch[0], /\["\?", "Commands doc"\]/);
   assert.match(workflowMatch[0], /\["c", "Check SID"\]/);
   assert.match(workflowMatch[0], /\["u", "Update"\]/);
   assert.match(workflowMatch[0], /\["B", "Back"\]/);
   assert.match(workflowMatch[0], /\["q", "Exit"\]/);
+  assert.match(workflowMatch[0], /choice === "\?" \|\| choice === "help" \|\| choice === "docs"/);
   assert.doesNotMatch(workflowMatch[0], /Probe the saved SID/);
   assert.doesNotMatch(workflowMatch[0], /Install the latest release/);
   assert.doesNotMatch(workflowMatch[0], /Return to the workspace menu/);
-  assert.match(workflowMatch[0], /choose 1\.1, 1\.2, 1\.3, 3\.1, 3\.2, 3\.3, 5\.1, 5\.2, 5\.4, 6\.1, 6\.2, c to check SID, u to update, B to go back/);
+  assert.match(workflowMatch[0], /choose \$\{projectMode \? "1\.1, 1\.2, 1\.3, 3\.3, 5\.1, 5\.2, 5\.4, 6\.1, 6\.2" : "1\.1, 1\.2, 1\.3, 3\.1, 3\.2, 3\.3, 5\.1, 5\.2, 5\.4, 6\.1, 6\.2"\}, \? to open command docs, c to check SID, u to update, B to go back/);
   assert.doesNotMatch(workflowMatch[0], /choose .*5\.3/);
   assert.doesNotMatch(workflowMatch[0], /Download WOS IDs/);
+  assert.match(argsMatch[0], /choice === "\?"/);
+  assert.match(argsMatch[0], /openUrl\(COMMAND_DOC_URL\)/);
   assert.match(argsMatch[0], /choice === "c"/);
   assert.match(argsMatch[0], /return \["check", "--tasks-root", activeWorkspace\.tasksRoot\]/);
   assert.match(argsMatch[0], /choice === "u"/);
   assert.match(argsMatch[0], /return \["update"\]/);
   assert.match(argsMatch[0], /choice === "1\.3"/);
-  assert.match(argsMatch[0], /return \["batch-run", "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot, "--allow-large-export"\]/);
+  assert.match(argsMatch[0], /activeWorkspace\.projectMode/);
+  assert.match(argsMatch[0], /\["batch-run", "--allow-large-export"\]/);
+  assert.match(argsMatch[0], /\["batch-run", "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot, "--allow-large-export"\]/);
   assert.match(argsMatch[0], /choice === "3\.1"/);
   assert.match(argsMatch[0], /mode: "new"/);
   assert.match(argsMatch[0], /choice === "3\.2"/);
@@ -730,6 +1881,29 @@ test("interactive workflow menu uses folded command groups", () => {
   assert.doesNotMatch(argsMatch[0], /askParseOptions/);
   assert.doesNotMatch(argsMatch[0], /Change parse options/);
   assert.match(argsMatch[0], /choice === "1\.2" \? "bib"/);
+});
+
+test("interactive command docs opener uses the platform browser command", () => {
+  const calls = [];
+  const fakeSpawn = (command, args, options) => {
+    calls.push({ command, args, options });
+    return { unref: () => calls.push({ unref: true }) };
+  };
+
+  assert.deepEqual(openUrl("https://example.test/docs", { platform: "darwin", spawn: fakeSpawn }), {
+    command: "open",
+    args: ["https://example.test/docs"],
+  });
+  assert.deepEqual(openUrl("https://example.test/docs", { platform: "linux", spawn: fakeSpawn }), {
+    command: "xdg-open",
+    args: ["https://example.test/docs"],
+  });
+  assert.deepEqual(openUrl("https://example.test/docs", { platform: "win32", spawn: fakeSpawn }), {
+    command: "cmd",
+    args: ["/c", "start", "", "https://example.test/docs"],
+  });
+  assert.equal(calls.filter((call) => call.unref).length, 3);
+  assert.ok(calls.every((call) => call.unref || call.options.detached));
 });
 
 test("interactive saved source only accepts WOS-like values", () => {
@@ -1339,9 +2513,32 @@ test("browser-side wos.js streams TXT batch text through awaited progress", () =
   assert.match(source, /const emitProgress = async/);
   assert.match(source, /await onProgress\(payload\)/);
   assert.match(source, /await emitProgress\(\{\s*phase: 'batch'/);
+  assert.match(source, /isRefQuery: options\.isRefQuery \? "true" : "false"/);
+  assert.match(source, /isRefQuery = false/);
+  assert.match(source, /fetchBatchFn\(uuid, current, batchEnd, fieldList, \{ sortBy, isRefQuery \}\)/);
   const txtMethod = source.match(/async fetchTxtBatches\(options = \{\}\) \{[\s\S]*?\n    \}/);
   assert.ok(txtMethod, "fetchTxtBatches should be present");
   assert.match(txtMethod[0], /return \{ resultLength: batches\.length, text \};/);
+});
+
+test("browser-side wos.js logs export failure response bodies", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  const txtFetch = source.match(/async #fetchWosdataTxtByRange\(uuid = ''[\s\S]*?\n    \}/);
+  assert.ok(txtFetch, "TXT export fetch helper should be present");
+  assert.match(txtFetch[0], /const errorText = await response\.text\(\)\.catch\(\(\) => ''\);/);
+  assert.match(txtFetch[0], /String\(errorText\)\.slice\(0, 500\)/);
+  const bibFetch = source.match(/async #fetchBibtexByRange\(uuid = ''[\s\S]*?\n    \}/);
+  assert.ok(bibFetch, "BibTeX export fetch helper should be present");
+  assert.match(bibFetch[0], /const errorText = await response\.text\(\)\.catch\(\(\) => ''\);/);
+});
+
+test("browser-side wos.js preserves requested sort while refreshing export page info", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "import", "wos.js"), "utf8");
+  assert.match(source, /async #runBatchExportByUuid\(uuid,/);
+  assert.match(source, /#fetchPageInfoByUuid\(uuid, sortBy, 1, 'export'\)/);
+  const currentInfo = source.match(/async fetchCurrentPageInfo\(note = '', expectedUuid = ''\)[\s\S]*?\n    \}/);
+  assert.ok(currentInfo, "current page info helper should accept expected UUID");
+  assert.match(currentInfo[0], /const uuidReady = expectedUuid \? res\.uuid === expectedUuid : Boolean\(res\.uuid\)/);
 });
 
 test("releasing a WOS context blanks and closes every page before the context", async () => {
@@ -1434,16 +2631,23 @@ test("BibTeX export path uses injected wos.js export API while reading summary c
   assert.match(match[0], /totalBatches/);
   assert.match(match[0], /reportDownloadPlan/);
   assert.match(match[0], /batchSize = DEFAULT_BATCH_SIZE/);
+  assert.match(match[0], /exportRefQuery = initialExportRefQuery\(args, context\)/);
   assert.match(match[0], /exportBibBatchesViaWosJs/);
+  assert.match(match[0], /isRefQuery: exportRefQuery/);
+  assert.match(match[0], /exportIsRefQuery: exportRefQuery/);
   assert.doesNotMatch(source, /api\/wosnx\/indic\/export\/saveToFile/);
   assert.doesNotMatch(source, /action:\s*["']saveTo(?:Bibtex|FieldTagged)["']/);
 });
 
-test("generates alphanumeric TID timestamp task IDs", () => {
+test("uses project-scoped default task IDs and preserves timestamp IDs in legacy mode", () => {
   const taskId = cli.makeTaskId(new Date(2026, 5, 9, 20, 30, 40));
   assert.equal(taskId, "TID20260609203040");
-  assert.match(cli.parseArgs(["node", "cli", "run", "--uuid", "abc"]).taskId, /^TID\d{14}$/);
-  assert.match(cli.parseArgs(["node", "cli", "import", "--csv", "wosids.csv"]).taskId, /^TID\d{14}$/);
+  assert.equal(cli.parseArgs(["node", "cli", "run", "--uuid", "abc"]).taskId, "iiaide-wos-cli");
+  assert.equal(cli.parseArgs(["node", "cli", "import", "--csv", "wosids.csv"]).taskId, "iiaide-wos-cli");
+  assert.match(
+    cli.parseArgs(["node", "cli", "run", "--uuid", "abc", "--tasks-root", temporaryDirectory()]).taskId,
+    /^TID\d{14}$/
+  );
 });
 
 test("initializes and reports a cwd-scoped workspace", () => {
@@ -1475,7 +2679,30 @@ test("interactive workspace ensures a current task exists", () => {
   assert.equal(status.currentTask, task.taskId);
   assert.equal(status.latestTask, task.taskId);
   assert.equal(fs.readFileSync(path.join(tasksRoot, "latest"), "utf8").trim(), task.taskId);
-  assert.equal(fs.existsSync(path.join(taskDir, "manifest.json")), true);
+  assert.equal(fs.existsSync(path.join(taskDir, "project.json")), true);
+});
+
+test("interactive workspace reuses discovered task directories before creating a task", () => {
+  const root = temporaryDirectory();
+  const tasksRoot = path.join(root, "tasks");
+  const existingDir = path.join(tasksRoot, "existing-task");
+  fs.mkdirSync(existingDir, { recursive: true });
+  writeProjectMarker(existingDir);
+  writeJson(path.join(existingDir, "state.json"), {
+    status: "query-completed",
+    uuid: "6649ab6a-71b4-d6ae-4c3d-f57c3ea762b2-a541d4a9e6",
+    expectedCount: 12,
+  });
+  const args = cli.parseArgs(["node", "cli", "workspace", "--tasks-root", tasksRoot]);
+
+  const task = cli.ensureCurrentTask(args);
+  const status = cli.workspaceStatus(args);
+
+  assert.equal(task.taskId, "existing-task");
+  assert.equal(status.taskCount, 1);
+  assert.equal(status.currentTask, "existing-task");
+  assert.equal(fs.readdirSync(tasksRoot).filter((name) => /^TID/.test(name)).length, 0);
+  assert.equal(readJson(path.join(tasksRoot, "index.json")).tasks[0].expectedCount, 12);
 });
 
 test("current task can switch to an existing or new task id", () => {
@@ -1601,6 +2828,34 @@ test("interactive SID recovery can wait for the saved SID pool", async () => {
     assert.equal(waitCalls, 1);
     assert.match(output, /Wait for SID pool/);
     assert.match(output, /loaded from SID pool/);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+});
+
+test("interactive SID recovery accepts a pasted SID at the method prompt", async () => {
+  const originalWrite = process.stdout.write;
+  let output = "";
+  process.stdout.write = (chunk, ...args) => {
+    output += String(chunk);
+    const callback = args.find((item) => typeof item === "function");
+    if (callback) callback();
+    return true;
+  };
+
+  try {
+    const sid = "TEST_SID_VALUE_1234567890";
+    assert.equal(isLikelySidInput(sid), true);
+    assert.equal(isLikelySidInput("manual"), false);
+    const received = await askSidFromBrowserOrManual(
+      () => ({ question: async () => sid }),
+      async () => assert.fail("browser login should not run"),
+      async () => assert.fail("manual SID prompt should not run"),
+      async () => assert.fail("SID pool wait should not run")
+    );
+
+    assert.equal(received, sid);
+    assert.match(output, /received manually/);
   } finally {
     process.stdout.write = originalWrite;
   }
@@ -2238,8 +3493,8 @@ test("writes JSON atomically without leftover temporary files", () => {
 test("filters raw batches by UUID and rejects overlaps", () => {
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
-  const firstRawDir = path.join(paths.rawRoot, "first", "full-record");
-  const otherRawDir = path.join(paths.rawRoot, "other", "full-record");
+  const firstRawDir = cli.rawBatchDir(paths, "first");
+  const otherRawDir = cli.rawBatchDir(paths, "other");
   fs.mkdirSync(firstRawDir, { recursive: true });
   fs.mkdirSync(otherRawDir, { recursive: true });
   fs.writeFileSync(path.join(firstRawDir, "first_1_2.txt"), "UT WOS:A\nUT WOS:B\n");
@@ -2254,7 +3509,7 @@ test("filters raw batches by UUID and rejects overlaps", () => {
 test("raw batch coverage supports resume from an explicit WOS record range", () => {
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
-  const rawDir = path.join(paths.rawRoot, "query", "full-record");
+  const rawDir = cli.rawBatchDir(paths, "query");
   fs.mkdirSync(rawDir, { recursive: true });
   fs.writeFileSync(path.join(rawDir, "query_400_600.txt"), "UT WOS:400\nUT WOS:401\nUT WOS:600\n");
 
@@ -2281,7 +3536,7 @@ test("raw batch coverage supports resume from an explicit WOS record range", () 
 test("raw batch plan identifies arbitrary missing TXT ranges", () => {
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
-  const rawDir = path.join(paths.rawRoot, "query", "full-record");
+  const rawDir = cli.rawBatchDir(paths, "query");
   fs.mkdirSync(rawDir, { recursive: true });
   fs.writeFileSync(path.join(rawDir, "query_1_200.txt"), "UT WOS:1\n");
   fs.writeFileSync(path.join(rawDir, "query_401_600.txt"), "UT WOS:401\n");
@@ -2396,7 +3651,7 @@ test("large TXT completion markers preserve sort windows and write per-directory
 test("BibTeX batch plan identifies arbitrary missing ranges", () => {
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
-  const bibDir = path.join(paths.rawRoot, "query", "bib");
+  const bibDir = cli.bibBatchDir(paths, "query");
   fs.mkdirSync(bibDir, { recursive: true });
   fs.writeFileSync(path.join(bibDir, "query_1_500.bib"), "@article{a}\n");
   fs.writeFileSync(path.join(bibDir, "query_1001_1500.bib"), "@article{b}\n");
@@ -2436,7 +3691,7 @@ test("writes and reads per-UUID TXT completion markers", () => {
 test("raw batch parsing handles large existing files without spreading rows", () => {
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
-  const rawDir = path.join(paths.rawRoot, "query", "full-record");
+  const rawDir = cli.rawBatchDir(paths, "query");
   fs.mkdirSync(rawDir, { recursive: true });
   const lines = Array.from({ length: 150000 }, (_, index) => `UT WOS:${index + 1}`);
   fs.writeFileSync(path.join(rawDir, "query_1_150000.txt"), `${lines.join("\n")}\n`);
@@ -2455,7 +3710,7 @@ test("raw batch parsing handles large existing files without spreading rows", ()
 test("raw batch start infers default TXT resume range", () => {
   const root = temporaryDirectory();
   const paths = cli.getRunPaths(root);
-  const rawDir = path.join(paths.rawRoot, "query", "full-record");
+  const rawDir = cli.rawBatchDir(paths, "query");
   fs.mkdirSync(rawDir, { recursive: true });
   fs.writeFileSync(path.join(rawDir, "query_400_600.txt"), "UT WOS:400\n");
 
@@ -2476,7 +3731,7 @@ test("TXT export persists streamed batches before final export completion", () =
   assert.match(exportMethod[0], /const \{ text, \.\.\.progressEvent \} = event \|\| \{\};/);
   assert.match(exportMethod[0], /progressEvent\.phase === "batch" && typeof text === "string"/);
   assert.match(exportMethod[0], /persistTxtBatch\(\{\s*uuid: progressEvent\.uuid \|\| info\.uuid,/);
-  assert.match(exportMethod[0], /appendProgress\(paths, \{ phase: "wosjs-export-progress", sidSwitchCount, sortBy: window\.sortBy, \.\.\.progressEvent \}\)/);
+  assert.match(exportMethod[0], /appendProgress\(paths, \{ phase: "wosjs-export-progress", sidSwitchCount, sortBy: window\.sortBy, isRefQuery: exportRefQuery, \.\.\.progressEvent \}\)/);
 });
 
 test("batch UUID TXT runs per-UUID inspect and downloads quietly", () => {
@@ -2613,7 +3868,7 @@ test("artifact commands print final artifact paths instead of JSON", async () =>
     console.log = originalLog;
   }
 
-  assert.equal(output.trim(), path.join(tasksRoot, "imported", "raw", "imported", "full-record", "imported_wosid.csv"));
+  assert.equal(output.trim(), path.join(tasksRoot, "imported", "resultsets", "imported", "imported_wosid.csv"));
   assert.doesNotMatch(output, /"ok"|"wosidsCsv"/);
 });
 
@@ -2624,8 +3879,8 @@ test("clear removes a managed task directory and refreshes latest", async () => 
   const nextDir = path.join(tasksRoot, "next-task");
   fs.mkdirSync(oldDir, { recursive: true });
   fs.mkdirSync(nextDir, { recursive: true });
-  writeJson(path.join(oldDir, "manifest.json"), { command: "iiaide-wos" });
-  writeJson(path.join(nextDir, "manifest.json"), { command: "iiaide-wos" });
+  writeProjectMarker(oldDir);
+  writeProjectMarker(nextDir);
   writeJson(path.join(tasksRoot, "index.json"), {
     version: 1,
     tasks: [
@@ -2652,7 +3907,7 @@ test("clear removes latest when the final managed task is cleared", () => {
   const tasksRoot = temporaryDirectory();
   const taskDir = path.join(tasksRoot, "only-task");
   fs.mkdirSync(taskDir, { recursive: true });
-  writeJson(path.join(taskDir, "manifest.json"), { command: "iiaide-wos" });
+  writeProjectMarker(taskDir);
   writeJson(path.join(tasksRoot, "index.json"), {
     version: 1,
     tasks: [{ taskId: "only-task", taskDir: "only-task" }],
@@ -2671,7 +3926,7 @@ test("clear requires typing the resolved task id before removal", async () => {
   const tasksRoot = temporaryDirectory();
   const taskDir = path.join(tasksRoot, "confirm-task");
   fs.mkdirSync(taskDir, { recursive: true });
-  writeJson(path.join(taskDir, "manifest.json"), { command: "iiaide-wos" });
+  writeProjectMarker(taskDir);
   writeJson(path.join(tasksRoot, "index.json"), {
     version: 1,
     tasks: [{ taskId: "confirm-task", taskDir: "confirm-task" }],
@@ -2718,13 +3973,13 @@ test("validate accepts BibTeX batch tasks", () => {
   const tasksRoot = path.join(root, "tasks");
   const taskDir = path.join(tasksRoot, "bib-task");
   const paths = cli.withRawSource(cli.getRunPaths(taskDir), "query");
-  const queryBibDir = path.join(paths.rawRoot, "query", "bib");
+  const queryBibDir = cli.bibBatchDir(paths, "query");
   fs.mkdirSync(queryBibDir, { recursive: true });
   writeJson(path.join(tasksRoot, "index.json"), {
     version: 1,
     tasks: [{ taskId: "bib-task", taskDir: "bib-task", uuid: "query" }],
   });
-  writeJson(paths.manifest, { command: "iiaide-wos", operation: "bib" });
+  writeProjectMarker(paths.taskDir);
   writeJson(paths.summary, {
     method: "wos-js-export-fetchBibBatches",
     taskId: "bib-task",
@@ -2754,7 +4009,7 @@ test("force cleanup preserves unrelated files in a managed output directory", ()
   fs.writeFileSync(path.join(paths.rawDir, "batch.txt"), "data");
   fs.writeFileSync(path.join(root, "keep-me.txt"), "user data");
   writeJson(paths.summary, { ok: true });
-  writeJson(paths.manifest, { command: "iiaide-wos" });
+  writeProjectMarker(paths.taskDir);
 
   cli.cleanRunLayout(paths);
   assert.equal(fs.existsSync(paths.rawDir), false);
@@ -2783,7 +4038,7 @@ test("import manifests redact SID values", () => {
   ]);
 
   cli.importWosIds(args);
-  assert.equal(readJson(path.join(args.outDir, "manifest.json")).args.sid, "[redacted]");
+  assert.equal(readJson(path.join(firstRunDir(args.outDir), "command.json")).args.sid, "[redacted]");
 });
 
 test("force import clears stale URL and UUID task metadata", () => {
@@ -2804,7 +4059,7 @@ test("force import clears stale URL and UUID task metadata", () => {
   });
   const taskDir = path.join(tasksRoot, "replace-me");
   fs.mkdirSync(taskDir);
-  writeJson(path.join(taskDir, "manifest.json"), { command: "iiaide-wos" });
+  writeProjectMarker(taskDir);
   const args = cli.parseArgs([
     "node", "cli", "import", "--csv", csvPath, "--task", "replace-me",
     "--tasks-root", tasksRoot, "--force",
@@ -2829,12 +4084,13 @@ test("reuse-raw preserves expected count and stores a relative task path", async
   const tasksRoot = temporaryDirectory();
   const args = cli.parseArgs([
     "node", "cli", "run", "--uuid", "query", "--task", "reuse",
-    "--tasks-root", tasksRoot, "--reuse-raw", "--force",
+    "--tasks-root", tasksRoot, "--reuse-raw",
   ]);
   const paths = cli.getRunPaths(args.outDir);
   const queryPaths = cli.withRawSource(paths, "query");
-  const queryRawDir = path.join(paths.rawRoot, "query", "full-record");
+  const queryRawDir = cli.rawBatchDir(paths, "query");
   fs.mkdirSync(queryRawDir, { recursive: true });
+  writeProjectMarker(paths.taskDir);
   writeJson(paths.summary, { expectedCount: 2, rowText: "2 results", summaryHref: args.url });
   fs.writeFileSync(path.join(queryRawDir, "query_1_2.txt"), "UT WOS:A\nUT WOS:B\n");
 
@@ -2845,7 +4101,7 @@ test("reuse-raw preserves expected count and stores a relative task path", async
   assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "wosids_detailed.csv")), false);
   assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "wosids.json")), false);
   assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "full_records.txt")), false);
-  assert.equal(fs.existsSync(path.join(queryPaths.wosIdsDir, "query_wosid.csv")), false);
+  assert.equal(Boolean(result.files.wosidsCsv), false);
   assert.equal(cli.readTaskIndex(tasksRoot).tasks[0].taskDir, "reuse");
 });
 
@@ -2858,12 +4114,12 @@ test("raw-only reuse requires a known WOS record count for a different UUID", as
   const paths = cli.getRunPaths(args.outDir);
   const oldPaths = cli.withRawSource(paths, "old-query");
   const newPaths = cli.withRawSource(paths, "new-query");
-  const oldRawDir = path.join(paths.rawRoot, "old-query", "full-record");
-  const newRawDir = path.join(paths.rawRoot, "new-query", "full-record");
+  const oldRawDir = cli.rawBatchDir(paths, "old-query");
+  const newRawDir = cli.rawBatchDir(paths, "new-query");
   fs.mkdirSync(oldRawDir, { recursive: true });
   fs.mkdirSync(newRawDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
-  writeJson(paths.manifest, { command: "iiaide-wos" });
+  writeProjectMarker(paths.taskDir);
   writeJson(paths.summary, {
     ok: true,
     method: "wos-js-export-fetchTxtBatches",
@@ -2894,10 +4150,10 @@ test("missing WOS ID export is rebuilt from existing raw batches", async () => {
   ]);
   const paths = cli.getRunPaths(args.outDir);
   const queryPaths = cli.withRawSource(paths, "query");
-  const queryRawDir = path.join(paths.rawRoot, "query", "full-record");
+  const queryRawDir = cli.rawBatchDir(paths, "query");
   fs.mkdirSync(queryRawDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
-  writeJson(paths.manifest, { command: "iiaide-wos" });
+  writeProjectMarker(paths.taskDir);
   writeJson(paths.summary, {
     ok: true,
     method: "wos-js-export-fetchTxtBatches",
@@ -2923,10 +4179,10 @@ test("completed WOS ID task is reused without refetching", async () => {
     "--tasks-root", tasksRoot,
   ]);
   const paths = cli.withRawSource(cli.getRunPaths(args.outDir), "query");
-  fs.mkdirSync(paths.dataDir, { recursive: true });
+  fs.mkdirSync(paths.rawDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
-  writeJson(paths.manifest, { command: "iiaide-wos" });
-  fs.writeFileSync(path.join(paths.dataDir, "query_1_1.txt"), "UT WOS:A\n");
+  writeProjectMarker(paths.taskDir);
+  fs.writeFileSync(path.join(paths.rawDir, "query_1_1.txt"), "UT WOS:A\n");
   writeJson(paths.summary, {
     ok: true,
     method: "wos-js-export-fetchTxtBatches",
@@ -2948,7 +4204,7 @@ test("completed WOS ID task is reused without refetching", async () => {
     console.error = originalError;
   }
 
-  assert.equal(result.files.rawDir, paths.dataDir);
+  assert.equal(result.files.rawDir, paths.rawDir);
   assert.equal(result.uuid, "query");
   assert.deepEqual(errors, ["WOS raw TXT batches already exist; skipping download."]);
 });
@@ -2960,10 +4216,10 @@ test("completed WOS ID command returns before SID preparation", async () => {
     "--tasks-root", tasksRoot,
   ]);
   const paths = cli.withRawSource(cli.getRunPaths(args.outDir), "query");
-  fs.mkdirSync(paths.dataDir, { recursive: true });
+  fs.mkdirSync(paths.rawDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
-  writeJson(paths.manifest, { command: "iiaide-wos" });
-  fs.writeFileSync(path.join(paths.dataDir, "query_1_1.txt"), "UT WOS:A\n");
+  writeProjectMarker(paths.taskDir);
+  fs.writeFileSync(path.join(paths.rawDir, "query_1_1.txt"), "UT WOS:A\n");
   writeJson(paths.summary, {
     ok: true,
     method: "wos-js-export-fetchTxtBatches",
@@ -2991,7 +4247,7 @@ test("completed WOS ID command returns before SID preparation", async () => {
     console.error = originalError;
   }
 
-  assert.equal(output.trim(), paths.dataDir);
+  assert.equal(output.trim(), paths.rawDir);
   assert.deepEqual(errors, ["WOS raw TXT batches already exist; skipping download."]);
 });
 
@@ -3004,7 +4260,7 @@ test("completed BibTeX task is reused without refetching", async () => {
   const paths = cli.withRawSource(cli.getRunPaths(args.outDir), "query");
   fs.mkdirSync(paths.bibDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
-  writeJson(paths.manifest, { command: "iiaide-wos", operation: "bib" });
+  writeProjectMarker(paths.taskDir);
   fs.writeFileSync(path.join(paths.bibDir, "query_1_1.bib"), "@article{demo}\n");
   writeJson(paths.summary, {
     ok: true,
@@ -3039,10 +4295,10 @@ test("missing combined BibTeX export is rebuilt from existing raw batches", asyn
   ]);
   const paths = cli.getRunPaths(args.outDir);
   const queryPaths = cli.withRawSource(paths, "query");
-  const queryBibDir = path.join(paths.rawRoot, "query", "bib");
+  const queryBibDir = cli.bibBatchDir(paths, "query");
   fs.mkdirSync(queryBibDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
-  writeJson(paths.manifest, { command: "iiaide-wos", operation: "bib" });
+  writeProjectMarker(paths.taskDir);
   writeJson(paths.summary, {
     ok: true,
     method: "wos-js-export-fetchBibBatches",
@@ -3068,7 +4324,7 @@ test("completed BibTeX command returns before SID preparation", async () => {
   const paths = cli.withRawSource(cli.getRunPaths(args.outDir), "query");
   fs.mkdirSync(paths.bibDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
-  writeJson(paths.manifest, { command: "iiaide-wos", operation: "bib" });
+  writeProjectMarker(paths.taskDir);
   fs.writeFileSync(path.join(paths.bibDir, "query_1_1.bib"), "@article{demo}\n");
   writeJson(paths.summary, {
     ok: true,
@@ -3108,10 +4364,10 @@ test("managed current task placeholder can be reused without force", async () =>
   ]);
   const paths = cli.getRunPaths(args.outDir);
   const queryPaths = cli.withRawSource(paths, "query");
-  const queryRawDir = path.join(paths.rawRoot, "query", "full-record");
+  const queryRawDir = cli.rawBatchDir(paths, "query");
   fs.mkdirSync(queryRawDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
-  writeJson(paths.manifest, { command: "iiaide-wos", operation: "current-task" });
+  writeProjectMarker(paths.taskDir);
   writeJson(paths.summary, { expectedCount: 1, rowText: "1 result", summaryHref: args.url });
   fs.writeFileSync(path.join(queryRawDir, "query_1_1.txt"), "UT WOS:A\n");
 
@@ -3129,10 +4385,10 @@ test("reuse-raw refuses partial batches without marking complete", async () => {
   ]);
   const paths = cli.getRunPaths(args.outDir);
   const queryPaths = cli.withRawSource(paths, "query");
-  const queryRawDir = path.join(paths.rawRoot, "query", "full-record");
+  const queryRawDir = cli.rawBatchDir(paths, "query");
   fs.mkdirSync(queryRawDir, { recursive: true });
   fs.mkdirSync(args.outDir, { recursive: true });
-  writeJson(paths.manifest, { command: "iiaide-wos" });
+  writeProjectMarker(paths.taskDir);
   writeJson(paths.summary, { expectedCount: 3, rowText: "3 results", summaryHref: args.url });
   fs.writeFileSync(path.join(queryRawDir, "query_1_1.txt"), "UT WOS:A\n");
 
@@ -3159,9 +4415,11 @@ test("BibTeX export refuses incomplete downloaded record counts", () => {
 test("failed runs are recorded as failed", () => {
   const tasksRoot = temporaryDirectory();
   const taskDir = path.join(tasksRoot, "broken");
-  const rawDir = path.join(taskDir, "raw", "query", "full-record");
+  const paths = cli.getRunPaths(taskDir);
+  const rawDir = cli.rawBatchDir(paths, "query");
   fs.mkdirSync(rawDir, { recursive: true });
-  writeJson(path.join(taskDir, "summary.json"), { expectedCount: 3 });
+  writeProjectMarker(taskDir);
+  writeJson(paths.summary, { expectedCount: 3 });
   fs.writeFileSync(path.join(rawDir, "query_1_2.txt"), "UT WOS:A\n");
   fs.writeFileSync(path.join(rawDir, "query_2_3.txt"), "UT WOS:B\n");
   const result = spawnSync(process.execPath, [
@@ -3206,12 +4464,14 @@ test("runParsedCommand handles user quit without returning to command work", () 
 
 test("interactive downloads do not force-clear the current task by default", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
-  const match = source.match(/const result = \[command[\s\S]*?return result;/);
+  const match = source.match(/const result = activeWorkspace\.projectMode[\s\S]*?return result;/);
   const branch = source.match(/let selection = currentTaskSelection[\s\S]*?return result;/);
   assert.ok(match, "interactive command result source should be present");
   assert.ok(branch, "interactive download branch should be present");
   assert.doesNotMatch(match[0], /"--force"/);
   assert.match(match[0], /"--reuse-raw"/);
+  assert.match(match[0], /\[command, sourceFlag, source\]/);
+  assert.match(match[0], /\[command, sourceFlag, source, "--task", taskId, "--tasks-root", activeWorkspace\.tasksRoot\]/);
   assert.match(branch[0], /currentTaskSelection/);
   assert.doesNotMatch(branch[0], /askTaskSelection/);
 });
@@ -3252,7 +4512,7 @@ test("interactive workflow does not print saved SID noise", () => {
 
 test("interactive startup does not force SID setup before workflow selection", () => {
   const interactiveSource = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "interactive.js"), "utf8");
-  const startupBranch = interactiveSource.match(/const generatedTaskId = helpers\.makeTaskId[\s\S]*?const choice = await askWorkflow\(rl\)/);
+  const startupBranch = interactiveSource.match(/const generatedTaskId = helpers\.makeTaskId[\s\S]*?const choice = await askWorkflow\(rl, activeWorkspace\)/);
   assert.ok(startupBranch, "interactive startup branch should be present");
   assert.doesNotMatch(startupBranch[0], /askSidFromBrowserOrManual/);
   assert.doesNotMatch(startupBranch[0], /helpers\.saveSid/);

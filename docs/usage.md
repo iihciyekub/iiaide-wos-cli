@@ -1,162 +1,243 @@
 # Usage And Data Model
 
-This CLI manages Web of Science export work as resumable tasks. The current
-download deliverables are raw TXT full-record batches and raw BibTeX batches.
+## Default Mode
 
-## Task Lifecycle
-
-A task represents one WOS export job:
+Run the CLI inside a project directory. The CLI creates and reuses one managed
+store at:
 
 ```text
-input -> UUID/source resolution -> raw WOS export batches -> validated task package
+./.iiaide-wos-cli/
 ```
 
-Use a stable task id when a job may be resumed or shared:
-
-```bash
-iiaide-wos run --uuid "<uuid>" --task "demo-search"
-iiaide-wos bib --uuid "<uuid>" --task "demo-bib"
-iiaide-wos batch-run --task "batch-demo"
-iiaide-wos import --csv "./input/wosids.csv" --task "demo-csv"
-```
-
-The default task root is `./tasks`. Override it with `--tasks-root <dir>`.
+That directory is the long-lived project state for searches, exports, audit
+logs, browser profile reuse, and SQLite-backed review data.
 
 ## Artifact Layout
 
 ```text
-tasks/<task-id>/
-  raw/<uuid>/full-record/       # <uuid>_<start>_<end>.txt raw WOS export batches
-  raw/<uuid>/full-record/author-ascending/   # large UUID A-Z window batches
-  raw/<uuid>/full-record/author-descending/  # large UUID Z-A window batches
-  raw/<uuid>/bib/               # <uuid>_<start>_<end>.bib raw BibTeX batches
-  logs/progress.jsonl
-  manifest.json
-  summary.json
+.iiaide-wos-cli/
+  project.json
+  state.json
+  config.json
+  index.json
+  latest
+  .browser-profile/
+  audit/
+    activity.jsonl
+    searches.jsonl
+    resultsets.jsonl
+    artifacts.jsonl
+  runs/
+    RUN<timestamp>-<operation>/
+      command.json
+      runtime.jsonl
+      summary.json
+  resultsets/
+    <uuid>/
+      <uuid>_wosid.csv
+      raw/full-record/<uuid>_<start>_<end>.txt
+      raw/full-record/author-ascending/
+      raw/full-record/author-descending/
+      raw/bib/<uuid>_<start>_<end>.bib
+      exports/bib/<uuid>.bib
+  record-relations/
+  wosData.sqlite
 ```
 
-TXT and BibTeX batches are kept as task artifacts. The CLI no longer parses
-full-record TXT or page data into SQLite, and it no longer creates or manages a
-WOS data SQLite database.
-
-## Query And Record UUID Workflow
-
-Use Query/Record commands when the first step is to make or discover a WOS
-result-set UUID. They use the injected `window.wos` browser API, update task
-metadata, and print the resolved UUID. They do not download raw TXT or BibTeX
-batches.
-
-```bash
-iiaide-wos query build --expr 'PY=(2026)' --task "query-2026"
-iiaide-wos query batch --expr-file "./queries.txt" --task "query-batch" --jsonl
-iiaide-wos query parse --text "2026 AI safety papers" --task "query-ai"
-iiaide-wos query ids --wosid "WOS:000000000000001" --doi "10.1000/example" --task "query-ids"
-iiaide-wos record relations --wosid "WOS:000000000000001" --type references --task "record-refs"
-iiaide-wos record shared --wosid "WOS:000000000000001" --with "WOS:000000000000002" --task "record-shared"
-```
-
-Use `query batch --jsonl` for repeated advanced-search queries. The file uses
-one query per line, ignores blank/comment lines, and runs all items through one
-prepared WOS session.
-
-Default output is the UUID only. `--json` prints:
-
-```json
-{
-  "ok": true,
-  "taskId": "query-2026",
-  "operation": "query build",
-  "uuid": "<uuid>",
-  "count": 123,
-  "rowText": "PY=(2026)",
-  "source": { "kind": "expr" }
-}
-```
-
-After resolving the UUID, use `run` or `bib` for raw exports:
-
-## TXT / WOSID Workflow
-
-```bash
-iiaide-wos run --url "https://www.webofscience.com/wos/woscc/summary/<uuid>/..."
-```
-
-or:
-
-```bash
-iiaide-wos run --uuid "<uuid>" --task "demo-search"
-```
-
-`run` downloads raw full-record TXT batches through the injected browser-side
-`wos.js` export API. The task is complete when the planned raw `.txt` batches
-cover the selected WOS range. Normal reruns of the same task skip existing raw
-TXT batches and request only missing ranges.
-
-Useful range options:
+## Workflow Summary
 
 ```text
---from-index <n>   Start from a 1-based WOS record index
---limit <n>        Process only n WOS records
---batch-size <n>   WOS export API batch size, default 500, max 500
---reuse-raw        Validate existing raw batches before contacting WOS
+query/record -> uuid -> raw export or sqlite ingest -> local review / downstream use
 ```
 
-## CSV Import Workflow
+## Query And Record Workflows
 
-Use `import` when a downstream workflow already has a WOSID CSV:
+UUID discovery:
 
 ```bash
-iiaide-wos import --csv "./input/wosids.csv" --task "demo-csv"
+iiaide-wos query build --expr 'PY=(2026)'
+iiaide-wos query batch --expr 'PY=(2025)' --expr 'PY=(2026)'
+iiaide-wos query batch --expr-file "./queries.txt" --jsonl
+iiaide-wos query parse --text "2026 AI safety papers"
+iiaide-wos query ids --csv "./input/ids.csv"
+iiaide-wos record relations --wosid "WOS:000000000000001" --type references
+iiaide-wos record collect --wosid "WOS:000000000000001" --json
+iiaide-wos record shared --wosid "WOS:000000000000001" --with "WOS:000000000000002"
 ```
 
-The CSV should contain a `wosid` or `UT` column. If no header is present, the
-first column is treated as the WOSID column. The imported deliverable is written
-to `raw/<task-id>/full-record/<task-id>_wosid.csv`. This command does not call
-WOS, create a result-set UUID, or download raw TXT/BibTeX batches. A CSV-backed
-raw export workflow should first build a WOS `UT=(...)` query from the CSV IDs,
-read that query's UUID and record count, then use the same batch checklist and
-resume path as URL/UUID exports.
+`query build` prints compact single-line JSON with `uuid`, `url`, `count`,
+`queryText`, and `cached`. The same successful task/query text is reused from
+SQLite by default; add `--force` when you want WOS queried again.
+`query batch` prints JSONL by default and reuses one WOS browser session for
+uncached expressions while serving cached expressions directly from SQLite.
+For `--expr-file`, use a plain text file with one WOS advanced-search
+expression per line; blank lines and `#` comment lines are ignored:
 
-## BibTeX Workflow
+```text
+# Two-dimensional materials project: compare recent yearly result sets
+TS=("two-dimensional materials") AND PY=(2025)
+TS=("two-dimensional materials") AND PY=(2026)
 
-```bash
-iiaide-wos bib --uuid "<uuid>" --task "demo-bib"
+# Atomic thickness theory slice
+TS=(("two-dimensional materials" OR graphene OR "transition metal dichalcogenide*") AND ("atomic thickness" OR monolayer) AND (theor* OR model* OR simulation*))
 ```
 
-`bib` downloads raw BibTeX batches under `raw/<uuid>/bib/`. The task is
-complete when the planned raw `.bib` batches cover the selected WOS range.
-Rerunning the same task skips existing raw `.bib` batches and downloads only
-missing ranges.
-
-## Task Management
+SQLite ingest:
 
 ```bash
-iiaide-wos list
+iiaide-wos query ingest --expr 'PY=(2026)' --description "2026 search"
+iiaide-wos record ingest --wosid "WOS:000000000000001" --type references
+```
+
+Rules:
+
+- `query ingest` uses `isRefQuery=false`
+- `record ingest` uses `isRefQuery=true`
+- normal query ingest uses `relevance` order
+- relation ingest treats citations/references/related UUIDs as front-end result
+  sets, not direct export result sets
+- confirmed zero-count relation results are stored and reused, so empty
+  citations/references/related lookups do not repeat unless `--force` is used
+- relation ingest opens the relation result set in `relevance` order, scrolls
+  and collects WOSIDs from at most the first 6 pages, then queries those WOSIDs
+  to fetch full records
+- normal query ingest stores at most the first 500 records; relation ingest
+  stores the WOSIDs found in the first 6 relation pages, capped at 500
+- relation UUID metadata is marked with `exportMode=front-scroll-wosid` and
+  `uuidDirectExport=false` in SQLite
+
+## SQLite Roles
+
+`wosData.sqlite` now stores two different layers:
+
+- audit metadata for command runs, query/result UUID observations, and recorded
+  artifact paths
+- structured WOS records and ordered result-set items written only by
+  `query ingest` and `record ingest`
+
+## TXT And BibTeX Export
+
+TXT:
+
+```bash
+iiaide-wos run --uuid "<uuid>"
+iiaide-wos run --url "https://www.webofscience.com/wos/woscc/summary/<uuid>/relevance/1"
+```
+
+BibTeX:
+
+```bash
+iiaide-wos bib --uuid "<uuid>"
+iiaide-wos bib --uuid "<relation-uuid>"
+```
+
+Useful options:
+
+```text
+--from-index <n>
+--limit <n>
+--batch-size <n>
+--ref-query
+--reuse-raw
+--allow-large-export
+```
+
+`run` and `bib` are file-download commands only. They do not parse TXT into
+structured records, but their summary/audit metadata is written to
+`wosData.sqlite`.
+Both commands prepare the WOS summary page before export. When the page context
+identifies a citations/references/related result set, the export automatically
+uses relation/ref-query mode unless `--ref-query` or `--no-ref-query` is passed.
+
+## CSV Import
+
+```bash
+iiaide-wos import --csv "./input/wosids.csv"
+```
+
+The imported deliverable is written under:
+
+```text
+.iiaide-wos-cli/resultsets/<project-id>/<project-id>_wosid.csv
+```
+
+## SQLite Lookup
+
+After ingest:
+
+```bash
+iiaide-wos db uuid --uuid "<uuid>" --json
+iiaide-wos db wosid --wosid "WOS:000000000000001" --json
+iiaide-wos db list --uuid "<uuid>" --json
+iiaide-wos db list --wosid "WOS:000000000000001" --type related --context --json
+iiaide-wos db context --wosid "WOS:000000000000001" --type self --json
+iiaide-wos db context --wosid "WOS:000000000000001" --type citations --json
+iiaide-wos db context --wosid "WOS:000000000000001" --type references --json
+iiaide-wos db context --wosid "WOS:000000000000001" --type related --json
+iiaide-wos db searches --limit 20 --json
+iiaide-wos db artifacts --limit 20 --json
+iiaide-wos db runs --limit 20 --json
+iiaide-wos db timeline --limit 50 --json
+iiaide-wos db audit-html
+iiaide-wos db audit-export
+```
+
+`db context`, `db searches`, `db artifacts`, `db runs`, and `db timeline` also
+support `--limit`.
+
+`db audit-html` starts a read-only local HTTP view for the current project and
+serves a dynamic HTML timeline backed by `wosData.sqlite`, plus a paged command
+manual in the same workspace. The live page includes an icon-only `Sync`
+control for reloading the latest SQLite audit data without restarting the
+server, while filter changes can still be submitted with Enter. Timeline cards
+expose UUID links to the WOS summary page, show the source `Run ID` as a compact
+pill, render matching query text as a labeled field/value row, and use compact
+local-time badges. The command manual uses a lightweight API-docs-style sidebar,
+includes scenario-based recipes for common project workflows, and shows command
+examples as code blocks with per-command icon copy buttons.
+
+SQLite audit timestamps are stored as UTC ISO strings for stable ordering and
+automation. The audit HTML pages and non-JSON audit lookup commands display
+those timestamps in the user's local time zone.
+
+`db audit-export` writes a static snapshot to:
+
+```text
+.iiaide-wos-cli/audit/reports/<timestamp>/audit-report.html
+.iiaide-wos-cli/audit/reports/<timestamp>/audit-report.json
+```
+
+## Project Inspection
+
+```bash
 iiaide-wos workspace
+iiaide-wos list
+iiaide-wos tasks
 iiaide-wos latest
-iiaide-wos show --latest
-iiaide-wos path --task "demo-search"
-iiaide-wos validate --task "demo-search"
-iiaide-wos clear --task "demo-search"
+iiaide-wos show
+iiaide-wos path
+iiaide-wos validate
+iiaide-wos clear
 ```
 
-Use `--force` only when intentionally replacing CLI-managed task outputs.
-`clear` removes a managed task directory and its workspace index entry after
-confirmation.
+In default mode these all target the current directory's single managed
+project. `clear` removes `./.iiaide-wos-cli/` after confirmation.
 
 ## Interactive Menu
 
-The interactive menu focuses on export, task, settings, and auth work:
+```bash
+iiaide-wos
+```
+
+Default menu groups:
 
 ```text
 1 Download literature
   1.1 UUID - TXT format
   1.2 UUID - BIB format
   1.3 Batch UUID CSV - TXT
-3 Task manager
-  3.1 New
-  3.2 Switch
-  3.3 Clear
+3 Project
+  3.3 Clear data
 5 Settings
   5.1 Playwright visible
   5.2 Add SIDs
@@ -164,78 +245,10 @@ The interactive menu focuses on export, task, settings, and auth work:
 6 Auth producer
   6.1 MUST login
   6.2 MUST monitor
-c Check SID
-u Update
-B Back
-q Exit
 ```
 
-Download workflows run in the current task marked with `*`. Pressing Enter at
-the source prompt uses the saved URL/UUID when one exists. If authentication is
-missing, the menu asks for the WOS URL/UUID first and only then enters SID
-setup. The lightweight startup SID probe treats both an off-domain redirect and
-`window.sessionData = undefined` in the WOS shell as fast invalid-SID signals.
-When the interactive menu keeps one WOS browser session alive and you start a
-download for a different UUID, the CLI rotates to the next saved SID
-automatically when more than one saved SID is available.
+## Legacy Mode
 
-The batch UUID TXT workflow searches the current working directory recursively
-for `uuid.csv` files, reads the whole CSV text, extracts UUID-shaped values by
-regex, and de-duplicates them before downloading. Each UUID writes raw TXT
-batches under `raw/<uuid>/full-record/` and a `<uuid>_complete.json` marker
-when that UUID's planned 500-record batch coverage is complete. UUIDs over
-100,000 records are skipped unless large export mode is allowed. Large UUID
-exports keep A-Z and Z-A windows under
-`raw/<uuid>/full-record/author-ascending/` and
-`raw/<uuid>/full-record/author-descending/`; each sort directory has an
-`_wos_export_window.json` marker. Future batch runs use the completion marker as
-a fast hint, but still validate the raw batch checklist for the recorded window
-plan before skipping a UUID; if files are missing, the UUID is resumed instead
-of being skipped.
-The two-sort large export can cover at most 200,000 records for a UUID.
-Before downloads start, the preflight line is labeled
-`Planning UUID downloads` and only tracks UUID planning progress. Batch UUID TXT
-download progress counts actual UUID download windows: a normal UUID
-contributes one batch, while a large UUID can contribute two batches when the
-actual WOS export plan needs both A-Z and Z-A windows. Completed UUIDs do not
-add download batches. The progress detail shows only UUID completion and
-remaining counts, such as `uuids 1/4 done, 3 left`. Per-UUID A-Z/Z-A windows
-are labeled as downloads, not UUID batches. During active downloads, the
-per-UUID 500-record TXT progress remains visible and includes the UUID
-remaining detail.
-
-CLI form:
-
-```bash
-iiaide-wos batch-run --task "batch-demo" --search-root "."
-```
-
-`--search-root` defaults to the current working directory.
-
-## Authentication And Browser Profile
-
-WOS operations use the workspace-scoped persistent Playwright profile at
-`<tasks-root>/.browser-profile`. Non-login work runs headless by default unless
-`--headed` or `--playwright-visible on` is set.
-
-SID initialization uses:
-
-```text
-https://www.webofscience.com/wos/?Init=Yes&SrcApp=CR&SID=<SID>
-```
-
-If a saved SID is invalid, interactive workflows offer manual SID input, waiting
-for the saved SID pool, or opening a visible WOS login browser.
-
-To keep the SID pool filled automatically, run the auth producer monitor in a
-separate terminal:
-
-```bash
-iiaide-wos auth monitor --provider must --min-sids 2 --interval-ms 3000
-```
-
-The monitor keeps running, logs in with the configured MUST account, writes fresh
-SIDs to `~/.iiaide-wos/config.json`, and refreshes when the saved pool count is
-at or below `--min-sids`. Use `iiaide-wos sid-pool` to inspect the current pool
-and `iiaide-wos settings --clear-dead-sids` when you only want to clear dead-SID
-history.
+Passing `--tasks-root` or `--out-dir` enables the old multi-task layout for
+special automation cases. The default product direction is the single-project
+store in the current directory.
